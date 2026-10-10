@@ -6,13 +6,14 @@ import hmac
 import ipaddress
 import os
 import secrets
+import sqlite3
 import sys
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,6 +47,10 @@ class SimulationFault(BaseModel):
     kind: str = Field(pattern="^(io|sensor|gauge|close|tpg)$")
     enabled: bool
     channel: int = Field(default=1, ge=1, le=6)
+
+
+class HistoryReset(BaseModel):
+    scope: Literal["simulation", "all"] = "simulation"
 
 
 def is_local(request: Request) -> bool:
@@ -376,6 +381,16 @@ async def get_history(
         parse_channels(channels), limit + 1,
     )
     return {"rows": fetched[:limit], "count": min(len(fetched), limit), "truncated": len(fetched) > limit}
+
+
+@app.post("/api/history/reset")
+async def reset_history(body: HistoryReset, request: Request, actor: str = Depends(require_operator)):
+    verify_origin(request)
+    try:
+        deleted = HISTORY.reset_history(body.scope, actor)
+    except sqlite3.Error as exc:
+        raise HTTPException(503, "历史重置失败，请检查存储状态") from exc
+    return {"ok": True, "scope": body.scope, "deleted": deleted}
 
 
 @app.get("/api/events", dependencies=[Depends(require_read_access)])

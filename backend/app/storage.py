@@ -213,6 +213,23 @@ class HistoryStore:
         if output.tell():
             yield output.getvalue()
 
+    def reset_history(self, scope: str, actor: str) -> int:
+        """Delete samples and audit the operation in one transaction; retain events."""
+        if scope not in ("simulation", "all"):
+            raise ValueError("历史重置范围无效")
+        with self._lock, self._db:
+            query = "DELETE FROM samples"
+            if scope == "simulation":
+                query += " WHERE mode = 'simulation'"
+            deleted = self._db.execute(query).rowcount
+            self._db.execute(
+                "INSERT INTO events(timestamp,type,severity,message,actor,details_json) VALUES(?,?,?,?,?,?)",
+                (datetime.now(timezone.utc).isoformat(), "history_reset", "warning",
+                 "重置模拟压力历史" if scope == "simulation" else "重置全部压力历史", actor,
+                 json.dumps({"scope": scope, "deleted": deleted})),
+            )
+        return deleted
+
     def purge_before(self, iso_timestamp: str) -> int:
         with self._lock:
             cur = self._db.execute("DELETE FROM samples WHERE timestamp < ?", (iso_timestamp,))

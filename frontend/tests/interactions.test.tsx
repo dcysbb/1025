@@ -12,6 +12,8 @@ const {createRoot}=await import('react-dom/client')
 
 let dom:JSDOM, root:Root, container:HTMLElement
 let offline=false
+let resetCalls:Array<{scope:string}>=[]
+let resetFailure=false
 const status={timestamp:new Date().toISOString(),mode:'simulation',interlock:'disarmed',interlock_label:'未启用',valve:'closed',valve_closed_sensor:true,tpg_connected:true,adam_connected:true,permit_ok:true,history_recording:true,channels:[]}
 const config={io_device:'dam0808d',dam_serial_port:'',dam_baudrate:9600,dam_unit_id:1,external_watchdog_confirmed:false,mode:'simulation',tpg_connection:'tcp',tpg_serial_port:'',tpg_baudrate:9600,tpg_host:'',tpg_port:8000,adam_host:'',adam_port:502,adam_unit_id:1,sample_interval_s:1,stale_timeout_s:1,valve_timeout_s:2,recovery_hold_s:5,history_retention_days:null,allow_lan:false,valve_closed_di:0,valve_open_di:null,valve_closed_active_high:true,valve_open_active_high:true,permit_ok_di:1,permit_ok_active_high:true,watchdog_ok_di:2,watchdog_ok_active_high:true,latch_ready_di:3,latch_ready_active_high:true,air_ok_di:null,air_ok_active_high:true,open_output:0,heartbeat_output:1,reset_output:2,fail_closed_confirmed:false,channels:Array.from({length:6},()=>({enabled:false,label:'',trip_pa:null,reset_pa:null}))}
 class Socket {
@@ -21,13 +23,18 @@ class Socket {
   close(){}
 }
 beforeEach(async()=>{
-  offline=false;Socket.instances=[]
+  offline=false;resetCalls=[];resetFailure=false;Socket.instances=[]
   dom=new JSDOM('<!doctype html><div id="root"></div>',{url:'http://localhost'})
   Object.assign(globalThis,{window:dom.window,document:dom.window.document,localStorage:dom.window.localStorage,location:dom.window.location,Event:dom.window.Event,WebSocket:Socket,IS_REACT_ACT_ENVIRONMENT:true})
   Object.defineProperty(globalThis,'navigator',{value:dom.window.navigator,configurable:true})
-  globalThis.fetch=async(url)=>{
+  globalThis.fetch=async(url,options)=>{
     if(offline)throw new Error('offline')
     const path=String(url)
+    if(path.endsWith('/history/reset')){
+      assert.equal(options?.method,'POST')
+      resetCalls.push(JSON.parse(String(options?.body)))
+      return new Response(JSON.stringify(resetFailure?{detail:'历史重置失败'}:{ok:true,deleted:6}),{status:resetFailure?503:200,headers:{'Content-Type':'application/json'}})
+    }
     const data=path.includes('/auth/status')?{configured:true,authenticated:true,local:true}:path.includes('/config')?{config}:path.includes('/events')?{events:[],has_more:false}:path.includes('/history')?{rows:[],count:0,truncated:false}:status
     return new Response(JSON.stringify(data),{headers:{'Content-Type':'application/json'}})
   }
@@ -119,4 +126,29 @@ test('large histories preserve spikes, troughs and invalid gaps',()=>{
   assert.ok(reduced.some(p=>p.channels[0].pressure_pa===1e-9))
   assert.ok(reduced.some(p=>!p.channels[0].valid))
   assert.deepEqual(domain(points,[4]),[-9,0])
+})
+
+test('history reset defaults to simulation and cancellation sends no request',async()=>{
+  await click(byText('历史数据'));await click(byText('重置历史'))
+  assert.ok(container.querySelector('[aria-labelledby="history-reset-title"]'))
+  const select=container.querySelector<HTMLSelectElement>('[aria-labelledby="history-reset-title"] select')!
+  assert.equal(select.value,'simulation')
+  await click(byText('取消'))
+  assert.equal(resetCalls.length,0)
+  await click(byText('重置历史'));await click(byText('确认重置'))
+  assert.deepEqual(resetCalls,[{scope:'simulation'}])
+  assert.equal(container.querySelector('[aria-labelledby="history-reset-title"]'),null)
+  assert.ok(container.textContent?.includes('已清除 6 条模拟记录'))
+  assert.ok(container.textContent?.includes('0 条'))
+})
+
+test('all history reset is an explicit choice and failure keeps the dialog open',async()=>{
+  resetFailure=true
+  await click(byText('历史数据'));await click(byText('重置历史'))
+  const select=container.querySelector<HTMLSelectElement>('[aria-labelledby="history-reset-title"] select')!
+  await act(async()=>{select.value='all';select.dispatchEvent(new dom.window.Event('change',{bubbles:true}))})
+  await click(byText('确认重置'))
+  assert.deepEqual(resetCalls,[{scope:'all'}])
+  assert.ok(container.querySelector('[aria-labelledby="history-reset-title"]'))
+  assert.ok(container.textContent?.includes('历史重置失败'))
 })
