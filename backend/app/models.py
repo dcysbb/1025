@@ -26,6 +26,14 @@ class AppConfig(BaseModel):
     mode: Literal["simulation", "real"] = "simulation"
     tpg_host: str = ""
     tpg_port: int = Field(default=8000, ge=1, le=65535)
+    tpg_connection: Literal["tcp", "usb"] = "tcp"
+    tpg_serial_port: str = ""
+    tpg_baudrate: Literal[9600, 19200, 38400, 57600, 115200] = 9600
+    io_device: Literal["dam0808d", "adam6050"] = "dam0808d"
+    dam_serial_port: str = ""
+    dam_baudrate: Literal[2400, 4800, 9600, 19200, 38400] = 9600
+    dam_unit_id: int = Field(default=1, ge=1, le=255)
+    external_watchdog_confirmed: bool = False
     adam_host: str = ""
     adam_port: int = Field(default=502, ge=1, le=65535)
     adam_unit_id: int = Field(default=1, ge=0, le=255)
@@ -52,9 +60,9 @@ class AppConfig(BaseModel):
     latch_ready_active_high: bool = True
     air_ok_di: Optional[int] = Field(default=None, ge=0, le=11)
     air_ok_active_high: bool = True
-    open_output: int = Field(default=0, ge=0, le=5)
-    heartbeat_output: int = Field(default=1, ge=0, le=5)
-    reset_output: int = Field(default=2, ge=0, le=5)
+    open_output: int = Field(default=0, ge=0, le=7)
+    heartbeat_output: int = Field(default=1, ge=0, le=7)
+    reset_output: int = Field(default=2, ge=0, le=7)
     # Set only after the exact installed solenoid, valve return behavior and
     # independent permissive circuit have been verified on the bench.
     fail_closed_confirmed: bool = False
@@ -71,6 +79,14 @@ class AppConfig(BaseModel):
         used = [item for item in inputs if item is not None]
         if len(used) != len(set(used)):
             raise ValueError("阀位、压力许可、看门狗与复位反馈必须使用不同输入")
+        if self.io_device == "dam0808d":
+            if any(item > 7 for item in used):
+                raise ValueError("DAM0808D 输入编号必须为 0 至 7")
+            if (self.tpg_connection == "usb" and self.dam_serial_port.strip()
+                and self.dam_serial_port.strip().casefold() == self.tpg_serial_port.strip().casefold()):
+                raise ValueError("DAM 与真空规必须使用不同串口")
+        elif any(item > 5 for item in (self.open_output, self.heartbeat_output, self.reset_output)):
+            raise ValueError("ADAM6050 输出编号必须为 0 至 5")
         outputs = [self.open_output, self.heartbeat_output, self.reset_output]
         if len(set(outputs)) != len(outputs):
             raise ValueError("开阀、心跳和复位必须使用不同输出")
@@ -118,6 +134,7 @@ class SystemStatus(BaseModel):
     permit_ok: bool = False
     fail_closed_confirmed: bool = False
     history_recording: bool = True
+    history_error: Optional[str] = None
     channels: list[SampleChannel] = Field(default_factory=list)
 
 

@@ -21,6 +21,8 @@ from pydantic import BaseModel, Field
 
 from .configuration import ConfigurationStore, data_directory
 from .engine import InterlockEngine, InterlockError
+from .drivers.tpg366 import TPG366Error
+from .drivers.adam6050 import ModbusError
 from .models import ActionRequest, AppConfig, ConfigPatch, InjectPressure, LoginRequest
 from .storage import HistoryStore
 
@@ -41,7 +43,7 @@ FRONTEND_DIST = (
 
 
 class SimulationFault(BaseModel):
-    kind: str = Field(pattern="^(io|sensor|gauge)$")
+    kind: str = Field(pattern="^(io|sensor|gauge|close|tpg)$")
     enabled: bool
     channel: int = Field(default=1, ge=1, le=6)
 
@@ -175,7 +177,7 @@ async def auth_setup(body: LoginRequest, request: Request, response: Response):
     CONFIG.set_password_hash(encode_password(body.password))
     token = secrets.token_urlsafe(32)
     set_session(response, token, request)
-    HISTORY.write_event("operator_setup", "warning", "本机首次设置操作员密码", "operator")
+    ENGINE._event("operator_setup", "warning", "本机首次设置操作员密码", "operator")
     return {"authenticated": True}
 
 
@@ -238,8 +240,18 @@ async def put_config(body: ConfigPatch, request: Request, actor: str = Depends(r
 async def connect_devices(request: Request, actor: str = Depends(require_operator)):
     verify_origin(request)
     result = await ENGINE.connect_devices()
-    HISTORY.write_event("device_connect", "info" if result["ok"] else "error", "手动连接设备", actor, result)
+    ENGINE._event("device_connect", "info" if result["ok"] else "error", "手动连接设备", actor, result)
     return result
+
+
+@app.post("/api/devices/connect-gauge")
+async def connect_gauge(request: Request, actor: str = Depends(require_operator)):
+    verify_origin(request)
+    result = await ENGINE.connect_gauge()
+    if not result["ok"]:
+        raise HTTPException(409, result.get("error", "真空规连接失败"))
+    ENGINE._event("gauge_connect", "info", "仅连接真空规", actor, result)
+    return ENGINE.snapshot()
 
 
 @app.post("/api/devices/sync-setpoints")
@@ -247,7 +259,7 @@ async def sync_setpoints(request: Request, actor: str = Depends(require_operator
     verify_origin(request)
     try:
         result = await ENGINE.sync_setpoints(actor)
-    except (InterlockError, ValueError) as exc:
+    except (InterlockError, ValueError, TPG366Error, ModbusError) as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"ok": True, "relays": result}
 
@@ -308,7 +320,7 @@ async def simulation_pressure(body: InjectPressure, request: Request, actor: str
         await ENGINE.inject_pressure(body.channel, body.pressure_pa)
     except InterlockError as exc:
         raise HTTPException(409, str(exc)) from exc
-    HISTORY.write_event("simulation_pressure", "warning", "模拟真空压力改变", actor, body.model_dump())
+    ENGINE._event("simulation_pressure", "warning", "模拟真空压力改变", actor, body.model_dump())
     return ENGINE.snapshot()
 
 
@@ -323,7 +335,11 @@ async def simulation_fault(body: SimulationFault, request: Request, actor: str =
         ENGINE._sim_gauge_status[body.channel - 1] = 3 if body.enabled else 0
     elif body.kind == "sensor":
         ENGINE._sim_sensor_conflict = body.enabled
-    HISTORY.write_event("simulation_fault", "warning", f"模拟故障：{body.kind}", actor, body.model_dump())
+    elif body.kind == "close":
+        ENGINE._sim_close_failure = body.enabled
+    elif body.kind == "tpg":
+        ENGINE._sim_tpg_fault = body.enabled
+    ENGINE._event("simulation_fault", "warning", f"模拟故障：{body.kind}", actor, body.model_dump())
     ENGINE._publish()
     return ENGINE.snapshot()
 
@@ -367,8 +383,25 @@ async def get_events(
     start: Optional[str] = None,
     end: Optional[str] = None,
     limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    kind: Optional[str] = Query(default=None, max_length=100),
+    severity: Optional[str] = Query(default=None, pattern="^(info|warning|error|critical)$"),
 ):
-    return {"events": HISTORY.list_events(start, end, limit)}
+    def normalized(value):
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError("missing timezone")
+            return parsed.astimezone(timezone.utc).isoformat()
+        except ValueError as exc:
+            raise HTTPException(422, "日志时间必须是带时区的 ISO-8601 格式") from exc
+    start, end = normalized(start), normalized(end)
+    if start and end and end <= start:
+        raise HTTPException(422, "日志结束时间必须晚于开始时间")
+    fetched = HISTORY.list_events(start, end, limit + 1, offset, kind, severity)
+    return {"events": fetched[:limit], "has_more": len(fetched) > limit}
 
 
 @app.get("/api/history/export.csv", dependencies=[Depends(require_read_access)])
@@ -451,7 +484,10 @@ def run() -> None:
     import uvicorn
 
     config = CONFIG.get_config()
-    options = {"host": "0.0.0.0" if config.allow_lan else "127.0.0.1", "port": 8770, "log_level": "info"}
+    port = int(os.environ.get("VACUUM_INTERLOCK_PORT", "8770"))
+    if not 1 <= port <= 65535:
+        raise ValueError("VACUUM_INTERLOCK_PORT must be between 1 and 65535")
+    options = {"host": "0.0.0.0" if config.allow_lan else "127.0.0.1", "port": port, "log_level": "info"}
     if config.allow_lan:
         cert, key = _local_tls_paths()
         options.update(ssl_certfile=cert, ssl_keyfile=key)

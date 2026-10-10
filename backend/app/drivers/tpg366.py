@@ -178,7 +178,8 @@ class TPG366Client:
             actual_assignment, low, high = int(fields[0]), float(fields[1]), float(fields[2])
             expected_low, expected_high = low_value, high_value
             tolerance = max(abs(high_value) * 1e-5, 1e-12)
-            if actual_assignment != assignment or abs(low - expected_low) > tolerance or abs(high - expected_high) > tolerance:
+            if (not math.isfinite(low) or not math.isfinite(high) or actual_assignment != assignment
+                    or abs(low - expected_low) > tolerance or abs(high - expected_high) > tolerance):
                 raise TPG366Error(f"TPG 366 继电器 {relay} 读回不匹配: {fields}")
             return {
                 "relay": relay,

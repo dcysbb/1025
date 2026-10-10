@@ -33,6 +33,10 @@ jobs:
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
+      - run: npm run lint
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
 
   windows-package:
     runs-on: windows-latest
@@ -56,6 +60,10 @@ jobs:
         shell: pwsh
         working-directory: backend
         run: python -m PyInstaller --clean --noconfirm --onedir --name VacuumInterlock --collect-all uvicorn --collect-all fastapi --collect-all cryptography --add-data "../frontend/dist;frontend/dist" run.py
+      - name: Package Windows service
+        shell: pwsh
+        working-directory: backend
+        run: python -m PyInstaller --clean --noconfirm --onedir --name VacuumInterlockService --collect-all uvicorn --collect-all fastapi --collect-all cryptography --hidden-import win32timezone --add-data "../frontend/dist;frontend/dist" windows_service.py
       - name: Smoke test packaged server
         shell: pwsh
         run: |

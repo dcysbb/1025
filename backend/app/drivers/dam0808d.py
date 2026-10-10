@@ -1,0 +1,129 @@
+"""DAM0808D serial Modbus RTU, eight coils and eight discrete inputs."""
+from __future__ import annotations
+
+import asyncio
+import struct
+import time
+import serial
+
+from .adam6050 import ModbusError
+
+
+def crc16(data: bytes) -> bytes:
+    crc = 0xFFFF
+    for value in data:
+        crc ^= value
+        for _ in range(8):
+            crc = (crc >> 1) ^ (0xA001 if crc & 1 else 0)
+    return struct.pack('<H', crc)
+
+
+class Dam0808DClient:
+    DI_COUNT = DO_COUNT = 8
+
+    def __init__(self, host: str, port: int = 9600, unit_id: int = 1, timeout_s: float = 0.4):
+        if not 1 <= unit_id <= 255:
+            raise ValueError('DAM 地址必须为 1 至 255，禁止广播地址 0')
+        self.host, self.port, self.unit_id, self.timeout_s = host, port, unit_id, timeout_s
+        self._serial = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def connected(self):
+        return self._serial is not None and self._serial.is_open
+
+    async def connect(self):
+        if not self.connected:
+            try:
+                self._serial = await asyncio.to_thread(serial.Serial, self.host, self.port,
+                    timeout=self.timeout_s, write_timeout=self.timeout_s, bytesize=8, parity='N', stopbits=1)
+            except (OSError, serial.SerialException) as exc:
+                raise ModbusError(f'DAM0808D 串口连接失败: {exc}') from exc
+
+    async def close(self):
+        stream, self._serial = self._serial, None
+        if stream:
+            await asyncio.to_thread(stream.close)
+
+    def _exchange(self, function, payload):
+        stream = self._serial
+        time.sleep(3.5 * 11 / self.port)
+        stream.reset_input_buffer()
+        request = bytes((self.unit_id, function)) + payload
+        stream.write(request + crc16(request))
+        deadline = time.monotonic() + self.timeout_s
+
+        def read_exact(count):
+            data = bytearray()
+            while len(data) < count:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ModbusError('DAM0808D 响应超时或截断')
+                stream.timeout = remaining
+                part = stream.read(count - len(data))
+                if not part:
+                    raise ModbusError('DAM0808D 响应超时或截断')
+                data.extend(part)
+            return bytes(data)
+
+        head = read_exact(3)
+        if head[1] & 0x80:
+            frame = head + read_exact(2)
+        elif function in (1, 2):
+            if head[2] != 1:
+                raise ModbusError('DAM0808D 位响应字节数错误')
+            frame = head + read_exact(3)
+        else:
+            frame = head + read_exact(5)
+        if crc16(frame[:-2]) != frame[-2:]:
+            raise ModbusError('DAM0808D CRC 校验失败')
+        if frame[0] != self.unit_id or frame[1] not in (function, function | 0x80):
+            raise ModbusError('DAM0808D 地址或功能码不匹配')
+        if frame[1] & 0x80:
+            raise ModbusError(f'DAM0808D Modbus 异常码 {frame[2]}')
+        return frame[2:-2]
+
+    async def _request(self, function, payload):
+        await self.connect()
+        worker = asyncio.create_task(asyncio.to_thread(self._exchange, function, payload))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # A Python thread cannot be cancelled: let its bounded serial read finish
+            # before shutdown can reuse or close the same port.
+            try:
+                await worker
+            except (ModbusError, OSError, serial.SerialException):
+                pass
+            await self.close()
+            raise
+        except (ModbusError, OSError, serial.SerialException) as exc:
+            await self.close()
+            raise ModbusError(str(exc)) from exc
+
+    async def _bits(self, function):
+        data = await self._request(function, struct.pack('>HH', 0, 8))
+        if len(data) != 2 or data[0] != 1:
+            raise ModbusError('DAM0808D 位响应长度错误')
+        return [bool(data[1] & (1 << index)) for index in range(8)]
+
+    async def read_inputs(self):
+        async with self._lock:
+            return await self._bits(2)
+
+    async def read_outputs(self):
+        async with self._lock:
+            return await self._bits(1)
+
+    async def write_output(self, channel: int, state: bool):
+        if not 0 <= channel < 8:
+            raise ValueError('DAM0808D 输出编号必须为 0 至 7')
+        async with self._lock:
+            payload = struct.pack('>HH', channel, 0xFF00 if state else 0)
+            echo = await self._request(5, payload)
+            if echo != payload:
+                await self.close()
+                raise ModbusError('DAM0808D 写入回显不匹配')
+            if (await self._bits(1))[channel] != state:
+                await self.close()
+                raise ModbusError('DAM0808D 继电器状态读回不匹配')

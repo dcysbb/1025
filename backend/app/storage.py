@@ -100,7 +100,8 @@ class HistoryStore:
                 "details": details or {},
             }
 
-    def list_events(self, start: Optional[str], end: Optional[str], limit: int = 200) -> list[dict]:
+    def list_events(self, start: Optional[str], end: Optional[str], limit: int = 200,
+                    offset: int = 0, kind: Optional[str] = None, severity: Optional[str] = None) -> list[dict]:
         query = "SELECT * FROM events WHERE 1=1"
         params: list = []
         if start:
@@ -109,8 +110,14 @@ class HistoryStore:
         if end:
             query += " AND timestamp <= ?"
             params.append(end)
-        query += " ORDER BY timestamp DESC, id DESC LIMIT ?"
-        params.append(max(1, min(limit, 1000)))
+        if kind:
+            query += " AND type = ?"
+            params.append(kind)
+        if severity:
+            query += " AND severity = ?"
+            params.append(severity)
+        query += " ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?"
+        params.extend([max(1, min(limit, 1001)), max(0, offset)])
         with self._lock:
             rows = self._db.execute(query, params).fetchall()
         return [self._event_dict(row) for row in rows]
