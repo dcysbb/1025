@@ -105,10 +105,10 @@ class ConfigurationTests(unittest.TestCase):
         )
         self.assertTrue(config.channels[0].enabled)
 
-    def test_permissive_inputs_are_inactive_by_default(self):
+    def test_real_valve_confirmation_is_required_by_default(self):
         config = AppConfig()
-        self.assertTrue(config.permit_ok_active_high)
-        self.assertTrue(config.watchdog_ok_active_high)
+        self.assertNotIn("permit_ok_di", config.model_dump())
+        self.assertNotIn("watchdog_ok_di", config.model_dump())
         self.assertFalse(config.fail_closed_confirmed)
 
 

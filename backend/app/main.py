@@ -285,16 +285,6 @@ async def connect_gauge(request: Request, actor: str = Depends(require_operator)
     return ENGINE.snapshot()
 
 
-@app.post("/api/devices/sync-setpoints")
-async def sync_setpoints(request: Request, actor: str = Depends(require_operator)):
-    verify_origin(request)
-    try:
-        result = await ENGINE.sync_setpoints(actor)
-    except (InterlockError, ValueError, TPG366Error, ModbusError) as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return {"ok": True, "relays": result}
-
-
 async def action_call(action: str, actor: str):
     try:
         if action == "arm":

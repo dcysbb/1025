@@ -17,8 +17,8 @@ let resetFailure=false
 let debugCalls:Array<{channel:number;enabled:boolean;duration_s:number}>=[]
 let relayOutputs=Array<boolean>(8).fill(false)
 let clearFaultCalls=0
-const status={timestamp:new Date().toISOString(),mode:'simulation',interlock:'disarmed',interlock_label:'未启用',valve:'closed',valve_closed_sensor:true,tpg_connected:true,adam_connected:true,permit_ok:true,history_recording:true,channels:[]}
-const config={io_device:'dam0808d',dam_serial_port:'',dam_baudrate:9600,dam_unit_id:1,external_watchdog_confirmed:false,mode:'simulation',tpg_connection:'tcp',tpg_serial_port:'',tpg_baudrate:9600,tpg_host:'',tpg_port:8000,adam_host:'',adam_port:502,adam_unit_id:1,sample_interval_s:1,stale_timeout_s:1,valve_timeout_s:2,recovery_hold_s:5,history_retention_days:null,allow_lan:false,valve_closed_di:0,valve_open_di:null,valve_closed_active_high:true,valve_open_active_high:true,permit_ok_di:1,permit_ok_active_high:true,watchdog_ok_di:2,watchdog_ok_active_high:true,latch_ready_di:3,latch_ready_active_high:true,air_ok_di:null,air_ok_active_high:true,open_output:0,heartbeat_output:1,reset_output:2,fail_closed_confirmed:false,channels:Array.from({length:6},()=>({enabled:false,label:'',trip_pa:null,reset_pa:null}))}
+const status={timestamp:new Date().toISOString(),mode:'simulation',interlock:'disarmed',interlock_label:'未启用',valve:'closed',valve_closed_sensor:true,tpg_connected:true,adam_connected:true,pressure_ok:true,history_recording:true,channels:[]}
+const config={io_device:'dam0808d',dam_serial_port:'',dam_baudrate:9600,dam_unit_id:1,mode:'simulation',tpg_connection:'tcp',tpg_serial_port:'',tpg_baudrate:9600,tpg_host:'',tpg_port:8000,adam_host:'',adam_port:502,adam_unit_id:1,sample_interval_s:1,stale_timeout_s:1,valve_timeout_s:2,recovery_hold_s:5,history_retention_days:null,allow_lan:false,valve_closed_di:0,valve_open_di:null,valve_closed_active_high:true,valve_open_active_high:true,open_output:0,fail_closed_confirmed:false,channels:Array.from({length:6},()=>({enabled:false,label:'',trip_pa:null,reset_pa:null}))}
 class Socket {
   static instances:Socket[]=[]
   onopen:(()=>void)|null=null;onclose:(()=>void)|null=null;onmessage:((event:{data:string})=>void)|null=null
@@ -163,12 +163,15 @@ test('USB connection fields and gauge-only action are available in real mode',as
   assert.ok(container.textContent?.includes('USB 波特率'))
   assert.ok(byText('仅连接真空规'))
 })
-test('DAM serial settings expose eight channels and independent watchdog confirmation',async()=>{
+test('DAM settings expose valve sensors and relay without external circuit fields',async()=>{
   await click(byText('设置'))
   assert.ok(container.querySelector('input[placeholder="例如 COM4（须区别于真空规）"]'))
   const inputs=[...container.querySelectorAll<HTMLInputElement>('input[type="number"]')]
   assert.ok(inputs.some(x=>x.max==='7'))
-  assert.ok(container.textContent?.includes('DAM 不输出高频机械心跳'))
+  for(const label of ['压力许可 DI','看门狗正常 DI','锁存就绪 DI','硬件复位 DO','旧 ADAM 心跳 DO','气源正常 DI'])assert.equal(container.textContent?.includes(label),false)
+  assert.ok(container.textContent?.includes('电磁阀控制 DO'))
+  assert.ok(container.textContent?.includes('关闭到位 DI'))
+  assert.ok(container.textContent?.includes('打开到位 DI'))
   assert.ok(container.querySelector('select option[value="dam0808d"]'))
 })
 test('large histories preserve spikes, troughs and invalid gaps',()=>{

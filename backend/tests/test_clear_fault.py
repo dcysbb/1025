@@ -23,7 +23,7 @@ class ClearFault(unittest.IsolatedAsyncioTestCase):
     async def test_clear_real_fault_without_setpoint_or_wiring_confirmation(self):
         self.e.mode='real';self.e.interlock='fault';self.e.trip_reason='关闭位置反馈超时'
         self.e._valve_command='close';self.e._valve_command_at=time.monotonic()-10
-        self.e._setpoints_synced=False;self.e.config.fail_closed_confirmed=False
+        self.e.config.fail_closed_confirmed=False
         self.e._adam_connected=True;self.e.adam=AsyncMock();self.e.adam.connected=True
         self.e.adam.read_inputs.return_value=[False]*8
         self.e.adam.read_outputs.return_value=[False]*8

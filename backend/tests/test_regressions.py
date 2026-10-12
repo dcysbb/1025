@@ -61,7 +61,7 @@ class SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.e.interlock, 'fault')
         self.assertFalse(self.e._open_output)
 
-    async def test_shutdown_clears_open_and_auxiliary_outputs(self):
+    async def test_shutdown_clears_only_valve_output(self):
         class Adam:
             connected = True
             def __init__(self): self.writes = []
@@ -73,21 +73,8 @@ class SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         self.e.adam = Adam()
         self.e._open_output = True
         await self.e.stop()
-        self.assertEqual(self.e.adam.writes, [(0, False), (2, False), (1, False)])
+        self.assertEqual(self.e.adam.writes, [(0, False)])
         self.assertFalse(self.e.adam.connected)
-
-    async def test_dam_watchdog_checks_feedback_without_relay_pulses(self):
-        self.e.mode = 'real'
-        self.e.config.external_watchdog_confirmed = True
-        self.e.adam = AsyncMock()
-        self.e._io_inputs[self.e.config.watchdog_ok_di] = True
-        with patch.object(self.e, '_poll_io', new=AsyncMock()):
-            await self.e._exercise_watchdog()
-        self.e.adam.write_output.assert_not_awaited()
-        self.e._io_inputs[self.e.config.watchdog_ok_di] = False
-        with patch.object(self.e, '_poll_io', new=AsyncMock()):
-            with self.assertRaisesRegex(InterlockError, '反馈'):
-                await self.e._exercise_watchdog()
 
     async def test_sensor_conflict_trips_and_cannot_reset(self):
         await self.e.arm()
@@ -107,7 +94,7 @@ class SafetyRegressions(unittest.IsolatedAsyncioTestCase):
 
     async def test_io_fault_is_not_permissive(self):
         await self.e.inject_io_fault(True)
-        self.assertFalse(self.e.snapshot()['permit_ok'])
+        with self.assertRaises(InterlockError):await self.e.arm()
         self.assertFalse(self.e.snapshot()['adam_connected'])
 
     async def test_configured_channel_four_and_thresholds(self):
@@ -175,18 +162,12 @@ class SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(arrivals),1)
         self.assertGreaterEqual(arrivals[0]['details']['command_to_feedback_s'],.45)
 
-    async def test_active_low_latch(self):
-        self.e.mode='real';self.e.config.latch_ready_active_high=False
-        self.assertTrue(self.e._latch_ready())
-        self.e._io_inputs[self.e.config.latch_ready_di]=True
-        self.assertFalse(self.e._latch_ready())
-
-    async def test_sync_failure_invalidates_previous_validation(self):
-        self.e.mode='real';self.e._tpg_connected=True;self.e._setpoints_synced=True
-        self.e.tpg=AsyncMock()
-        self.e.tpg.configure_setpoint.side_effect=ValueError('readback mismatch')
-        with self.assertRaises(ValueError):await self.e.sync_setpoints()
-        self.assertFalse(self.e._setpoints_synced)
+    async def test_active_low_position_sensor(self):
+        self.e.mode='real';self.e._adam_connected=True
+        self.e.config.valve_closed_active_high=False
+        self.assertTrue(self.e.snapshot()['valve_closed_sensor'])
+        self.e._io_inputs[self.e.config.valve_closed_di]=True
+        self.assertFalse(self.e.snapshot()['valve_closed_sensor'])
 
     async def test_optional_open_sensor_does_not_invent_arrival(self):
         self.e.mode='real';self.e.config.mode='real';self.e._valve_command='open'
