@@ -323,3 +323,8 @@
  .aside-events{max-height:calc(60vh - 140px)}
  .topbar-right{flex-wrap:wrap}
 }
+
+.debug-relay-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-top:18px; }
+.debug-relay-card { padding:16px; }
+.debug-relay-card h3 { margin:0; }
+.debug-relay-card small { color:var(--muted); font-size:11px; }

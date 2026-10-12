@@ -103,6 +103,8 @@ class InterlockEngine:
         self._open_output = False
         self._heartbeat_state = False
         self._last_heartbeat_at = 0.0
+        self._debug_deadlines: dict[int, float] = {}
+        self._debug_sim_outputs = [False] * 8
         self._last_io_read = 0.0
         self._next_unit_check = 0.0
         self._io_inputs = [False] * 12
@@ -142,6 +144,7 @@ class InterlockEngine:
             self._task = None
         async with self._lock:
             try:
+                await self._clear_debug_outputs()
                 await self._safe_open_output()
                 if self.mode == "real" and self.adam and self.adam.connected and self.config.fail_closed_confirmed:
                     for channel in ((self.config.reset_output,) if self.config.io_device == "dam0808d" else (self.config.reset_output, self.config.heartbeat_output)):
@@ -288,6 +291,8 @@ class InterlockEngine:
                 raise InterlockError("硬件配置或反馈未通过校验")
 
     def _validate_arm(self) -> None:
+        if self._debug_deadlines:
+            raise InterlockError("请先关闭 Debug 手动输出，再启用联锁")
         if self.interlock == "tripped":
             raise InterlockError("联锁已触发，须在压力恢复并保持后人工复位")
         if self.mode == "real":
@@ -393,6 +398,10 @@ class InterlockEngine:
     @serialized
     async def trip(self, reason: str, kind: str = "pressure_trip", fault: bool = False) -> None:
         async with self._lock:
+            try:
+                await self._clear_debug_outputs()
+            except (ModbusError, OSError):
+                logging.exception("Unable to clear Debug outputs during trip; retaining cleanup deadlines")
             already = self.interlock in ("tripped", "fault")
             self.interlock = "fault" if fault else "tripped"
             self.trip_reason = reason
@@ -413,6 +422,7 @@ class InterlockEngine:
 
     @serialized
     async def disarm(self, actor: str = "operator") -> None:
+        await self._clear_debug_outputs()
         if self.interlock == "armed" or self.interlock == "ready":
             self.interlock = "disarmed"
             self.trip_reason = None
@@ -534,6 +544,7 @@ class InterlockEngine:
 
     @serialized
     async def close_valve(self, actor: str = "operator", reason: str = "操作员请求关阀") -> None:
+        await self._clear_debug_outputs()
         await self._safe_open_output()
         self._valve_command = "close"
         self._valve_command_at = time.monotonic()
@@ -545,6 +556,7 @@ class InterlockEngine:
     @serialized
     async def apply_config(self, config: AppConfig, actor: str = "operator") -> None:
         async with self._lock:
+            await self._clear_debug_outputs()
             if self.interlock == "armed":
                 self.interlock = "tripped"
                 self.trip_reason = "设备配置已修改，联锁保持锁存关闭"
@@ -649,6 +661,66 @@ class InterlockEngine:
         self._refresh_status()
         self._publish()
         return {"ok": all(item.get("ok") for item in results.values()), **results}
+
+    async def _clear_debug_outputs(self) -> None:
+        for channel in list(self._debug_deadlines):
+            if self.mode == "simulation":
+                self._debug_sim_outputs[channel] = False
+            elif self.adam:
+                await self.adam.write_output(channel, False)
+            self._debug_deadlines.pop(channel, None)
+
+    @serialized
+    async def debug_relays(self) -> dict:
+        if self.config.io_device != "dam0808d":
+            raise InterlockError("Debug 继电器菜单仅支持 DAM0808D")
+        if self.mode == "simulation":
+            outputs = list(self._debug_sim_outputs)
+        else:
+            if not self.adam or not self._adam_connected:
+                raise InterlockError("DAM 未连接，请检查串口配置与接线")
+            outputs = await self.adam.read_outputs()
+        return {"mode": self.mode, "outputs": outputs,
+                "interlock": self.interlock,
+                "remaining_s": {str(ch): max(0, deadline-time.monotonic())
+                                for ch, deadline in self._debug_deadlines.items()}}
+
+    @serialized
+    async def debug_set_relay(self, channel: int, enabled: bool, duration_s: float,
+                              actor: str = "operator") -> dict:
+        if not 0 <= channel < 8 or not 1 <= duration_s <= 60:
+            raise InterlockError("继电器编号或通电时长无效")
+        if self.config.io_device != "dam0808d":
+            raise InterlockError("Debug 继电器菜单仅支持 DAM0808D")
+        if enabled and (self.interlock != "disarmed" or self._stopping):
+            raise InterlockError("只有联锁未启用时才能手动开启继电器")
+        if enabled and self._history_error:
+            raise InterlockError("审计存储故障，不能开启 Debug 输出")
+        if self.mode == "simulation":
+            self._debug_sim_outputs[channel] = enabled
+        else:
+            if not self.adam or not self._adam_connected:
+                raise InterlockError("DAM 未连接")
+            # Register cleanup before writing: a write can succeed even if its
+            # acknowledgement is lost. Never lose the obligation to clear it.
+            if enabled:
+                self._debug_deadlines[channel] = time.monotonic()
+            try:
+                await self.adam.write_output(channel, enabled)
+            except (ModbusError, OSError):
+                if enabled:
+                    try:
+                        await self._clear_debug_outputs()
+                    except (ModbusError, OSError):
+                        pass
+                raise
+        if enabled:
+            self._debug_deadlines[channel] = time.monotonic() + duration_s
+        else:
+            self._debug_deadlines.pop(channel, None)
+        self._event("debug_relay", "warning", f"Debug OUT{channel+1} {'开启' if enabled else '关闭'}",
+                    actor, {"channel": channel, "enabled": enabled, "duration_s": duration_s})
+        return await self.debug_relays()
 
     @serialized
     async def sync_setpoints(self, actor: str = "operator") -> list[dict]:
@@ -823,6 +895,9 @@ class InterlockEngine:
 
     @serialized
     async def _tick(self, tick: float) -> None:
+        for channel, deadline in list(self._debug_deadlines.items()):
+            if tick >= deadline:
+                await self.debug_set_relay(channel, False, 1, "system")
         if self.mode == "real" and (self.tpg is None or (self.adam is None and (self.config.dam_serial_port if self.config.io_device == "dam0808d" else self.config.adam_host))):
             await self.connect_devices()
         try:

@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { reducePoints, domain, type Point } from './chartData'
 
-type Page = 'overview' | 'history' | 'control' | 'events' | 'settings'
+type Page = 'overview' | 'history' | 'control' | 'events' | 'settings' | 'debug'
 type Unit = 'Pa' | 'mbar' | 'Torr'
 type Channel = { channel:number; label:string; pressure_pa:number|null; raw_value:number|null; raw_unit:string; status_code:number|null; status:string; valid:boolean; trip_pa:number|null; reset_pa:number|null }
 type Status = { timestamp:string; mode:'simulation'|'real'; interlock:'disarmed'|'ready'|'armed'|'tripped'|'fault'; interlock_label:string; trip_reason:string|null; valve:'unknown'|'open'|'closed'|'opening'|'closing'|'fault'; valve_open_sensor:boolean; valve_closed_sensor:boolean; tpg_connected:boolean; adam_connected:boolean; sample_age_s:number|null; unit:string; permit_ok:boolean; fail_closed_confirmed:boolean; history_recording:boolean; history_error:string|null; channels:Channel[] }
@@ -21,13 +21,14 @@ type Config = {
   air_ok_di:number|null; air_ok_active_high:boolean; open_output:number; heartbeat_output:number; reset_output:number
   fail_closed_confirmed:boolean; channels:ChanConfig[]
 }
+type DebugState = {mode:'real'|'simulation';outputs:boolean[];interlock:string;remaining_s:Record<string,number>}
 type EventItem = { id:number; timestamp:string; type:string; severity:string; message:string; actor:string; details:Record<string,unknown> }
 
 const API='/api'
 const FACTOR:Record<Unit,number>={Pa:1,mbar:100,Torr:133.32236842105263}
 const NAV:{id:Page;label:string;icon:typeof LayoutDashboard}[]=[
   {id:'overview',label:'总览',icon:LayoutDashboard},{id:'history',label:'历史数据',icon:History},
-  {id:'control',label:'联锁控制',icon:Shield},{id:'events',label:'事件日志',icon:Bell},{id:'settings',label:'设置',icon:Settings2},
+  {id:'control',label:'联锁控制',icon:Shield},{id:'events',label:'事件日志',icon:Bell},{id:'settings',label:'设置',icon:Settings2},{id:'debug',label:'Debug',icon:TerminalSquare},
 ]
 
 async function api<T>(path:string, init?:RequestInit):Promise<T>{
@@ -86,6 +87,7 @@ function Login({kind,onDone,onClose}:{kind:'setup'|'login';onDone:()=>void;onClo
 }
 
 function App(){
+  const [relayState,setRelayState]=useState<DebugState|null>(null);const [debugError,setDebugError]=useState('');const [debugAcknowledged,setDebugAcknowledged]=useState(false);const [debugDuration,setDebugDuration]=useState(10);const [debugBusy,setDebugBusy]=useState(false)
   const [page,setPage]=useState<Page>('overview');const [collapsed,setCollapsed]=useState(()=>localStorage.getItem('vacuum-sidebar')==='closed');const [asideOpen,setAsideOpen]=useState(()=>localStorage.getItem('vacuum-events')!=='closed')
   const [unit,setUnit]=useState<Unit>(()=>(['Pa','mbar','Torr'].includes(localStorage.getItem('vacuum-unit')||'')?localStorage.getItem('vacuum-unit') as Unit:'mbar'));const [theme,setTheme]=useState(()=>localStorage.getItem('vacuum-theme')||'graphite');const [glass,setGlass]=useState(()=>Number(localStorage.getItem('vacuum-glass')||72))
   const [connected,setConnected]=useState(false);const [historyEvents,setHistoryEvents]=useState<EventItem[]>([]);const [eventStart,setEventStart]=useState('');const [eventEnd,setEventEnd]=useState('');const [eventKind,setEventKind]=useState('');const [eventSeverity,setEventSeverity]=useState('');const [eventOffset,setEventOffset]=useState(0);const [eventMore,setEventMore]=useState(false)
@@ -134,6 +136,21 @@ function App(){
     }catch(e){notify(e instanceof Error?e.message:'历史重置失败')}
     finally{setResettingHistory(false)}
   }
+  const refreshRelays=useCallback(async()=>{
+    try{setRelayState(await api<DebugState>('/debug/relays'));setDebugError('')}
+    catch(e){setRelayState(null);setDebugError(e instanceof Error?e.message:'继电器读取失败')}
+  },[])
+  useEffect(()=>{
+    if(page!=='debug'||!auth)return
+    void refreshRelays();const timer=window.setInterval(()=>void refreshRelays(),1000)
+    return()=>clearInterval(timer)
+  },[page,auth,refreshRelays])
+  async function switchRelay(channel:number,enabled:boolean){
+    setDebugBusy(true)
+    try{setRelayState(await api<DebugState>(`/debug/relays/${channel}`,{method:'POST',body:JSON.stringify({enabled,duration_s:debugDuration})}));setDebugError('');notify(`OUT${channel+1} 已${enabled?'开启':'关闭'}`)}
+    catch(e){const message=e instanceof Error?e.message:'控制失败';await refreshRelays();setDebugError(message);notify(message)}
+    finally{setDebugBusy(false)}
+  }
   const interlockClass=status?.interlock==='armed'?'armed':status?.interlock==='tripped'||status?.interlock==='fault'?'tripped':'idle'
   const exportUrl=()=>`${API}/history/export.csv?${new URLSearchParams({start:new Date(start).toISOString(),end:new Date(end).toISOString(),channels:channels.join(','),unit})}`
 
@@ -143,7 +160,7 @@ function App(){
       <button className="user-row" onClick={()=>auth?void logOut():setLogin(configured?'login':local?'setup':null)} title={collapsed?'操作员账户':undefined}><span className="user-avatar">{auth?'OP':<LockKeyhole size={16}/>}</span>{!collapsed&&<span className="user-copy"><b>{auth?'操作员已登录':'操作员登录'}</b><small>{auth?'退出操作员会话':'需验证后控制'}</small></span>}{!collapsed&&(auth?<LogOut size={15}/>:<ChevronDown size={15}/>)}</button>
     </aside>
 
-    <main className="main-column"><header className="topbar glass-panel"><div className="page-heading"><div className="eyebrow">真空保护系统 / {NAV.find(x=>x.id===page)?.label}</div><h1>{page==='overview'?'运行总览':page==='history'?'历史数据':page==='control'?'联锁控制':page==='events'?'事件日志':'设备与系统设置'}</h1></div><div className="topbar-right"><button className="icon-button mobile-menu-toggle" aria-label={collapsed?'展开导航':'折叠导航'} aria-expanded={!collapsed} onClick={()=>setCollapsed(value=>!value)}><Menu size={18}/></button><button className="icon-button" aria-label={asideOpen?'收起事件栏':'展开事件栏'} aria-expanded={asideOpen} onClick={()=>setAsideOpen(value=>!value)}><Bell size={16}/></button><label className="unit-select"><span>压力单位</span><select value={unit} onChange={e=>setUnit(e.target.value as Unit)}><option>Pa</option><option>mbar</option><option>Torr</option></select></label><div className="clock-chip"><Clock3 size={15}/><span>{time(status?.timestamp)}</span><small>北京时间</small></div><button className={`live-pill ${connected&&status?.tpg_connected?'live-pill--on':''}`} onClick={()=>void refreshStatus()}><i/>{!connected?'后台断连':status?.tpg_connected?'采集在线':'等待数据'}</button></div></header>
+    <main className="main-column"><header className="topbar glass-panel"><div className="page-heading"><div className="eyebrow">真空保护系统 / {NAV.find(x=>x.id===page)?.label}</div><h1>{page==='overview'?'运行总览':page==='history'?'历史数据':page==='control'?'联锁控制':page==='events'?'事件日志':page==='debug'?'Debug 继电器调试':'设备与系统设置'}</h1></div><div className="topbar-right"><button className="icon-button mobile-menu-toggle" aria-label={collapsed?'展开导航':'折叠导航'} aria-expanded={!collapsed} onClick={()=>setCollapsed(value=>!value)}><Menu size={18}/></button><button className="icon-button" aria-label={asideOpen?'收起事件栏':'展开事件栏'} aria-expanded={asideOpen} onClick={()=>setAsideOpen(value=>!value)}><Bell size={16}/></button><label className="unit-select"><span>压力单位</span><select value={unit} onChange={e=>setUnit(e.target.value as Unit)}><option>Pa</option><option>mbar</option><option>Torr</option></select></label><div className="clock-chip"><Clock3 size={15}/><span>{time(status?.timestamp)}</span><small>北京时间</small></div><button className={`live-pill ${connected&&status?.tpg_connected?'live-pill--on':''}`} onClick={()=>void refreshStatus()}><i/>{!connected?'后台断连':status?.tpg_connected?'采集在线':'等待数据'}</button></div></header>
       {status?.mode==='simulation'&&<div className="sim-banner glass-panel"><span className="sim-banner__badge">SIMULATION</span><span>模拟运行 · 示例阈值只用于演示，切换真实模式后必须填写实验室阈值。</span><button onClick={()=>setPage('settings')}>设备设置 <ChevronDown size={14}/></button></div>}
 
       {!connected&&<div className="inline-error connection-warning" role="alert"><TriangleAlert size={17}/>后台连接中断，显示的是最后一次状态。控制已暂停。</div>}{status&&!status.history_recording&&<div className="inline-error connection-warning" role="alert">历史记录故障：{status.history_error||'存储不可用'}</div>}
@@ -180,6 +197,7 @@ function App(){
         <div className="settings-footer"><span>修改设备设置会使运行中的联锁进入锁存状态。</span><div><button className="button button--quiet" onClick={()=>void loadConfig()}>放弃更改</button><button className="button button--primary" disabled={!connected||busy||!auth} onClick={()=>void saveSettings()}>{busy?'保存中':'保存设备设置'} <Check size={15}/></button></div></div>
         {draft.mode==='real'&&<section className="real-connection-row glass-panel"><div><b>连接设备并同步继电器</b><span>写入 TPG 366 六路继电器设置，再逐路读回核对。</span></div><button className="button button--quiet" disabled={!connected||!auth||busy} onClick={()=>void act('/devices/connect-gauge','真空规已连接，控制保持未启用')}>仅连接真空规</button><button className="button button--quiet" disabled={!connected||!auth||busy} onClick={()=>void connectSync()}><Radio size={15}/>连接并校验</button></section>}
       </>}</div>}
+      {page==='debug'&&<div className="page-content"><section className="content-panel glass-panel"><div className="panel-heading"><div><span className="eyebrow">MANUAL RELAY CONTROL</span><h2>DAM0808D 手动控制</h2></div><button className="button button--quiet" disabled={!auth||debugBusy} onClick={()=>void refreshRelays()}><RefreshCw size={15}/>刷新状态</button></div><p>此处直接控制继电器，不检查真空压力许可。OUT1 可能让电磁阀通电并使插板阀动作。仅用于停机接线调试。</p><p>{relayState?.mode==='simulation'?'当前为模拟模式，不控制真实设备。':'当前为真实设备模式。'}开启后按设定时间自动关闭；通信或程序故障时，软件不能保证断电。</p>{!auth&&<button className="button button--primary" onClick={()=>setLogin(configured?'login':'setup')}>登录后调试</button>}<div className="settings-grid"><label className="field">自动关闭时间（秒）<input type="number" min="1" max="60" value={debugDuration} onChange={e=>setDebugDuration(Math.max(1,Math.min(60,Number(e.target.value)||1)))}/></label><label><input type="checkbox" checked={debugAcknowledged} onChange={e=>setDebugAcknowledged(e.target.checked)}/>已确认设备可以动作，并已核对接线和线圈电压</label></div>{debugError&&<div className="inline-error" role="alert">{debugError}</div>}{status?.interlock!=='disarmed'&&<p className="inline-error">联锁未处于“未启用”，禁止手动开启。</p>}<div className="debug-relay-grid">{Array.from({length:8},(_,channel)=><article className="glass-panel debug-relay-card" key={channel}><h3>OUT{channel+1} <small>DO{channel}</small></h3><p>{relayState?relayState.outputs[channel]?'已开启':'已关闭':'状态未知'}{relayState?.remaining_s[String(channel)]!=null&&` · ${Math.ceil(relayState.remaining_s[String(channel)])} 秒后关闭`}</p><div className="filter-buttons"><button className="button button--primary" aria-label={`开启 OUT${channel+1}`} disabled={!connected||!auth||!debugAcknowledged||debugBusy||!relayState||status?.interlock!=='disarmed'||relayState.interlock!=='disarmed'} onClick={()=>void switchRelay(channel,true)}>开启</button><button className="button button--quiet" aria-label={`关闭 OUT${channel+1}`} disabled={!connected||!auth||debugBusy||!relayState} onClick={()=>void switchRelay(channel,false)}>关闭</button></div></article>)}</div></section></div>}
       <footer className="footer"><span>VACUUM INTERLOCK <i/> LOCAL CONTROL SERVICE</span><span>数据保存在本机 · {status?.mode==='simulation'?'模拟模式':'真实设备模式'}</span></footer>
     </main>
 

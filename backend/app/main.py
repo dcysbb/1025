@@ -53,6 +53,11 @@ class HistoryReset(BaseModel):
     scope: Literal["simulation", "all"] = "simulation"
 
 
+class DebugRelayRequest(BaseModel):
+    enabled: bool
+    duration_s: float = Field(default=10, ge=1, le=60)
+
+
 def is_local(request: Request) -> bool:
     if request.client is None:
         return False
@@ -239,6 +244,24 @@ async def put_config(body: ConfigPatch, request: Request, actor: str = Depends(r
         "version": CONFIG.version,
         "restart_required": previous.allow_lan != ENGINE.config.allow_lan,
     }
+
+
+@app.get("/api/debug/relays")
+async def debug_relays(actor: str = Depends(require_operator)):
+    try:
+        return await ENGINE.debug_relays()
+    except (InterlockError, ModbusError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/debug/relays/{channel}")
+async def debug_set_relay(channel: int, body: DebugRelayRequest, request: Request,
+                          actor: str = Depends(require_operator)):
+    verify_origin(request)
+    try:
+        return await ENGINE.debug_set_relay(channel, body.enabled, body.duration_s, actor)
+    except (InterlockError, ModbusError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/devices/connect")
