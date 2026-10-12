@@ -96,7 +96,7 @@ test('backend disconnect is visible and disables valve controls',async()=>{
 test('local controls require no login dialog or logout step',async()=>{
   await act(async()=>window.dispatchEvent(new Event('auth-needed')))
   assert.equal(container.querySelector('[role="dialog"]'),null)
-  assert.ok(container.textContent?.includes('无需登录'))
+  assert.equal(container.querySelector('.user-row')?.textContent?.includes('无需登录'),false)
   assert.equal(container.textContent?.includes('退出操作员会话'),false)
   await click(byText('Debug'))
   assert.equal(container.textContent?.includes('登录后调试'),false)
