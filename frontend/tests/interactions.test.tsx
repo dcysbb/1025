@@ -88,13 +88,13 @@ test('backend disconnect is visible and disables valve controls',async()=>{
   assert.equal(byText('关闭插板阀').disabled,true)
   assert.ok(container.querySelector('[role="alert"]'))
 })
-test('login dialog can close with Escape and explicit close control',async()=>{
+test('local controls require no login dialog or logout step',async()=>{
   await act(async()=>window.dispatchEvent(new Event('auth-needed')))
-  assert.ok(container.querySelector('[role="dialog"]'))
-  await click(byLabel('关闭登录窗口'))
   assert.equal(container.querySelector('[role="dialog"]'),null)
-  await act(async()=>window.dispatchEvent(new Event('auth-needed')))
-  await act(async()=>window.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Escape'})))
+  assert.ok(container.textContent?.includes('无需登录'))
+  assert.equal(container.textContent?.includes('退出操作员会话'),false)
+  await click(byText('Debug'))
+  assert.equal(container.textContent?.includes('登录后调试'),false)
   assert.equal(container.querySelector('[role="dialog"]'),null)
 })
 test('history rejects an empty channel selection without retaining export',async()=>{

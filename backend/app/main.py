@@ -84,6 +84,8 @@ def require_read_access(request: Request) -> None:
 
 
 def require_operator(request: Request) -> str:
+    if is_local(request):
+        return "local_operator"
     if not has_session(request):
         raise HTTPException(401, "此操作需要操作员登录")
     # Only one configured operator is supported in v1; commands remain auditable.
@@ -174,7 +176,8 @@ async def health():
 
 @app.get("/api/auth/status")
 async def auth_status(request: Request):
-    return {"configured": CONFIG.password_hash is not None, "authenticated": has_session(request), "local": is_local(request)}
+    return {"configured": CONFIG.password_hash is not None,
+            "authenticated": is_local(request) or has_session(request), "local": is_local(request)}
 
 
 @app.post("/api/auth/setup")
