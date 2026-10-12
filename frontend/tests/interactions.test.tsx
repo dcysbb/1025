@@ -16,6 +16,7 @@ let resetCalls:Array<{scope:string}>=[]
 let resetFailure=false
 let debugCalls:Array<{channel:number;enabled:boolean;duration_s:number}>=[]
 let relayOutputs=Array<boolean>(8).fill(false)
+let clearFaultCalls=0
 const status={timestamp:new Date().toISOString(),mode:'simulation',interlock:'disarmed',interlock_label:'未启用',valve:'closed',valve_closed_sensor:true,tpg_connected:true,adam_connected:true,permit_ok:true,history_recording:true,channels:[]}
 const config={io_device:'dam0808d',dam_serial_port:'',dam_baudrate:9600,dam_unit_id:1,external_watchdog_confirmed:false,mode:'simulation',tpg_connection:'tcp',tpg_serial_port:'',tpg_baudrate:9600,tpg_host:'',tpg_port:8000,adam_host:'',adam_port:502,adam_unit_id:1,sample_interval_s:1,stale_timeout_s:1,valve_timeout_s:2,recovery_hold_s:5,history_retention_days:null,allow_lan:false,valve_closed_di:0,valve_open_di:null,valve_closed_active_high:true,valve_open_active_high:true,permit_ok_di:1,permit_ok_active_high:true,watchdog_ok_di:2,watchdog_ok_active_high:true,latch_ready_di:3,latch_ready_active_high:true,air_ok_di:null,air_ok_active_high:true,open_output:0,heartbeat_output:1,reset_output:2,fail_closed_confirmed:false,channels:Array.from({length:6},()=>({enabled:false,label:'',trip_pa:null,reset_pa:null}))}
 class Socket {
@@ -25,13 +26,17 @@ class Socket {
   close(){}
 }
 beforeEach(async()=>{
-  offline=false;resetCalls=[];resetFailure=false;Socket.instances=[];debugCalls=[];relayOutputs=Array<boolean>(8).fill(false)
+  offline=false;resetCalls=[];resetFailure=false;Socket.instances=[];debugCalls=[];relayOutputs=Array<boolean>(8).fill(false);clearFaultCalls=0
   dom=new JSDOM('<!doctype html><div id="root"></div>',{url:'http://localhost'})
   Object.assign(globalThis,{window:dom.window,document:dom.window.document,localStorage:dom.window.localStorage,location:dom.window.location,Event:dom.window.Event,WebSocket:Socket,IS_REACT_ACT_ENVIRONMENT:true})
   Object.defineProperty(globalThis,'navigator',{value:dom.window.navigator,configurable:true})
   globalThis.fetch=async(url,options)=>{
     if(offline)throw new Error('offline')
     const path=String(url)
+    if(path.endsWith('/interlock/clear-fault')){
+      assert.equal(options?.method,'POST');clearFaultCalls++
+      return new Response(JSON.stringify(status),{headers:{'Content-Type':'application/json'}})
+    }
     if(path.includes('/debug/relays')){
       if(options?.method==='POST'){
         const channel=Number(path.split('/').at(-1))
@@ -140,6 +145,15 @@ test('debug timed shutoff is opt-in',async()=>{
   assert.equal(duration.disabled,false)
   await click(byLabel('开启 OUT1'))
   assert.deepEqual(debugCalls,[{channel:0,enabled:true,duration_s:10}])
+})
+
+test('fault acknowledgement uses clear-fault without automatically arming',async()=>{
+  await act(async()=>{Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify({...status,interlock:'fault',trip_reason:'关闭位置反馈超时'})})})
+  await click(byText('联锁控制'))
+  await click(byText('复位（不启用）'))
+  assert.equal(clearFaultCalls,1)
+  assert.ok(container.textContent?.includes('故障已清除，联锁未启用'))
+  assert.ok(byText('启用联锁'))
 })
 test('USB connection fields and gauge-only action are available in real mode',async()=>{
   await click(byText('设置'));await click(byText('真实设备'))

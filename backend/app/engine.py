@@ -83,6 +83,7 @@ class InterlockEngine:
         self.mode = self.config.mode
         self.interlock = "disarmed"
         self.trip_reason: Optional[str] = None
+        self._rearm_required = False
         self._lock = TaskLock()
         self._task: Optional[asyncio.Task] = None
         self._subscribers: set[asyncio.Queue] = set()
@@ -294,6 +295,14 @@ class InterlockEngine:
     def _validate_arm(self) -> None:
         if self._debug_deadlines:
             raise InterlockError("请先关闭 Debug 手动输出，再启用联锁")
+        if self._rearm_required:
+            fault = self._reset_conditions()
+            if fault:
+                raise InterlockError(fault)
+            if self.status.valve != "closed":
+                raise InterlockError("启用前必须确认阀门已关闭")
+            if self._recovery_since is None or time.monotonic()-self._recovery_since < self.config.recovery_hold_s:
+                raise InterlockError("等待真空恢复状态稳定后才能启用联锁")
         if self.interlock == "tripped":
             raise InterlockError("联锁已触发，须在压力恢复并保持后人工复位")
         if self.mode == "real":
@@ -464,8 +473,35 @@ class InterlockEngine:
             self._event("arm_failed", "critical", f"联锁启用失败：{exc}", actor)
             raise InterlockError(str(exc)) from exc
         self.interlock = "armed"
+        self._rearm_required = False
         self.trip_reason = None
         self._event("interlock_armed", "info", "分子泵真空保护联锁已启用", actor)
+        self._refresh_status()
+        self._publish()
+
+    @serialized
+    async def clear_fault(self, actor: str = "operator") -> None:
+        if self.interlock not in ("tripped", "fault"):
+            raise InterlockError("当前没有待清除的故障")
+        try:
+            await self._clear_debug_outputs()
+            if self.mode == "real":
+                if not self.adam or not self._adam_connected:
+                    raise InterlockError("DAM 未连接，无法确认开阀输出已撤销")
+                await self.adam.write_output(self.config.open_output, False)
+                await self._poll_io()
+            else:
+                await self._write_output(self.config.open_output, False)
+        except (ModbusError, OSError) as exc:
+            raise InterlockError(f"无法撤销开阀输出：{exc}") from exc
+        self._open_output = False
+        self.interlock = "disarmed"
+        self.trip_reason = None
+        self._rearm_required = True
+        # Acknowledge the old movement fault; do not restart its timeout timer.
+        self._valve_command = None
+        self._motion_reported = True
+        self._event("fault_cleared", "warning", "故障已清除，联锁未启用；阀位仍以传感器反馈为准", actor)
         self._refresh_status()
         self._publish()
 
@@ -505,6 +541,7 @@ class InterlockEngine:
         self._valve_command_at = time.monotonic()
         self._motion_reported = False
         self._event("interlock_reset", "warning", "操作员复位联锁；阀门仍保持关闭", actor)
+        self._rearm_required = False
         self._refresh_status()
         self._publish()
 
@@ -972,11 +1009,12 @@ class InterlockEngine:
         if self._history_error and self.interlock == "armed":
             await self.trip("历史或审计存储故障", kind="storage_fault", fault=True)
 
-        recovery_fault = self._reset_conditions() if self.interlock in ("tripped", "fault") else "inactive"
-        if self.interlock in ("tripped", "fault") and recovery_fault is None:
+        recovery_pending = self.interlock in ("tripped", "fault") or self._rearm_required
+        recovery_fault = self._reset_conditions() if recovery_pending else "inactive"
+        if recovery_pending and recovery_fault is None:
             if self._recovery_since is None:
                 self._recovery_since = time.monotonic()
-        elif self.interlock in ("tripped", "fault"):
+        elif recovery_pending:
             self._recovery_since = None
 
         now = time.monotonic()

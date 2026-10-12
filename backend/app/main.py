@@ -332,6 +332,16 @@ async def reset_interlock(request: Request, actor: str = Depends(require_operato
     return await action_call("reset", actor)
 
 
+@app.post("/api/interlock/clear-fault")
+async def clear_fault(request: Request, actor: str = Depends(require_operator)):
+    verify_origin(request)
+    try:
+        await ENGINE.clear_fault(actor)
+    except InterlockError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return ENGINE.snapshot()
+
+
 @app.post("/api/valve/open")
 async def open_valve(request: Request, body: Optional[ActionRequest] = None, actor: str = Depends(require_operator)):
     verify_origin(request)
