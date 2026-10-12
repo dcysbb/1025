@@ -122,10 +122,24 @@ test('debug relay controls require acknowledgement and send the selected channel
   await click(checkbox)
   assert.equal(byLabel('开启 OUT1').disabled,false)
   await click(byLabel('开启 OUT1'))
-  assert.deepEqual(debugCalls,[{channel:0,enabled:true,duration_s:10}])
+  assert.deepEqual(debugCalls,[{channel:0,enabled:true,duration_s:0}])
   await click(byLabel('关闭 OUT1'))
   assert.equal(debugCalls[1].enabled,false)
   assert.equal(byLabel('开启 OUT8').disabled,false)
+})
+
+test('debug timed shutoff is opt-in',async()=>{
+  await click(byText('Debug'))
+  const checkboxes=[...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+  const timer=checkboxes.find(x=>x.parentElement?.textContent?.includes('定时关闭（可选）'))!
+  const confirm=checkboxes.find(x=>x.parentElement?.textContent?.includes('已确认设备可以动作'))!
+  assert.equal(timer.checked,false)
+  const duration=container.querySelector<HTMLInputElement>('input[type="number"]')!
+  assert.equal(duration.disabled,true)
+  await click(timer);await click(confirm)
+  assert.equal(duration.disabled,false)
+  await click(byLabel('开启 OUT1'))
+  assert.deepEqual(debugCalls,[{channel:0,enabled:true,duration_s:10}])
 })
 test('USB connection fields and gauge-only action are available in real mode',async()=>{
   await click(byText('设置'));await click(byText('真实设备'))

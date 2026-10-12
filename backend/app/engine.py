@@ -103,7 +103,8 @@ class InterlockEngine:
         self._open_output = False
         self._heartbeat_state = False
         self._last_heartbeat_at = 0.0
-        self._debug_deadlines: dict[int, float] = {}
+        # None tracks a held manual output without an automatic shutoff timer.
+        self._debug_deadlines: dict[int, Optional[float]] = {}
         self._debug_sim_outputs = [False] * 8
         self._last_io_read = 0.0
         self._next_unit_check = 0.0
@@ -683,12 +684,12 @@ class InterlockEngine:
         return {"mode": self.mode, "outputs": outputs,
                 "interlock": self.interlock,
                 "remaining_s": {str(ch): max(0, deadline-time.monotonic())
-                                for ch, deadline in self._debug_deadlines.items()}}
+                                for ch, deadline in self._debug_deadlines.items() if deadline is not None}}
 
     @serialized
     async def debug_set_relay(self, channel: int, enabled: bool, duration_s: float,
                               actor: str = "operator") -> dict:
-        if not 0 <= channel < 8 or not 1 <= duration_s <= 60:
+        if not 0 <= channel < 8 or not (duration_s == 0 or 1 <= duration_s <= 60):
             raise InterlockError("继电器编号或通电时长无效")
         if self.config.io_device != "dam0808d":
             raise InterlockError("Debug 继电器菜单仅支持 DAM0808D")
@@ -715,7 +716,7 @@ class InterlockEngine:
                         pass
                 raise
         if enabled:
-            self._debug_deadlines[channel] = time.monotonic() + duration_s
+            self._debug_deadlines[channel] = time.monotonic() + duration_s if duration_s else None
         else:
             self._debug_deadlines.pop(channel, None)
         self._event("debug_relay", "warning", f"Debug OUT{channel+1} {'开启' if enabled else '关闭'}",
@@ -896,7 +897,7 @@ class InterlockEngine:
     @serialized
     async def _tick(self, tick: float) -> None:
         for channel, deadline in list(self._debug_deadlines.items()):
-            if tick >= deadline:
+            if deadline is not None and tick >= deadline:
                 await self.debug_set_relay(channel, False, 1, "system")
         if self.mode == "real" and (self.tpg is None or (self.adam is None and (self.config.dam_serial_port if self.config.io_device == "dam0808d" else self.config.adam_host))):
             await self.connect_devices()

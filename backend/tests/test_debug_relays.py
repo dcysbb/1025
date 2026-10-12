@@ -46,8 +46,20 @@ class DebugRelays(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(InterlockError): await self.e.debug_set_relay(0,True,10)
 
     async def test_bad_channel_and_duration_rejected(self):
-        for channel,duration in ((-1,10),(8,10),(0,0),(0,61)):
+        for channel,duration in ((-1,10),(8,10),(0,-1),(0,.5),(0,61)):
             with self.assertRaises(InterlockError): await self.e.debug_set_relay(channel,True,duration)
+
+    async def test_manual_output_holds_across_ticks_until_explicit_off(self):
+        result = await self.e.debug_set_relay(0,True,0)
+        self.assertEqual(result['remaining_s'],{})
+        self.assertIsNone(self.e._debug_deadlines[0])
+        for _ in range(3):
+            await self.e._tick(time.monotonic()+120)
+            self.assertTrue((await self.e.debug_relays())['outputs'][0])
+        with self.assertRaisesRegex(InterlockError,'Debug'): self.e._validate_arm()
+        await self.e.debug_set_relay(0,False,0)
+        self.assertFalse((await self.e.debug_relays())['outputs'][0])
+        self.assertFalse(self.e._debug_deadlines)
 
     async def test_disarm_and_config_change_clear_debug(self):
         await self.e.debug_set_relay(7,True,60)

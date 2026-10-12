@@ -55,7 +55,7 @@ class HistoryReset(BaseModel):
 
 class DebugRelayRequest(BaseModel):
     enabled: bool
-    duration_s: float = Field(default=10, ge=1, le=60)
+    duration_s: float = Field(default=0, ge=0, le=60)
 
 
 def is_local(request: Request) -> bool:
