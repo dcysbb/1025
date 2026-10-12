@@ -36,7 +36,7 @@ class Dam0808DClient:
         if not self.connected:
             try:
                 self._serial = await asyncio.to_thread(serial.Serial, self.host, self.port,
-                    timeout=self.timeout_s, write_timeout=self.timeout_s, bytesize=8, parity='N', stopbits=1)
+                    timeout=min(self.timeout_s, 0.05), write_timeout=self.timeout_s, bytesize=8, parity='N', stopbits=1)
             except (OSError, serial.SerialException) as exc:
                 raise ModbusError(f'DAM0808D 串口连接失败: {exc}') from exc
 
@@ -59,10 +59,12 @@ class Dam0808DClient:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise ModbusError('DAM0808D 响应超时或截断')
-                stream.timeout = remaining
+                # Changing timeout calls SetCommState on Windows; some USB UARTs
+                # lose an in-flight response when reconfigured. Keep it fixed and
+                # enforce the overall deadline across short reads instead.
                 part = stream.read(count - len(data))
                 if not part:
-                    raise ModbusError('DAM0808D 响应超时或截断')
+                    continue
                 data.extend(part)
             return bytes(data)
 

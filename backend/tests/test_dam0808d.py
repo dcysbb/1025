@@ -84,6 +84,24 @@ class DamProtocol(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError): await self.client.write_output(8, True)
         self.assertEqual(self.fake.writes, [])
 
+    async def test_does_not_reconfigure_uart_during_response(self):
+        class UsbUart(SerialDevice):
+            def __setattr__(self, key, value):
+                if key == 'timeout' and getattr(self, 'writes', []):
+                    raise RuntimeError('Reconfiguring USB UART destroys pending response')
+                super().__setattr__(key, value)
+        self.fake = UsbUart()
+        with patch('app.drivers.dam0808d.serial.Serial', return_value=self.fake):
+            self.assertTrue((await self.client.read_inputs())[0])
+            self.assertEqual(await self.client.read_outputs(), [False]*8)
+
+    async def test_missing_response_has_bounded_timeout(self):
+        self.client.timeout_s = .03
+        with patch.object(self.fake, 'read', return_value=b''):
+            with self.assertRaisesRegex(ModbusError, '超时'):
+                await self.client.read_inputs()
+        self.assertFalse(self.client.connected)
+
 
 class DamConfiguration(unittest.TestCase):
     def test_shared_gauge_port_rejected(self):
