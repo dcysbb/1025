@@ -72,6 +72,8 @@ test('navigation can repeatedly collapse and expand with reachable controls',asy
   }
 })
 test('event pane can expand and collapse independently of navigation',async()=>{
+  assert.equal(container.querySelector('.events-aside'),null)
+  await click(byLabel('展开事件栏'))
   await click(byLabel('折叠导航'))
   await click(byLabel('收起事件栏'))
   assert.ok(container.querySelector('.app-shell--events-closed'))
@@ -79,6 +81,10 @@ test('event pane can expand and collapse independently of navigation',async()=>{
   await click(byLabel('展开事件栏'))
   assert.ok(container.querySelector('.aside-events'))
   assert.ok(container.querySelector('.app-shell--collapsed'))
+  await click(byText('事件日志'))
+  assert.equal(container.querySelector('.events-aside'),null)
+  await click(byText('总览'))
+  assert.ok(container.querySelector('.aside-events'))
 })
 test('sidebar preference survives a new component mount',async()=>{
   await click(byLabel('折叠导航'))
@@ -136,12 +142,12 @@ test('debug relay controls require acknowledgement and send the selected channel
 test('debug timed shutoff is opt-in',async()=>{
   await click(byText('Debug'))
   const checkboxes=[...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
-  const timer=checkboxes.find(x=>x.parentElement?.textContent?.includes('定时关闭（可选）'))!
+  const timer=checkboxes.find(x=>x.parentElement?.textContent?.includes('定时关闭'))!
   const confirm=checkboxes.find(x=>x.parentElement?.textContent?.includes('已确认设备可以动作'))!
   assert.equal(timer.checked,false)
-  const duration=container.querySelector<HTMLInputElement>('input[type="number"]')!
-  assert.equal(duration.disabled,true)
+  assert.equal(container.querySelector('input[type="number"]'),null)
   await click(timer);await click(confirm)
+  const duration=container.querySelector<HTMLInputElement>('input[type="number"]')!
   assert.equal(duration.disabled,false)
   await click(byLabel('开启 OUT1'))
   assert.deepEqual(debugCalls,[{channel:0,enabled:true,duration_s:10}])
@@ -161,6 +167,8 @@ test('USB connection fields and gauge-only action are available in real mode',as
   await act(async()=>{select.value='usb';select.dispatchEvent(new dom.window.Event('change',{bubbles:true}))})
   assert.ok(container.querySelector('input[placeholder="COM3"]'))
   assert.ok(container.textContent?.includes('USB 波特率'))
+  assert.equal(container.textContent?.includes('TPG 366 IP 地址'),false)
+  assert.equal(container.textContent?.includes('TPG TCP 端口'),false)
   assert.ok(byText('仅连接真空规'))
 })
 test('DAM settings expose valve sensors and relay without external circuit fields',async()=>{
