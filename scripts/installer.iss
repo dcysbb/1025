@@ -16,6 +16,7 @@ UninstallDisplayIcon={app}\VacuumInterlock.exe
 Source: "..\backend\dist\VacuumInterlock\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\backend\dist\VacuumInterlockService\*"; DestDir: "{app}\service"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "open-control-panel.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "install-console-shortcut.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 [Tasks]
 Name: "service"; Description: "Install the background Windows service (starts after manual configuration)"; Flags: unchecked

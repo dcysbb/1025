@@ -22,6 +22,7 @@ try {
     $launcherDir = Join-Path (Get-Location) 'dist\VacuumInterlock\scripts'
     New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'open-control-panel.ps1') -Destination $launcherDir
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-console-shortcut.ps1') -Destination $launcherDir
     Write-Host "打包完成：$(Join-Path (Get-Location) 'dist\VacuumInterlock')"
 } finally {
     Pop-Location

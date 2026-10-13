@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $packageRoot = Split-Path -Parent $PSScriptRoot
 $executable = Join-Path $packageRoot 'VacuumInterlock.exe'
 if (-not (Test-Path -LiteralPath $executable)) {
