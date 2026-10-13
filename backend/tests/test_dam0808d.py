@@ -71,6 +71,28 @@ class DamProtocol(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.client.read_outputs(), [False]*7+[True])
         self.assertEqual([f[1] for f in self.fake.writes[:2]], [5, 1])
 
+    async def test_repeated_out1_switches_and_concurrent_monitoring_remain_serialized(self):
+        for _ in range(20):
+            await asyncio.gather(self.client.write_output(0, True), self.client.read_inputs())
+            self.assertTrue((await self.client.read_outputs())[0])
+            await asyncio.gather(self.client.write_output(0, False), self.client.read_inputs())
+            self.assertFalse((await self.client.read_outputs())[0])
+        self.assertTrue(self.client.connected)
+        self.assertEqual(self.serial_factory.call_count, 1)
+
+    async def test_close_waits_for_pending_transaction_before_releasing_port(self):
+        original_read = self.fake.read
+        def slow_read(count):
+            time.sleep(.015)
+            self.assertTrue(self.fake.is_open)
+            return original_read(count)
+        with patch.object(self.fake, 'read', side_effect=slow_read):
+            read = asyncio.create_task(self.client.read_inputs())
+            await asyncio.sleep(.01)
+            await self.client.close()
+            self.assertTrue((await read)[0])
+        self.assertFalse(self.client.connected)
+
     async def test_bad_crc_disconnects(self):
         self.fake.corrupt = True
         with self.assertRaisesRegex(ModbusError, 'CRC'): await self.client.read_inputs()
@@ -107,9 +129,9 @@ class DamProtocol(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ModbusError, '超时'):
                 await self.client.read_inputs()
         self.assertFalse(self.client.connected)
-        self.assertEqual(len(self.fake.writes), 2)
+        self.assertEqual(len(self.fake.writes), 1)
 
-    async def test_one_missing_read_response_recovers_without_reopening_port(self):
+    async def test_missing_read_closes_port_and_next_attempt_reopens(self):
         self.client.timeout_s = .02
         original_write = self.fake.write
         def lose_first_reply(frame):
@@ -117,10 +139,18 @@ class DamProtocol(unittest.IsolatedAsyncioTestCase):
             if len(self.fake.writes) == 1:
                 self.fake.buffer.clear()
         with patch.object(self.fake, 'write', side_effect=lose_first_reply):
+            with self.assertRaises(DamResponseTimeout):
+                await self.client.read_inputs()
+            self.assertFalse(self.client.connected)
             self.assertTrue((await self.client.read_inputs())[0])
         self.assertEqual(len(self.fake.writes), 2)
         self.assertTrue(self.client.connected)
-        self.assertEqual(self.serial_factory.call_count, 1)
+        self.assertEqual(self.serial_factory.call_count, 2)
+
+    async def test_default_response_timeout_is_three_seconds(self):
+        self.assertEqual(self.client.timeout_s, 3.0)
+        await self.client.read_inputs()
+        self.assertEqual(self.serial_factory.call_args.kwargs['write_timeout'], 3.0)
 
     async def test_response_slower_than_old_400ms_deadline_is_accepted(self):
         original_read = self.fake.read

@@ -149,6 +149,7 @@ class ClearFault(unittest.IsolatedAsyncioTestCase):
             await self.e._tick(time.monotonic())
             self.assertEqual(self.e.adam.write_output.await_count,1)
             self.e._next_off_retry=0
+            self.e._next_io_poll=0
             await self.e._tick(time.monotonic())
         self.assertEqual(self.e.adam.write_output.await_count,2)
         self.assertFalse(self.e._off_retry_pending)

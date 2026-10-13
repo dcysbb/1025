@@ -25,7 +25,7 @@ def crc16(data: bytes) -> bytes:
 class Dam0808DClient:
     DI_COUNT = DO_COUNT = 8
 
-    def __init__(self, host: str, port: int = 9600, unit_id: int = 1, timeout_s: float = 0.6):
+    def __init__(self, host: str, port: int = 9600, unit_id: int = 1, timeout_s: float = 3.0):
         if not 1 <= unit_id <= 255:
             raise ValueError('DAM 地址必须为 1 至 255，禁止广播地址 0')
         self.host, self.port, self.unit_id, self.timeout_s = host, port, unit_id, timeout_s
@@ -37,14 +37,32 @@ class Dam0808DClient:
         return self._serial is not None and self._serial.is_open
 
     async def connect(self):
+        async with self._lock:
+            await self._connect()
+
+    async def _connect(self):
         if not self.connected:
             try:
-                self._serial = await asyncio.to_thread(serial.Serial, self.host, self.port,
-                    timeout=min(self.timeout_s, 0.05), write_timeout=self.timeout_s, bytesize=8, parity='N', stopbits=1)
+                worker = asyncio.create_task(asyncio.to_thread(serial.Serial, self.host, self.port,
+                    timeout=min(self.timeout_s, 0.05), write_timeout=self.timeout_s, bytesize=8, parity='N', stopbits=1))
+                try:
+                    self._serial = await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    try:
+                        stream = await worker
+                    except (OSError, serial.SerialException):
+                        pass
+                    else:
+                        await asyncio.to_thread(stream.close)
+                    raise
             except (OSError, serial.SerialException) as exc:
                 raise ModbusError(f'DAM0808D 串口连接失败: {exc}') from exc
 
     async def close(self):
+        async with self._lock:
+            await self._close()
+
+    async def _close(self):
         stream, self._serial = self._serial, None
         if stream:
             await asyncio.to_thread(stream.close)
@@ -54,8 +72,8 @@ class Dam0808DClient:
         time.sleep(3.5 * 11 / self.port)
         stream.reset_input_buffer()
         request = bytes((self.unit_id, function)) + payload
-        stream.write(request + crc16(request))
         deadline = time.monotonic() + self.timeout_s
+        stream.write(request + crc16(request))
 
         def read_exact(count):
             data = bytearray()
@@ -90,40 +108,26 @@ class Dam0808DClient:
         return frame[2:-2]
 
     async def _request(self, function, payload):
-        # Only reads may be repeated automatically. Never repeat an OPEN write
-        # whose acknowledgement was lost.
-        attempts = 2 if function in (1, 2) else 1
-        for attempt in range(attempts):
-            await self.connect()
-            worker = asyncio.create_task(asyncio.to_thread(self._exchange, function, payload))
+        # The engine owns the three reconnect attempts. Each exchange gets one
+        # deadline, so hidden driver retries cannot double the configured timeout.
+        await self._connect()
+        worker = asyncio.create_task(asyncio.to_thread(self._exchange, function, payload))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # A serial worker must finish before another transaction reuses UART.
             try:
-                return await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                # A thread cannot be cancelled; finish its bounded read before
-                # allowing this port to be reused or closed.
-                try:
-                    await worker
-                except (ModbusError, OSError, serial.SerialException):
-                    pass
-                await self.close()
-                raise
-            except DamResponseTimeout as exc:
-                if attempt + 1 < attempts:
-                    # Let a delayed USB/RTU reply settle. _exchange discards it
-                    # before sending the next request without reconfiguring UART.
-                    try:
-                        await asyncio.sleep(0.1)
-                    except asyncio.CancelledError:
-                        await self.close()
-                        raise
-                    continue
-                await self.close()
-                raise DamResponseTimeout(
-                    f'{exc}（单次 {self.timeout_s:g} 秒，重试 {attempt} 次）'
-                ) from exc
-            except (ModbusError, OSError, serial.SerialException) as exc:
-                await self.close()
-                raise ModbusError(str(exc)) from exc
+                await worker
+            except (ModbusError, OSError, serial.SerialException):
+                pass
+            await self._close()
+            raise
+        except DamResponseTimeout as exc:
+            await self._close()
+            raise DamResponseTimeout(f'{exc}（{self.timeout_s:g} 秒）') from exc
+        except (ModbusError, OSError, serial.SerialException) as exc:
+            await self._close()
+            raise ModbusError(str(exc)) from exc
 
     async def _bits(self, function):
         data = await self._request(function, struct.pack('>HH', 0, 8))
@@ -153,12 +157,12 @@ class Dam0808DClient:
                 # lost. A new validated coil read can prove it; no guessed success.
                 await asyncio.sleep(0.1)
                 if (await self._bits(1))[channel]:
-                    await self.close()
+                    await self._close()
                     raise ModbusError('DAM0808D 关闭回显超时，继电器仍开启')
                 return
             if echo != payload:
-                await self.close()
+                await self._close()
                 raise ModbusError('DAM0808D 写入回显不匹配')
             if (await self._bits(1))[channel] != state:
-                await self.close()
+                await self._close()
                 raise ModbusError('DAM0808D 继电器状态读回不匹配')

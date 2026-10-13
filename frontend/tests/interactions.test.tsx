@@ -99,6 +99,21 @@ test('backend disconnect is visible and disables valve controls',async()=>{
   assert.equal(byText('关闭插板阀').disabled,true)
   assert.ok(container.querySelector('[role="alert"]'))
 })
+test('old sample age is never displayed as an ever-growing acquisition delay',async()=>{
+  await act(async()=>Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify({...status,sample_age_s:86400,sample_latency_s:.024,sample_stale:false})}))
+  const card=[...container.querySelectorAll('.metric-card')].find(c=>c.textContent?.includes('采样耗时'))!
+  assert.ok(card.textContent?.includes('24'))
+  assert.equal(card.textContent?.includes('86400000'),false)
+  await act(async()=>Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify({...status,tpg_connected:false,sample_age_s:86400,sample_latency_s:.024,sample_stale:true})}))
+  assert.ok(card.textContent?.includes('真空规离线'))
+})
+test('DAM reconnection and exhausted attempts are visible in device state',async()=>{
+  await act(async()=>Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify({...status,adam_connected:false,io_reconnecting:true,io_reconnect_attempt:2})}))
+  assert.ok(container.textContent?.includes('重连 2/3'))
+  await act(async()=>Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify({...status,adam_connected:false,io_manual_reset_required:true,interlock:'fault'})}))
+  assert.ok(container.textContent?.includes('需人工复位'))
+  assert.ok(byText('复位（不启用）'))
+})
 test('local controls require no login dialog or logout step',async()=>{
   await act(async()=>window.dispatchEvent(new Event('auth-needed')))
   assert.equal(container.querySelector('[role="dialog"]'),null)

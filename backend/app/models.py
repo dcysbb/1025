@@ -110,6 +110,13 @@ class SystemStatus(BaseModel):
     tpg_connected: bool = False
     adam_connected: bool = False
     sample_age_s: Optional[float] = None
+    sample_latency_s: Optional[float] = None
+    sample_timestamp: Optional[str] = None
+    sample_stale: bool = True
+    io_reconnecting: bool = False
+    io_reconnect_attempt: int = 0
+    io_manual_reset_required: bool = False
+    io_error: Optional[str] = None
     unit: str = "Pa"
     pressure_ok: bool = False
     fail_closed_confirmed: bool = False

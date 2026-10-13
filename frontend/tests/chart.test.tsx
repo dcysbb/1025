@@ -1,0 +1,63 @@
+import React, {act} from 'react'
+import {JSDOM} from 'jsdom'
+import {beforeEach,afterEach,test} from 'node:test'
+import assert from 'node:assert/strict'
+import type {Root} from 'react-dom/client'
+import Chart from '../src/Chart'
+import {nearestPoint,timeRange,type Point} from '../src/chartData'
+
+const initialDom=new JSDOM('<!doctype html><div/>',{url:'http://localhost'})
+Object.assign(globalThis,{window:initialDom.window,document:initialDom.window.document})
+const {createRoot}=await import('react-dom/client')
+let dom:JSDOM,root:Root,container:HTMLElement
+const base=Date.parse('2026-10-13T00:00:00Z')
+const points:Point[]=Array.from({length:101},(_,i)=>({timestamp:new Date(base+i*1000).toISOString(),channels:[{channel:4,pressure_pa:i===0?1e-2:1e-6,valid:i!==51}]}))
+beforeEach(async()=>{
+  dom=new JSDOM('<!doctype html><div id="root"/>',{url:'http://localhost'})
+  Object.assign(globalThis,{window:dom.window,document:dom.window.document,Event:dom.window.Event,IS_REACT_ACT_ENVIRONMENT:true})
+  container=document.getElementById('root')!
+  root=createRoot(container)
+  await act(async()=>root.render(<Chart points={points} channels={[4]} unit="Pa"/>))
+})
+afterEach(async()=>{await act(async()=>root.unmount());dom.window.close()})
+function button(text:string){const b=[...container.querySelectorAll('button')].find(b=>b.textContent===text);assert.ok(b);return b}
+async function click(text:string){await act(async()=>button(text).click())}
+async function input(label:string,value:string){const el=container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;await act(async()=>{Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(el,value);el.dispatchEvent(new dom.window.Event('input',{bubbles:true}))})}
+async function submit(){await act(async()=>container.querySelector('form')!.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true})))}
+function axis(){const svg=container.querySelector('svg.trend-chart')!;return [Number(svg.getAttribute('data-y-min')),Number(svg.getAttribute('data-y-max'))]}
+
+test('manual y range applies, rejects inverted bounds, and returns to auto',async()=>{
+  assert.deepEqual(axis(),[1e-6,1e-2])
+  await input('纵轴下限','2e-7');await input('纵轴上限','4e-3');await submit()
+  assert.deepEqual(axis(),[2e-7,4e-3])
+  await input('纵轴上限','1e-8');await submit()
+  assert.ok(container.querySelector('[role="alert"]'))
+  assert.deepEqual(axis(),[2e-7,4e-3])
+  await click('自动纵轴');assert.deepEqual(axis(),[1e-6,1e-2])
+})
+test('auto y follows visible samples after time zoom',async()=>{
+  await click('放大')
+  assert.equal(axis()[0],1e-6)
+  assert.ok(Math.abs(axis()[1]-1e-5)<1e-15)
+  await click('完整范围');assert.deepEqual(axis(),[1e-6,1e-2])
+})
+test('hover shows original sample and marks an invalid reading',async()=>{
+  const svg=container.querySelector<SVGSVGElement>('svg.trend-chart')!
+  svg.getBoundingClientRect=()=>({left:0,width:980,top:0,height:350,right:980,bottom:350,x:0,y:0,toJSON(){}})
+  await act(async()=>svg.dispatchEvent(new dom.window.MouseEvent('pointermove',{bubbles:true,clientX:86+.5*872})))
+  assert.ok(container.querySelector('[role="tooltip"]')?.textContent?.includes('1.00e-6 Pa'))
+  await act(async()=>svg.dispatchEvent(new dom.window.MouseEvent('pointermove',{bubbles:true,clientX:86+.51*872})))
+  assert.ok(container.querySelector('[role="tooltip"]')?.textContent?.includes('无有效数据'))
+})
+test('manual limits use selected units and remain physical values when unit changes',async()=>{
+  await act(async()=>root.render(<Chart points={points} channels={[4]} unit="mbar"/>))
+  await input('纵轴下限','1e-8');await input('纵轴上限','1e-4');await submit()
+  assert.deepEqual(axis(),[1e-6,1e-2])
+  await act(async()=>root.render(<Chart points={points} channels={[4]} unit="Pa"/>))
+  assert.equal(container.querySelector<HTMLInputElement>('input[aria-label="纵轴上限"]')?.value,'1.00e-2')
+})
+test('nearest search uses original timestamps and bounded pan preserves span',()=>{
+  assert.equal(nearestPoint(points,points.map(p=>Date.parse(p.timestamp)),base+50200,base,base+100000),points[50])
+  assert.deepEqual(timeRange([-20,20],0,100),[0,40])
+  assert.deepEqual(timeRange([80,120],0,100),[60,100])
+})

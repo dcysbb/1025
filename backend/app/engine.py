@@ -86,6 +86,18 @@ class InterlockEngine:
         self._rearm_required = False
         self._lock = TaskLock()
         self._task: Optional[asyncio.Task] = None
+        self._tpg_task: Optional[asyncio.Task] = None
+        self._io_task: Optional[asyncio.Task] = None
+        self._io_lock = asyncio.Lock()
+        self._gauge_lock = asyncio.Lock()
+        self._io_reconnecting = False
+        self._io_reconnect_attempt = 0
+        self._io_manual_reset_required = False
+        self._io_recovery_at: Optional[float] = None
+        self._io_outputs = [False] * 8
+        self._sample_latency_s: Optional[float] = None
+        self._sample_timestamp: Optional[str] = None
+        self._pending_gauge_trip: Optional[tuple[str, str]] = None
         self._subscribers: set[asyncio.Queue] = set()
         self.tpg: Optional[TPG366Client] = None
         self.adam: Optional[Adam6050Client | Dam0808DClient] = None
@@ -130,19 +142,25 @@ class InterlockEngine:
     async def start(self) -> None:
         self._stopping = False
         if self._task is None:
+            self._tpg_task = asyncio.create_task(self._run_gauge(), name="vacuum-gauge-loop")
             self._task = asyncio.create_task(self._run(), name="vacuum-interlock-loop")
 
     async def stop(self) -> None:
         self._stopping = True
-        if self._task:
-            self._task.cancel()
+        tasks = [task for task in (self._task, self._tpg_task, self._io_task) if task]
+        for task in tasks:
+            # USB gauge reads run in a thread. Let its bounded request finish
+            # before closing the port; cancelling the coroutine leaves it alive.
+            if task is not self._tpg_task:
+                task.cancel()
+        for task in tasks:
             try:
-                await self._task
+                await task
             except asyncio.CancelledError:
                 pass
             except Exception:
                 logging.exception("Protection loop failed before shutdown")
-            self._task = None
+        self._task = self._tpg_task = self._io_task = None
         async with self._lock:
             try:
                 await self._clear_debug_outputs()
@@ -163,6 +181,7 @@ class InterlockEngine:
     def _refresh_status(self) -> SystemStatus:
         now = time.monotonic()
         age = None if self._last_tpg_read is None else max(0.0, now - self._last_tpg_read)
+        stale = not self._tpg_connected or age is None or age > self.config.stale_timeout_s
         open_di = self.config.valve_open_di
         closed_di = self.config.valve_closed_di
         open_sensor = self._input_active(open_di, self.config.valve_open_active_high) if open_di is not None and self._adam_connected else False
@@ -222,12 +241,20 @@ class InterlockEngine:
             tpg_connected=self._tpg_connected,
             adam_connected=self._adam_connected,
             sample_age_s=age,
+            sample_latency_s=self._sample_latency_s,
+            sample_timestamp=self._sample_timestamp,
+            sample_stale=stale,
+            io_reconnecting=self._io_reconnecting,
+            io_reconnect_attempt=self._io_reconnect_attempt,
+            io_manual_reset_required=self._io_manual_reset_required,
+            io_error=self._io_error,
             unit="Pa",
             pressure_ok=self._pressure_permitted(),
             fail_closed_confirmed=self.config.fail_closed_confirmed,
             history_recording=self._history_recording,
             history_error=self._history_error,
-            channels=channel_models,
+            channels=[sample.model_copy(update={"valid": False, "status": "数据过期"})
+                      if stale else sample for sample in channel_models],
         )
         return self.status
 
@@ -271,6 +298,8 @@ class InterlockEngine:
             raise InterlockError("后台正在停止，禁止开阀")
         if self._history_error:
             raise InterlockError("历史或审计存储故障，禁止开阀")
+        if self._pending_gauge_trip:
+            raise InterlockError(self._pending_gauge_trip[0])
         if not self._tpg_connected or not self._adam_connected:
             raise InterlockError("设备通信未就绪")
         now = time.monotonic()
@@ -317,7 +346,7 @@ class InterlockEngine:
             raise InterlockError(bad)
 
     def _pressure_permitted(self) -> bool:
-        return (self._tpg_connected and self._last_tpg_read is not None
+        return (self._pending_gauge_trip is None and self._tpg_connected and self._last_tpg_read is not None
                 and time.monotonic() - self._last_tpg_read <= self.config.stale_timeout_s
                 and self._pressure_fault() is None)
 
@@ -381,7 +410,9 @@ class InterlockEngine:
             return
         if not self.adam:
             raise ModbusError("I/O 控制器驱动未初始化")
-        await self.adam.write_output(channel, value)
+        async with self._io_lock:
+            await self.adam.write_output(channel, value)
+            self._io_outputs[channel] = value
 
     async def _safe_open_output(self) -> None:
         if self.mode == "simulation":
@@ -392,7 +423,7 @@ class InterlockEngine:
             return
         if self.adam:
             try:
-                await self.adam.write_output(self.config.open_output, False)
+                await self._write_output(self.config.open_output, False)
                 self._open_output = False
                 self._off_retry_pending = False
             except (ModbusError, OSError) as exc:
@@ -400,15 +431,12 @@ class InterlockEngine:
                 self._next_off_retry = time.monotonic() + 1.0
                 self._adam_connected = False
                 self._io_error = str(exc)
+                self._begin_io_recovery(str(exc))
                 self._event("io_error", "critical", "撤销开阀输出失败，阀门关闭状态无法保证", details={"error": str(exc)})
 
     @serialized
     async def trip(self, reason: str, kind: str = "pressure_trip", fault: bool = False) -> None:
         async with self._lock:
-            try:
-                await self._clear_debug_outputs()
-            except (ModbusError, OSError):
-                logging.exception("Unable to clear Debug outputs during trip; retaining cleanup deadlines")
             already = self.interlock in ("tripped", "fault")
             same_fault = already and self.trip_reason == reason
             self.interlock = "fault" if fault else "tripped"
@@ -419,6 +447,19 @@ class InterlockEngine:
                 self._motion_timed_out = False
                 self._valve_command = "close"
                 self._valve_command_at = time.monotonic()
+            self._publish()
+            io_task = self._io_task
+            if io_task and io_task is not asyncio.current_task() and not io_task.done():
+                io_task.cancel()
+                try:
+                    await io_task
+                except asyncio.CancelledError:
+                    pass
+                self._io_task = None
+            try:
+                await self._clear_debug_outputs()
+            except (ModbusError, OSError):
+                logging.exception("Unable to clear Debug outputs during trip; retaining cleanup deadlines")
             if not same_fault or (self._off_retry_pending and time.monotonic() >= self._next_off_retry):
                 await self._safe_open_output()
             if not already:
@@ -485,12 +526,13 @@ class InterlockEngine:
             if self.mode == "real":
                 await self._ensure_io_driver()
                 # Cached connection flags must not prevent a manual recovery.
-                if not self._adam_connected or self._io_error:
-                    await self.adam.close()
-                await self.adam.connect()
+                async with self._io_lock:
+                    if not self._adam_connected or self._io_error:
+                        await self.adam.close()
+                    await self.adam.connect()
             await self._clear_debug_outputs()
             if self.mode == "real":
-                await self.adam.write_output(self.config.open_output, False)
+                await self._write_output(self.config.open_output, False)
                 await self._poll_io()
             else:
                 await self._write_output(self.config.open_output, False)
@@ -504,6 +546,7 @@ class InterlockEngine:
             raise InterlockError(f"无法撤销开阀输出：{exc}") from exc
         self._open_output = False
         self._off_retry_pending = False
+        self._finish_io_recovery()
         self.interlock = "disarmed"
         self.trip_reason = None
         self._rearm_required = True
@@ -571,6 +614,10 @@ class InterlockEngine:
             await self.trip(str(exc), kind="open_output_failed", fault=True)
             raise InterlockError(str(exc)) from exc
         self._open_output = True
+        if self._pending_gauge_trip or not self._pressure_permitted():
+            reason, kind = self._pending_gauge_trip or (self._pressure_fault() or "开阀期间真空数据失效", "stale_data_trip")
+            await self.trip(reason, kind=kind)
+            raise InterlockError(reason)
         self._valve_command = "open"
         self._valve_command_at = time.monotonic()
         self._motion_reported = False
@@ -611,16 +658,20 @@ class InterlockEngine:
             self.mode = config.mode
             if any(getattr(old, key) != getattr(config, key) for key in (
                     "mode", "tpg_host", "tpg_port", "tpg_connection", "tpg_serial_port", "tpg_baudrate")):
-                if self.tpg:
-                    await self.tpg.close()
-                self.tpg = None
-                self._tpg_connected = False
-                self._last_tpg_read = None
+                async with self._gauge_lock:
+                    if self.tpg:
+                        await self.tpg.close()
+                    self.tpg = None
+                    self._tpg_connected = False
+                    self._last_tpg_read = None
             if old.mode != config.mode or old.adam_host != config.adam_host or old.adam_port != config.adam_port or old.adam_unit_id != config.adam_unit_id or any(getattr(old, key) != getattr(config, key) for key in ("io_device", "dam_serial_port", "dam_baudrate", "dam_unit_id")):
-                if self.adam:
-                    await self.adam.close()
-                self.adam = None
-                self._adam_connected = False
+                async with self._io_lock:
+                    if self.adam:
+                        await self.adam.close()
+                    self.adam = None
+                    self._adam_connected = False
+                    self._finish_io_recovery()
+                    self._next_io_poll = 0.0
             if config.mode == "simulation":
                 self._tpg_connected = True
                 self._adam_connected = not self._sim_io_fault
@@ -651,13 +702,14 @@ class InterlockEngine:
         if not host:
             return {"ok": False, "error": "未配置 USB 串口或 IP"}
         expected = TPG366USBClient if usb else TPG366Client
-        if self.tpg is None or type(self.tpg) is not expected or self.tpg.host != host or self.tpg.port != port:
-            if self.tpg:
-                await self.tpg.close()
-            self.tpg = expected(host, port)
         try:
-            await self.tpg.connect()
-            await self.tpg.read_unit()
+            async with self._gauge_lock:
+                if self.tpg is None or type(self.tpg) is not expected or self.tpg.host != host or self.tpg.port != port:
+                    if self.tpg:
+                        await self.tpg.close()
+                    self.tpg = expected(host, port)
+                await self.tpg.connect()
+                await self.tpg.read_unit()
             await self._poll_tpg()
             self._tpg_connected = True
             self._tpg_error = None
@@ -679,19 +731,22 @@ class InterlockEngine:
         port = self.config.dam_baudrate if dam else self.config.adam_port
         unit = self.config.dam_unit_id if dam else self.config.adam_unit_id
         driver = Dam0808DClient if dam else Adam6050Client
-        if address:
-            if self.adam is None or not isinstance(self.adam, driver) or (self.adam.host, self.adam.port, self.adam.unit_id) != (address, port, unit):
-                if self.adam:
-                    await self.adam.close()
-                self.adam = driver(address, port, unit)
+        if self._io_manual_reset_required:
+            results["adam"] = {"ok": False, "error": "DAM 三次重连失败，请使用人工复位"}
+        elif address:
+            async with self._io_lock:
+                if self.adam is None or not isinstance(self.adam, driver) or (self.adam.host, self.adam.port, self.adam.unit_id) != (address, port, unit):
+                    if self.adam:
+                        await self.adam.close()
+                    self.adam = driver(address, port, unit)
             try:
                 await self._poll_io()
                 self._adam_connected = True
                 self._io_error = None
                 results["adam"] = {"ok": True, "device": self.config.io_device}
+                self._finish_io_recovery()
             except ModbusError as exc:
-                self._adam_connected = False
-                self._io_error = str(exc)
+                self._begin_io_recovery(str(exc))
                 results["adam"] = {"ok": False, "error": str(exc)}
         else:
             results["adam"] = {"ok": False, "error": "未配置 DAM 串口" if dam else "未配置 IP"}
@@ -718,7 +773,7 @@ class InterlockEngine:
             if self.mode == "simulation":
                 self._debug_sim_outputs[channel] = False
             elif self.adam:
-                await self.adam.write_output(channel, False)
+                await self._write_output(channel, False)
             self._debug_deadlines.pop(channel, None)
 
     @serialized
@@ -730,7 +785,11 @@ class InterlockEngine:
         else:
             if not self.adam or not self._adam_connected:
                 raise InterlockError("DAM 未连接，请检查串口配置与接线")
-            outputs = await self.adam.read_outputs()
+            # Monitoring already reads DI + DO as one serialized transaction.
+            # A second browser poll used to double traffic while OUT1 switched.
+            outputs = list(self._io_outputs)
+            if time.monotonic() - self._last_io_read > self.config.stale_timeout_s:
+                raise InterlockError("DAM 数据尚未更新，正在检查连接")
         return {"mode": self.mode, "outputs": outputs,
                 "interlock": self.interlock,
                 "remaining_s": {str(ch): max(0, deadline-time.monotonic())
@@ -757,8 +816,11 @@ class InterlockEngine:
             if enabled:
                 self._debug_deadlines[channel] = time.monotonic()
             try:
-                await self.adam.write_output(channel, enabled)
-            except (ModbusError, OSError):
+                await self._write_output(channel, enabled)
+                # write_output verifies the coil; its result is fresh feedback.
+                self._last_io_read = time.monotonic()
+            except (ModbusError, OSError) as exc:
+                self._begin_io_recovery(str(exc))
                 if enabled:
                     try:
                         await self._clear_debug_outputs()
@@ -802,9 +864,11 @@ class InterlockEngine:
             return
         if not self.adam:
             return
-        inputs = await self.adam.read_inputs()
-        outputs = await self.adam.read_outputs()
+        async with self._io_lock:
+            inputs = await self.adam.read_inputs()
+            outputs = await self.adam.read_outputs()
         self._io_inputs = inputs
+        self._io_outputs = outputs
         self._adam_connected = True
         self._io_error = None
         self._last_io_read = time.monotonic()
@@ -812,6 +876,14 @@ class InterlockEngine:
             self._open_output = False
 
     async def _poll_tpg(self) -> None:
+        started = time.monotonic()
+        async with self._gauge_lock:
+            await self._read_tpg()
+        if self._tpg_connected and self._last_tpg_read is not None:
+            self._sample_latency_s = time.monotonic() - started
+            self._sample_timestamp = self._stamp()
+
+    async def _read_tpg(self) -> None:
         if self.mode == "simulation":
             if self._sim_tpg_fault:
                 self._tpg_connected = False
@@ -864,8 +936,12 @@ class InterlockEngine:
 
     async def _record_sample(self) -> None:
         timestamp = self._stamp()
+        stale = (not self._tpg_connected or self._last_tpg_read is None
+                 or time.monotonic() - self._last_tpg_read > self.config.stale_timeout_s)
+        samples = [dict(sample, valid=False, pressure_pa=None, status="数据过期")
+                   if stale else sample for sample in self._channels]
         try:
-            self.history.write_sample(timestamp, self._channels, self.mode, self.config_store.version)
+            self.history.write_sample(timestamp, samples, self.mode, self.config_store.version)
             self._history_recording = True
             self._history_error = None
         except (OSError, RuntimeError, sqlite3.Error) as exc:
@@ -873,6 +949,107 @@ class InterlockEngine:
             self._history_error = str(exc)
             logging.error("Sample storage unavailable: %s", exc)
             await self.trip("历史存储故障，已撤销开阀许可", kind="history_write_error", fault=True)
+
+    def _begin_io_recovery(self, error: str) -> None:
+        self._adam_connected = False
+        self._io_error = error
+        if self.config.io_device != "dam0808d" or self._io_manual_reset_required:
+            return
+        if not self._io_reconnecting:
+            self._io_reconnecting = True
+            self._io_reconnect_attempt = 0
+            self._io_recovery_at = self._last_io_read or time.monotonic()
+            self._next_io_poll = time.monotonic() + 0.5
+            self._event("io_reconnect", "warning", "DAM 通信中断，开始自动重连", details={"error": error})
+        self._publish()
+
+    def _finish_io_recovery(self) -> None:
+        if self._io_reconnecting:
+            self._event("io_recovered", "info", "DAM 自动重连成功", details={"attempt": self._io_reconnect_attempt})
+            # Lost feedback time must not become a false valve movement timeout.
+            if self._valve_command is not None and self._io_recovery_at is not None:
+                self._valve_command_at += time.monotonic() - max(self._io_recovery_at, self._valve_command_at)
+        self._io_reconnecting = False
+        self._io_reconnect_attempt = 0
+        self._io_manual_reset_required = False
+        self._io_recovery_at = None
+
+    async def _io_cycle(self) -> None:
+        if self._io_manual_reset_required or self._stopping:
+            return
+        reconnect = self._io_reconnecting
+        if reconnect:
+            self._io_reconnect_attempt += 1
+            self._publish()
+        try:
+            await self._ensure_io_driver()
+            if reconnect:
+                async with self._io_lock:
+                    await self.adam.close()
+                    await self.adam.connect()
+            await self._poll_io()
+            self._finish_io_recovery()
+            self._next_io_poll = time.monotonic() + 0.2
+            # Only pending OFF operations are resumed. Never replay an OPEN.
+            for channel, deadline in list(self._debug_deadlines.items()):
+                if deadline is not None and time.monotonic() >= deadline:
+                    await self.debug_set_relay(channel, False, 1, "system")
+            if self._off_retry_pending and time.monotonic() >= self._next_off_retry:
+                await self._safe_open_output()
+        except (ModbusError, OSError, ValueError, InterlockError) as exc:
+            self._begin_io_recovery(str(exc))
+            self._next_io_poll = time.monotonic() + 1.0
+            if self.config.io_device == "dam0808d":
+                if reconnect and self._io_reconnect_attempt >= 3:
+                    self._io_reconnecting = False
+                    self._io_manual_reset_required = True
+                    self._event("io_reconnect_failed", "critical", "DAM 连续三次重连失败，需要人工复位", details={"error": str(exc)})
+                    await self.trip("DAM 连续三次重连失败，请人工复位", kind="device_communication_trip", fault=True)
+            elif self.interlock == "armed":
+                await self.trip(f"I/O 通信故障：{exc}", kind="device_communication_trip", fault=True)
+        finally:
+            self._publish()
+
+    async def _gauge_cycle(self, tick: float) -> None:
+        try:
+            if self.mode == "real" and self.tpg is None:
+                usb = self.config.tpg_connection == "usb"
+                address = self.config.tpg_serial_port if usb else self.config.tpg_host
+                if address:
+                    driver = TPG366USBClient if usb else TPG366Client
+                    self.tpg = driver(address, self.config.tpg_baudrate if usb else self.config.tpg_port)
+            await self._poll_tpg()
+            if self.mode == "real" and tick >= self._next_unit_check and self.tpg:
+                async with self._gauge_lock:
+                    await self.tpg.read_unit()
+                self._next_unit_check = time.monotonic() + 1.0
+            if self.interlock == "armed":
+                reason = self._pressure_fault()
+                if reason and self._pending_gauge_trip is None:
+                    self._pending_gauge_trip = (reason, "pressure_trip")
+        except (TPG366Error, ModbusError, OSError, ValueError) as exc:
+            self._tpg_connected = False
+            self._tpg_error = str(exc)
+            if self.interlock == "armed" and self._pending_gauge_trip is None:
+                self._pending_gauge_trip = (f"真空规通信故障：{exc}", "device_communication_trip")
+            if self.tpg:
+                async with self._gauge_lock:
+                    await self.tpg.close()
+        self._publish()
+
+    async def _run_gauge(self) -> None:
+        while not self._stopping:
+            tick = time.monotonic()
+            try:
+                await self._gauge_cycle(tick)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logging.exception("Gauge polling failed")
+                self._tpg_connected = False
+                self._tpg_error = str(exc)
+                self._publish()
+            await asyncio.sleep(max(0.02, 0.1 - (time.monotonic() - tick)))
 
     async def _run(self) -> None:
         while True:
@@ -888,51 +1065,40 @@ class InterlockEngine:
 
     @serialized
     async def _tick(self, tick: float) -> None:
-        for channel, deadline in list(self._debug_deadlines.items()):
-            if deadline is not None and tick >= deadline:
-                await self.debug_set_relay(channel, False, 1, "system")
-        if self.mode == "real" and (self.tpg is None or (self.adam is None and (self.config.dam_serial_port if self.config.io_device == "dam0808d" else self.config.adam_host))):
-            await self.connect_devices()
-        try:
-            await self._poll_tpg()
-            if self.mode == "real" and tick >= self._next_unit_check and self.tpg:
-                await self.tpg.read_unit()
-                self._next_unit_check = tick + 1.0
-        except (TPG366Error, ModbusError, OSError, ValueError) as exc:
-            if self.mode == "real":
-                self._tpg_connected = False
-                self._tpg_error = str(exc)
-                if self.tpg:
-                    await self.tpg.close()
-                if self.interlock == "armed":
-                    await self.trip(f"设备通信故障：{exc}", kind="device_communication_trip", fault=True)
-            else:
-                self._event("simulation_error", "error", f"模拟器内部故障：{exc}")
+        if self.mode == "simulation":
+            for channel, deadline in list(self._debug_deadlines.items()):
+                if deadline is not None and tick >= deadline:
+                    await self.debug_set_relay(channel, False, 1, "system")
+        if self._tpg_task is None:
+            await self._gauge_cycle(tick)
 
-        # An unavailable gauge must not starve I/O recovery or keep stale valve
-        # feedback marked online. Failed I/O polls back off instead of reopening
-        # an absent USB adapter on every 100 ms protection tick.
+        # Serial I/O may take three seconds. Do not block pressure sampling,
+        # protection checks or status updates behind that wait.
         now = time.monotonic()
-        if self.mode == "real" and now >= self._next_io_poll:
-            try:
-                await self._poll_io()
-                self._next_io_poll = time.monotonic() + 0.2
-            except (ModbusError, OSError, ValueError) as exc:
-                self._adam_connected = False
-                self._io_error = str(exc)
-                self._next_io_poll = time.monotonic() + 1.0
-                if self.adam:
-                    await self.adam.close()
-                if self.interlock == "armed":
-                    await self.trip(f"I/O 通信故障：{exc}", kind="device_communication_trip", fault=True)
+        io_configured = self.adam is not None or bool(self.config.dam_serial_port if self.config.io_device == "dam0808d" else self.config.adam_host)
+        if self.mode == "real" and io_configured and now >= self._next_io_poll and not self._io_manual_reset_required:
+            if self._task is None:
+                await self._io_cycle()
+            elif self._io_task is None or self._io_task.done():
+                if self._io_task is not None:
+                    self._io_task.result()
+                self._io_task = asyncio.create_task(self._io_cycle(), name="vacuum-io-poll")
 
         if self.mode == "simulation":
             self._tpg_connected = not self._sim_tpg_fault
             self._adam_connected = not self._sim_io_fault
 
-        if self._off_retry_pending and time.monotonic() >= self._next_off_retry:
+        if self.mode == "simulation" and self._off_retry_pending and time.monotonic() >= self._next_off_retry:
             await self._safe_open_output()
 
+        io_wait = (self.mode == "real" and self.config.io_device == "dam0808d"
+                   and not self._io_manual_reset_required
+                   and (self._io_reconnecting or (self._io_task is not None and not self._io_task.done())))
+
+        pending = self._pending_gauge_trip
+        self._pending_gauge_trip = None
+        if self.interlock == "armed" and pending:
+            await self.trip(pending[0], kind=pending[1], fault=pending[1] != "pressure_trip")
         pressure_fault = self._pressure_fault()
         if self.interlock == "armed" and pressure_fault:
             await self.trip(pressure_fault)
@@ -941,9 +1107,9 @@ class InterlockEngine:
             age = None if self._last_tpg_read is None else time.monotonic() - self._last_tpg_read
             if age is None or age > self.config.stale_timeout_s:
                 await self.trip("真空数据更新超时，已撤销开阀许可", kind="stale_data_trip", fault=True)
-            elif not self._tpg_connected or not self._adam_connected:
+            elif not self._tpg_connected or (not self._adam_connected and not io_wait):
                 await self.trip("设备通信未就绪", kind="device_communication_trip", fault=True)
-            elif self.mode == "real" and time.monotonic() - self._last_io_read > self.config.stale_timeout_s:
+            elif self.mode == "real" and not io_wait and time.monotonic() - self._last_io_read > self.config.stale_timeout_s:
                 await self.trip("I/O 数据更新超时，已撤销开阀输出", kind="stale_io_trip", fault=True)
 
         if self._valve_command is not None or self.interlock == "armed":
@@ -951,7 +1117,7 @@ class InterlockEngine:
             command_age = time.monotonic() - self._valve_command_at
             if self.status.valve == "fault":
                 await self.trip("插板阀打开/关闭位置反馈同时有效", kind="valve_sensor_conflict", fault=True)
-            elif (self._valve_command is not None and not self._motion_timed_out
+            elif (not io_wait and self._adam_connected and self._valve_command is not None and not self._motion_timed_out
                   and command_age > self.config.valve_timeout_s):
                 expected = "open" if self._valve_command == "open" else "closed"
                 has_open_feedback = self.mode == "simulation" or self.config.valve_open_di is not None
