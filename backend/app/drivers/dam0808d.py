@@ -9,6 +9,10 @@ import serial
 from .adam6050 import ModbusError
 
 
+class DamResponseTimeout(ModbusError):
+    """No complete RTU response within one bounded exchange."""
+
+
 def crc16(data: bytes) -> bytes:
     crc = 0xFFFF
     for value in data:
@@ -21,7 +25,7 @@ def crc16(data: bytes) -> bytes:
 class Dam0808DClient:
     DI_COUNT = DO_COUNT = 8
 
-    def __init__(self, host: str, port: int = 9600, unit_id: int = 1, timeout_s: float = 0.4):
+    def __init__(self, host: str, port: int = 9600, unit_id: int = 1, timeout_s: float = 0.6):
         if not 1 <= unit_id <= 255:
             raise ValueError('DAM 地址必须为 1 至 255，禁止广播地址 0')
         self.host, self.port, self.unit_id, self.timeout_s = host, port, unit_id, timeout_s
@@ -58,7 +62,7 @@ class Dam0808DClient:
             while len(data) < count:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise ModbusError('DAM0808D 响应超时或截断')
+                    raise DamResponseTimeout('DAM0808D 响应超时或截断')
                 # Changing timeout calls SetCommState on Windows; some USB UARTs
                 # lose an in-flight response when reconfigured. Keep it fixed and
                 # enforce the overall deadline across short reads instead.
@@ -86,22 +90,40 @@ class Dam0808DClient:
         return frame[2:-2]
 
     async def _request(self, function, payload):
-        await self.connect()
-        worker = asyncio.create_task(asyncio.to_thread(self._exchange, function, payload))
-        try:
-            return await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            # A Python thread cannot be cancelled: let its bounded serial read finish
-            # before shutdown can reuse or close the same port.
+        # Only reads may be repeated automatically. Never repeat an OPEN write
+        # whose acknowledgement was lost.
+        attempts = 2 if function in (1, 2) else 1
+        for attempt in range(attempts):
+            await self.connect()
+            worker = asyncio.create_task(asyncio.to_thread(self._exchange, function, payload))
             try:
-                await worker
-            except (ModbusError, OSError, serial.SerialException):
-                pass
-            await self.close()
-            raise
-        except (ModbusError, OSError, serial.SerialException) as exc:
-            await self.close()
-            raise ModbusError(str(exc)) from exc
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # A thread cannot be cancelled; finish its bounded read before
+                # allowing this port to be reused or closed.
+                try:
+                    await worker
+                except (ModbusError, OSError, serial.SerialException):
+                    pass
+                await self.close()
+                raise
+            except DamResponseTimeout as exc:
+                if attempt + 1 < attempts:
+                    # Let a delayed USB/RTU reply settle. _exchange discards it
+                    # before sending the next request without reconfiguring UART.
+                    try:
+                        await asyncio.sleep(0.1)
+                    except asyncio.CancelledError:
+                        await self.close()
+                        raise
+                    continue
+                await self.close()
+                raise DamResponseTimeout(
+                    f'{exc}（单次 {self.timeout_s:g} 秒，重试 {attempt} 次）'
+                ) from exc
+            except (ModbusError, OSError, serial.SerialException) as exc:
+                await self.close()
+                raise ModbusError(str(exc)) from exc
 
     async def _bits(self, function):
         data = await self._request(function, struct.pack('>HH', 0, 8))
@@ -122,7 +144,18 @@ class Dam0808DClient:
             raise ValueError('DAM0808D 输出编号必须为 0 至 7')
         async with self._lock:
             payload = struct.pack('>HH', channel, 0xFF00 if state else 0)
-            echo = await self._request(5, payload)
+            try:
+                echo = await self._request(5, payload)
+            except DamResponseTimeout:
+                if state:
+                    raise
+                # OFF may already have reached the relay even if its echo was
+                # lost. A new validated coil read can prove it; no guessed success.
+                await asyncio.sleep(0.1)
+                if (await self._bits(1))[channel]:
+                    await self.close()
+                    raise ModbusError('DAM0808D 关闭回显超时，继电器仍开启')
+                return
             if echo != payload:
                 await self.close()
                 raise ModbusError('DAM0808D 写入回显不匹配')

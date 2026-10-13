@@ -96,16 +96,20 @@ class InterlockEngine:
         self._sim_close_failure = False
         self._sim_tpg_fault = False
         self._motion_reported = False
+        self._motion_timed_out = False
         self._stopping = False
         self._last_retention_check = 0.0
         self._recovery_since: Optional[float] = None
         self._valve_command: Optional[str] = None
         self._valve_command_at = 0.0
         self._open_output = False
+        self._off_retry_pending = False
+        self._next_off_retry = 0.0
         # None tracks a held manual output without an automatic shutoff timer.
         self._debug_deadlines: dict[int, Optional[float]] = {}
         self._debug_sim_outputs = [False] * 8
         self._last_io_read = 0.0
+        self._next_io_poll = 0.0
         self._next_unit_check = 0.0
         self._io_inputs = [False] * 12
         self._channels: list[dict] = []
@@ -382,6 +386,7 @@ class InterlockEngine:
     async def _safe_open_output(self) -> None:
         if self.mode == "simulation":
             self._open_output = False
+            self._off_retry_pending = False
             self._sim_open_after = 0.0
             self._sim_close_after = time.monotonic() + 0.45
             return
@@ -389,7 +394,11 @@ class InterlockEngine:
             try:
                 await self.adam.write_output(self.config.open_output, False)
                 self._open_output = False
+                self._off_retry_pending = False
             except (ModbusError, OSError) as exc:
+                self._off_retry_pending = True
+                self._next_off_retry = time.monotonic() + 1.0
+                self._adam_connected = False
                 self._io_error = str(exc)
                 self._event("io_error", "critical", "撤销开阀输出失败，阀门关闭状态无法保证", details={"error": str(exc)})
 
@@ -401,14 +410,17 @@ class InterlockEngine:
             except (ModbusError, OSError):
                 logging.exception("Unable to clear Debug outputs during trip; retaining cleanup deadlines")
             already = self.interlock in ("tripped", "fault")
+            same_fault = already and self.trip_reason == reason
             self.interlock = "fault" if fault else "tripped"
             self.trip_reason = reason
             self._recovery_since = None
             if not already or self._valve_command != "close":
                 self._motion_reported = False
+                self._motion_timed_out = False
                 self._valve_command = "close"
                 self._valve_command_at = time.monotonic()
-            await self._safe_open_output()
+            if not same_fault or (self._off_retry_pending and time.monotonic() >= self._next_off_retry):
+                await self._safe_open_output()
             if not already:
                 snapshot = [
                     {"channel": s["channel"], "pressure_pa": s.get("pressure_pa"), "status": s.get("status")}
@@ -428,6 +440,7 @@ class InterlockEngine:
             self._valve_command = "close"
             self._valve_command_at = time.monotonic()
             self._motion_reported = False
+            self._motion_timed_out = False
             self._event("interlock_disarm", "warning", "操作员关闭联锁；阀门保持关闭", actor)
         await self._safe_open_output()
         self._refresh_status()
@@ -469,23 +482,35 @@ class InterlockEngine:
         if self.interlock not in ("tripped", "fault"):
             raise InterlockError("当前没有待清除的故障")
         try:
+            if self.mode == "real":
+                await self._ensure_io_driver()
+                # Cached connection flags must not prevent a manual recovery.
+                if not self._adam_connected or self._io_error:
+                    await self.adam.close()
+                await self.adam.connect()
             await self._clear_debug_outputs()
             if self.mode == "real":
-                if not self.adam or not self._adam_connected:
-                    raise InterlockError("DAM 未连接，无法确认开阀输出已撤销")
                 await self.adam.write_output(self.config.open_output, False)
                 await self._poll_io()
             else:
                 await self._write_output(self.config.open_output, False)
         except (ModbusError, OSError) as exc:
+            self._adam_connected = False
+            self._io_error = str(exc)
+            if self.adam:
+                await self.adam.close()
+            self._refresh_status()
+            self._publish()
             raise InterlockError(f"无法撤销开阀输出：{exc}") from exc
         self._open_output = False
+        self._off_retry_pending = False
         self.interlock = "disarmed"
         self.trip_reason = None
         self._rearm_required = True
         # Acknowledge the old movement fault; do not restart its timeout timer.
         self._valve_command = None
         self._motion_reported = True
+        self._motion_timed_out = False
         self._event("fault_cleared", "warning", "故障已清除，联锁未启用；阀位仍以传感器反馈为准", actor)
         self._refresh_status()
         self._publish()
@@ -522,6 +547,7 @@ class InterlockEngine:
         self._valve_command = "close"
         self._valve_command_at = time.monotonic()
         self._motion_reported = False
+        self._motion_timed_out = False
         self._event("interlock_reset", "warning", "操作员复位联锁；阀门仍保持关闭", actor)
         self._rearm_required = False
         self._refresh_status()
@@ -548,6 +574,7 @@ class InterlockEngine:
         self._valve_command = "open"
         self._valve_command_at = time.monotonic()
         self._motion_reported = False
+        self._motion_timed_out = False
         self._event("valve_open_command", "warning", "操作员请求开阀", actor)
         if self._history_error:
             await self.trip("开阀审计写入失败", kind="storage_fault", fault=True)
@@ -562,6 +589,7 @@ class InterlockEngine:
         self._valve_command = "close"
         self._valve_command_at = time.monotonic()
         self._motion_reported = False
+        self._motion_timed_out = False
         self._event("valve_close_command", "info", reason, actor)
         self._refresh_status()
         self._publish()
@@ -670,6 +698,20 @@ class InterlockEngine:
         self._refresh_status()
         self._publish()
         return {"ok": all(item.get("ok") for item in results.values()), **results}
+
+    async def _ensure_io_driver(self) -> None:
+        if self.adam is not None:
+            return
+        if self.config.io_device == "dam0808d":
+            if not self.config.dam_serial_port:
+                raise InterlockError("未配置 DAM 串口，无法撤销开阀输出")
+            self.adam = Dam0808DClient(self.config.dam_serial_port,
+                                      self.config.dam_baudrate, self.config.dam_unit_id)
+        else:
+            if not self.config.adam_host:
+                raise InterlockError("未配置 I/O 地址，无法撤销开阀输出")
+            self.adam = Adam6050Client(self.config.adam_host,
+                                      self.config.adam_port, self.config.adam_unit_id)
 
     async def _clear_debug_outputs(self) -> None:
         for channel in list(self._debug_deadlines):
@@ -853,31 +895,43 @@ class InterlockEngine:
             await self.connect_devices()
         try:
             await self._poll_tpg()
-            if self.mode == "real" and tick - self._last_io_read >= 0.2:
-                await self._poll_io()
             if self.mode == "real" and tick >= self._next_unit_check and self.tpg:
                 await self.tpg.read_unit()
                 self._next_unit_check = tick + 1.0
         except (TPG366Error, ModbusError, OSError, ValueError) as exc:
             if self.mode == "real":
-                if isinstance(exc, TPG366Error):
-                    self._tpg_connected = False
-                    self._tpg_error = str(exc)
-                    if self.tpg:
-                        await self.tpg.close()
-                else:
-                    self._adam_connected = False
-                    self._io_error = str(exc)
-                    if self.adam:
-                        await self.adam.close()
+                self._tpg_connected = False
+                self._tpg_error = str(exc)
+                if self.tpg:
+                    await self.tpg.close()
                 if self.interlock == "armed":
                     await self.trip(f"设备通信故障：{exc}", kind="device_communication_trip", fault=True)
             else:
                 self._event("simulation_error", "error", f"模拟器内部故障：{exc}")
 
+        # An unavailable gauge must not starve I/O recovery or keep stale valve
+        # feedback marked online. Failed I/O polls back off instead of reopening
+        # an absent USB adapter on every 100 ms protection tick.
+        now = time.monotonic()
+        if self.mode == "real" and now >= self._next_io_poll:
+            try:
+                await self._poll_io()
+                self._next_io_poll = time.monotonic() + 0.2
+            except (ModbusError, OSError, ValueError) as exc:
+                self._adam_connected = False
+                self._io_error = str(exc)
+                self._next_io_poll = time.monotonic() + 1.0
+                if self.adam:
+                    await self.adam.close()
+                if self.interlock == "armed":
+                    await self.trip(f"I/O 通信故障：{exc}", kind="device_communication_trip", fault=True)
+
         if self.mode == "simulation":
             self._tpg_connected = not self._sim_tpg_fault
             self._adam_connected = not self._sim_io_fault
+
+        if self._off_retry_pending and time.monotonic() >= self._next_off_retry:
+            await self._safe_open_output()
 
         pressure_fault = self._pressure_fault()
         if self.interlock == "armed" and pressure_fault:
@@ -897,7 +951,8 @@ class InterlockEngine:
             command_age = time.monotonic() - self._valve_command_at
             if self.status.valve == "fault":
                 await self.trip("插板阀打开/关闭位置反馈同时有效", kind="valve_sensor_conflict", fault=True)
-            elif self._valve_command is not None and command_age > self.config.valve_timeout_s:
+            elif (self._valve_command is not None and not self._motion_timed_out
+                  and command_age > self.config.valve_timeout_s):
                 expected = "open" if self._valve_command == "open" else "closed"
                 has_open_feedback = self.mode == "simulation" or self.config.valve_open_di is not None
                 reached = self.status.valve == expected
@@ -906,6 +961,7 @@ class InterlockEngine:
                 if not reached:
                     action = "打开" if expected == "open" else "关闭"
                     await self.trip(f"插板阀{action}位置反馈超时", kind="valve_motion_timeout", fault=True)
+                    self._motion_timed_out = True
 
         self._refresh_status()
         if self._valve_command and not self._motion_reported:

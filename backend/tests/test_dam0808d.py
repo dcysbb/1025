@@ -1,9 +1,11 @@
+import asyncio
 import struct
+import time
 import unittest
 from unittest.mock import patch
 
 from pydantic import ValidationError
-from app.drivers.dam0808d import Dam0808DClient, crc16
+from app.drivers.dam0808d import Dam0808DClient, DamResponseTimeout, crc16
 from app.drivers.adam6050 import ModbusError
 from app.models import AppConfig
 
@@ -46,7 +48,11 @@ class DamProtocol(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.fake = SerialDevice()
         self.patch = patch('app.drivers.dam0808d.serial.Serial', return_value=self.fake)
-        self.patch.start()
+        self.serial_factory = self.patch.start()
+        def reopen_serial(*args, **kwargs):
+            self.fake.is_open = True
+            return self.fake
+        self.serial_factory.side_effect = reopen_serial
         self.client = Dam0808DClient('COM4', unit_id=254)
     async def asyncTearDown(self):
         await self.client.close(); self.patch.stop()
@@ -100,6 +106,85 @@ class DamProtocol(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.fake, 'read', return_value=b''):
             with self.assertRaisesRegex(ModbusError, '超时'):
                 await self.client.read_inputs()
+        self.assertFalse(self.client.connected)
+        self.assertEqual(len(self.fake.writes), 2)
+
+    async def test_one_missing_read_response_recovers_without_reopening_port(self):
+        self.client.timeout_s = .02
+        original_write = self.fake.write
+        def lose_first_reply(frame):
+            original_write(frame)
+            if len(self.fake.writes) == 1:
+                self.fake.buffer.clear()
+        with patch.object(self.fake, 'write', side_effect=lose_first_reply):
+            self.assertTrue((await self.client.read_inputs())[0])
+        self.assertEqual(len(self.fake.writes), 2)
+        self.assertTrue(self.client.connected)
+        self.assertEqual(self.serial_factory.call_count, 1)
+
+    async def test_response_slower_than_old_400ms_deadline_is_accepted(self):
+        original_read = self.fake.read
+        delayed = False
+        def delayed_read(count):
+            nonlocal delayed
+            if not delayed:
+                delayed = True
+                time.sleep(.45)
+            return original_read(count)
+        with patch.object(self.fake, 'read', side_effect=delayed_read):
+            self.assertTrue((await self.client.read_inputs())[0])
+        self.assertEqual(len(self.fake.writes), 1)
+
+    async def test_lost_off_echo_can_be_confirmed_by_coil_read(self):
+        self.client.timeout_s = .02
+        self.fake.bits = 1
+        original_write = self.fake.write
+        def lose_write_echo(frame):
+            original_write(frame)
+            if frame[1] == 5:
+                self.fake.buffer.clear()
+        with patch.object(self.fake, 'write', side_effect=lose_write_echo):
+            await self.client.write_output(0, False)
+        self.assertEqual(self.fake.bits, 0)
+        self.assertEqual([frame[1] for frame in self.fake.writes], [5, 1])
+
+    async def test_lost_off_echo_with_still_enabled_coil_is_rejected(self):
+        self.client.timeout_s = .02
+        self.fake.bits = 1
+        self.fake.ignore_write = True
+        original_write = self.fake.write
+        def lose_write_echo(frame):
+            original_write(frame)
+            if frame[1] == 5:
+                self.fake.buffer.clear()
+        with patch.object(self.fake, 'write', side_effect=lose_write_echo):
+            with self.assertRaisesRegex(ModbusError, '仍开启'):
+                await self.client.write_output(0, False)
+        self.assertFalse(self.client.connected)
+
+    async def test_lost_open_echo_never_retries_or_assumes_success(self):
+        self.client.timeout_s = .02
+        original_write = self.fake.write
+        def lose_write_echo(frame):
+            original_write(frame)
+            self.fake.buffer.clear()
+        with patch.object(self.fake, 'write', side_effect=lose_write_echo):
+            with self.assertRaises(DamResponseTimeout):
+                await self.client.write_output(0, True)
+        self.assertEqual(len(self.fake.writes), 1)
+        self.assertFalse(self.client.connected)
+
+    async def test_cancelling_pending_serial_read_closes_after_worker_finishes(self):
+        original_read = self.fake.read
+        def delayed_read(count):
+            time.sleep(.025)
+            return original_read(count)
+        with patch.object(self.fake, 'read', side_effect=delayed_read):
+            task = asyncio.create_task(self.client.read_inputs())
+            await asyncio.sleep(.01)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
         self.assertFalse(self.client.connected)
 
 
