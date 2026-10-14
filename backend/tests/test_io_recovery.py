@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.configuration import ConfigurationStore
 from app.drivers.adam6050 import ModbusError
+from app.drivers.dam0808d import DamPortUnavailable
 from app.engine import InterlockEngine, InterlockError
 from app.storage import HistoryStore
 
@@ -177,13 +178,33 @@ class IoRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.e._adam_connected)
         self.assertFalse(self.e._io_manual_reset_required)
 
-    async def test_manual_reset_includes_usb_recovery_after_exhausted_attempts(self):
+    async def test_manual_reset_does_not_restart_a_healthy_replugged_device(self):
         self.e.interlock='fault'
         self.e._io_manual_reset_required=True
         self.e.adam.restart_usb.return_value={'ok':True}
         await self.e.clear_fault()
+        self.e.adam.restart_usb.assert_not_awaited()
+        self.assertEqual(self.e.interlock,'disarmed')
+
+    async def test_manual_reset_uses_usb_restart_only_if_normal_probe_fails(self):
+        self.e.interlock='fault'
+        self.e._io_manual_reset_required=True
+        self.e.adam.read_inputs.side_effect=[ModbusError('stalled USB'),[True]+[False]*7,[True]+[False]*7]
+        self.e.adam.restart_usb.return_value={'ok':True}
+        await self.e.clear_fault()
         self.e.adam.restart_usb.assert_awaited_once()
         self.assertEqual(self.e.interlock,'disarmed')
+
+    async def test_absent_port_does_not_restart_usb_or_clear_fault(self):
+        self.e.interlock='fault'
+        self.e._io_manual_reset_required=True
+        self.e.adam.connect.side_effect=DamPortUnavailable('COM5 未被系统识别')
+        with self.assertRaisesRegex(InterlockError,'未被系统识别'):
+            await self.e.clear_fault()
+        self.e.adam.restart_usb.assert_not_awaited()
+        self.e.adam.write_output.assert_not_awaited()
+        self.assertEqual(self.e.interlock,'fault')
+        self.e.adam.connect.side_effect=None
 
     async def test_provisional_on_deadline_is_rechecked_after_state_lock(self):
         async with self.e._lock:

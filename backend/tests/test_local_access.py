@@ -2,6 +2,8 @@ import importlib
 import os
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
+from app.drivers.adam6050 import ModbusError
 from starlette.requests import Request
 from fastapi import HTTPException
 
@@ -34,6 +36,15 @@ class LocalAccess(unittest.IsolatedAsyncioTestCase):
             request=self.request(host)
             self.assertEqual(self.main.require_operator(request),'local_operator')
             self.assertTrue((await self.main.auth_status(request))['authenticated'])
+
+    async def test_missing_io_returns_actionable_conflict_instead_of_internal_server_error(self):
+        with patch.object(self.main.ENGINE,'close_valve',new=AsyncMock(side_effect=ModbusError('COM5 未被系统识别'))), \
+             patch.object(self.main.ENGINE,'_begin_io_recovery') as recovery:
+            with self.assertRaises(HTTPException) as error:
+                await self.main.action_call('close','local_operator')
+        self.assertEqual(error.exception.status_code,409)
+        self.assertIn('COM5',error.exception.detail)
+        recovery.assert_called_once()
 
     async def test_remote_control_still_requires_session(self):
         request=self.request('192.168.1.25')

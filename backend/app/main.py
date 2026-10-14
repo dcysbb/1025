@@ -301,6 +301,9 @@ async def action_call(action: str, actor: str):
             raise InterlockError("未知操作")
     except InterlockError as exc:
         raise HTTPException(409, str(exc)) from exc
+    except (ModbusError, OSError) as exc:
+        ENGINE._begin_io_recovery(str(exc))
+        raise HTTPException(409, f"控制未完成，I/O 通信故障：{exc}") from exc
     return ENGINE.snapshot()
 
 

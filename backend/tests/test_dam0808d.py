@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from pydantic import ValidationError
-from app.drivers.dam0808d import Dam0808DClient, DamResponseTimeout, crc16
+from app.drivers.dam0808d import Dam0808DClient, DamResponseTimeout, DamPortUnavailable, crc16
 from app.drivers.adam6050 import ModbusError
 from app.models import AppConfig
 
@@ -111,6 +111,12 @@ class DamProtocol(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_channel_does_not_send(self):
         with self.assertRaises(ValueError): await self.client.write_output(8, True)
         self.assertEqual(self.fake.writes, [])
+
+    async def test_missing_port_is_reported_as_device_not_present(self):
+        self.serial_factory.side_effect=OSError("could not open port: FileNotFoundError(2, 'missing')")
+        with self.assertRaisesRegex(DamPortUnavailable,'未被系统识别'):
+            await self.client.connect()
+        self.assertFalse(self.client.connected)
 
     async def test_does_not_reconfigure_uart_during_response(self):
         class UsbUart(SerialDevice):

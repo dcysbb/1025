@@ -19,12 +19,22 @@ try {
     if ($port -notmatch '^COM[1-9][0-9]*$' -or $port -ieq $protected) { throw '禁止重启真空规串口或无效串口' }
     $suffix = '\(' + [regex]::Escape($port) + '\)$'
     $targets = @(Get-CimInstance Win32_PnPEntity -Filter "PNPClass='Ports'" | Where-Object { $_.Name -match $suffix })
+    if ($targets.Count -eq 0) { throw "DAM 串口 $port 未被 Windows 识别；无法通过串口复位不存在的设备" }
     if ($targets.Count -ne 1) { throw '未找到唯一的 DAM 串口设备' }
     $target = $targets[0]
     $id = [string]$target.PNPDeviceID
     if ($id -notmatch '^(USB\\VID_[0-9A-F]{4}&PID_[0-9A-F]{4}\\|USB\\VID_[0-9A-F]{4}&PID_[0-9A-F]{4}&MI_[0-9A-F]{2}\\|FTDIBUS\\)') { throw '配置的串口不是受支持的 USB 串口设备' }
     $log = & "$env:WINDIR\System32\pnputil.exe" /restart-device $id 2>&1
     if ($LASTEXITCODE -ne 0) { throw ("USB 设备重启失败，退出码 $LASTEXITCODE；" + ($log -join ' ')) }
+    $deadline = [DateTime]::UtcNow.AddSeconds(8)
+    $stable = 0
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $current = @(Get-CimInstance Win32_PnPEntity -Filter "PNPClass='Ports'" | Where-Object { $_.PNPDeviceID -ieq $id -and $_.Name -match $suffix -and $_.Status -eq 'OK' -and $_.Present })
+        if ($current.Count -eq 1) { $stable++ } else { $stable = 0 }
+        if ($stable -ge 3) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if ($stable -lt 3) { throw "USB 重启命令已完成，但 $port 尚未重新识别；请检查 USB 连接与供电" }
     @{ok=$true; port=$port; device_id=$id} | ConvertTo-Json -Compress
 } catch {
     @{ok=$false; error=$_.Exception.Message} | ConvertTo-Json -Compress

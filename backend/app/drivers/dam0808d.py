@@ -14,6 +14,10 @@ class DamResponseTimeout(ModbusError):
     """No complete RTU response within one bounded exchange."""
 
 
+class DamPortUnavailable(ModbusError):
+    """The configured COM endpoint is absent, rather than merely unresponsive."""
+
+
 def crc16(data: bytes) -> bytes:
     crc = 0xFFFF
     for value in data:
@@ -57,6 +61,10 @@ class Dam0808DClient:
                         await asyncio.to_thread(stream.close)
                     raise
             except (OSError, serial.SerialException) as exc:
+                if isinstance(exc, FileNotFoundError) or 'FileNotFoundError(2,' in str(exc):
+                    raise DamPortUnavailable(
+                        f'DAM 串口 {self.host} 未被系统识别；请检查 USB 连接，设备重新出现后再复位'
+                    ) from exc
                 raise ModbusError(f'DAM0808D 串口连接失败: {exc}') from exc
 
     async def close(self):

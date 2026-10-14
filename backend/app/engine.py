@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from .configuration import ConfigurationStore
 from .drivers.adam6050 import Adam6050Client, ModbusError
-from .drivers.dam0808d import Dam0808DClient
+from .drivers.dam0808d import Dam0808DClient, DamPortUnavailable
 from .drivers.tpg366 import GaugeReading, TPG366Client, TPG366Error
 from .drivers.tpg366_usb import TPG366USBClient
 from .models import AppConfig, ChannelConfig, SampleChannel, SystemStatus
@@ -525,13 +525,22 @@ class InterlockEngine:
         try:
             if self.mode == "real":
                 await self._ensure_io_driver()
-                # Cached connection flags must not prevent a manual recovery.
-                async with self._io_lock:
-                    if not self._adam_connected or self._io_error:
+                # A replugged device may already be healthy. Probe it first;
+                # restarting it on every acknowledgement can disrupt enumeration.
+                try:
+                    async with self._io_lock:
                         await self.adam.close()
-                    if self._io_manual_reset_required:
+                        await self.adam.connect()
+                    await self._poll_io()
+                except DamPortUnavailable:
+                    raise
+                except (ModbusError, OSError):
+                    if self.config.io_device != 'dam0808d' or not self._io_manual_reset_required:
+                        raise
+                    async with self._io_lock:
                         await self._restart_dam_usb()
-                    await self.adam.connect()
+                        await self.adam.connect()
+                    await self._poll_io()
             await self._clear_debug_outputs()
             if self.mode == "real":
                 await self._write_output(self.config.open_output, False)
