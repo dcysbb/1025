@@ -61,3 +61,13 @@ test('nearest search uses original timestamps and bounded pan preserves span',()
   assert.deepEqual(timeRange([-20,20],0,100),[0,40])
   assert.deepEqual(timeRange([80,120],0,100),[60,100])
 })
+test('fault event lines are hidden by default and shown only when requested',async()=>{
+  const events=Array.from({length:80},(_,i)=>({id:i,timestamp:new Date(base+i*1000).toISOString(),severity:'critical',type:'io_error',message:'通信故障'}))
+  await act(async()=>root.render(<Chart points={points} channels={[4]} unit="Pa" events={events}/>))
+  assert.equal(container.querySelectorAll('[data-event-marker]').length,0)
+  const checkbox=container.querySelector<HTMLInputElement>('.chart-event-toggle input')!
+  await act(async()=>checkbox.click())
+  assert.equal(container.querySelectorAll('[data-event-marker]').length,80)
+  await act(async()=>checkbox.click())
+  assert.equal(container.querySelectorAll('[data-event-marker]').length,0)
+})

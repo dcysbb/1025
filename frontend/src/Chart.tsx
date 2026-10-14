@@ -17,6 +17,7 @@ export default function Chart({points,channels,unit,compact=false,events=[]}:{po
   const lower=lowerDraft.unit===unit?lowerDraft.value:manual?format(manual[0]/FACTOR[unit]):''
   const upper=upperDraft.unit===unit?upperDraft.value:manual?format(manual[1]/FACTOR[unit]):''
   const setLower=(value:string)=>setLowerDraft({unit,value}), setUpper=(value:string)=>setUpperDraft({unit,value})
+  const [showEvents,setShowEvents] = useState(false)
   const [hover,setHover] = useState<Point|null>(null)
   const drag = useRef<{x:number;from:number;to:number}|null>(null)
   const svg = useRef<SVGSVGElement>(null)
@@ -85,7 +86,7 @@ export default function Chart({points,channels,unit,compact=false,events=[]}:{po
       <div className="chart-controls" aria-label="曲线缩放">
         <button disabled={!points.length} onClick={()=>zoom(.5)}>放大</button><button disabled={!points.length} onClick={()=>zoom(2)}>缩小</button>
         <button disabled={!view} onClick={()=>pan(-1)}>向前</button><button disabled={!view} onClick={()=>pan(1)}>向后</button>
-        <button onClick={()=>{setView(null);setHover(null)}}>完整范围</button><small>滚轮缩放 · 拖动平移</small>
+        <button onClick={()=>{setView(null);setHover(null)}}>完整范围</button><small>滚轮缩放 · 拖动平移</small><label className="chart-event-toggle"><input type="checkbox" checked={showEvents} onChange={e=>setShowEvents(e.target.checked)}/>显示事件</label>
       </div>
       <form className="chart-axis-controls" onSubmit={applyAxis}>
         <label>纵轴<select aria-label="纵轴刻度" value={scale} onChange={e=>{setScale(e.target.value as 'log'|'linear');setManual(null);setLower('');setUpper('');setError('')}}><option value="log">对数</option><option value="linear">线性</option></select></label>
@@ -108,7 +109,7 @@ export default function Chart({points,channels,unit,compact=false,events=[]}:{po
         {ticks.map((value,i)=><g key={i}><line className="chart-gridline" x1={p.l} x2={w-p.r} y1={y(value)} y2={y(value)}/><text className="chart-axis" x={p.l-10} y={y(value)+4} textAnchor="end">{(value/FACTOR[unit]).toExponential(1)}</text></g>)}
         <g clipPath={`url(#${clip})`}>
           {channels.map((n,i)=><path key={n} d={paths[i]} fill="none" stroke={COLORS[n-1]} strokeWidth={2.5} strokeLinecap="round"/>)}
-          {events.filter(e=>Date.parse(e.timestamp)>=from&&Date.parse(e.timestamp)<=to&&(e.severity==='critical'||e.type==='valve_arrived')).map(e=><g key={e.id}><title>{date(Date.parse(e.timestamp))} · {e.message}</title><line x1={x(e.timestamp)} x2={x(e.timestamp)} y1={p.t} y2={p.t+ch} stroke="var(--red)" strokeDasharray="4 5" opacity=".55"/><circle cx={x(e.timestamp)} cy={p.t+4} r="4" fill="var(--red)"/></g>)}
+          {showEvents&&events.filter(e=>Date.parse(e.timestamp)>=from&&Date.parse(e.timestamp)<=to&&(e.severity==='critical'||e.type==='valve_arrived')).map(e=><g key={e.id} data-event-marker><title>{date(Date.parse(e.timestamp))} · {e.message}</title><line x1={x(e.timestamp)} x2={x(e.timestamp)} y1={p.t} y2={p.t+ch} stroke="var(--red)" strokeDasharray="4 5" opacity=".55"/><circle cx={x(e.timestamp)} cy={p.t+4} r="4" fill="var(--red)"/></g>)}
           {hover&&<g><line className="chart-crosshair" x1={hoveredX} x2={hoveredX} y1={p.t} y2={p.t+ch}/>{hover.channels.filter(s=>channels.includes(s.channel)&&s.valid&&s.pressure_pa!=null&&Number.isFinite(s.pressure_pa)&&s.pressure_pa>=min&&s.pressure_pa<=max).map(s=><circle key={s.channel} cx={hoveredX} cy={y(s.pressure_pa!)} r="4" fill={COLORS[s.channel-1]}/>)}</g>}
         </g>
         <text className="chart-axis" x={p.l} y={h-8}>{points.length?date(from):''}</text><text className="chart-axis" x={w-p.r} y={h-8} textAnchor="end">{points.length?date(to):''}</text>

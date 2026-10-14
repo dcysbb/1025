@@ -7,6 +7,7 @@ import time
 import serial
 
 from .adam6050 import ModbusError
+from .windows_serial_recovery import restart_usb_serial
 
 
 class DamResponseTimeout(ModbusError):
@@ -66,6 +67,14 @@ class Dam0808DClient:
         stream, self._serial = self._serial, None
         if stream:
             await asyncio.to_thread(stream.close)
+
+    async def restart_usb(self, protected_port: str = '') -> dict:
+        async with self._lock:
+            await self._close()
+            result = await restart_usb_serial(self.host, protected_port)
+            if result.get('ok'):
+                await asyncio.sleep(1.0)
+            return result
 
     def _exchange(self, function, payload):
         stream = self._serial

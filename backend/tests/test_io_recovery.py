@@ -163,6 +163,38 @@ class IoRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.e.debug_relays())['outputs'][0])
         self.e.adam.read_outputs.assert_not_awaited()
 
+    async def test_second_reconnection_restarts_only_dam_usb_before_reopening(self):
+        self.e.config.tpg_connection='usb'
+        self.e.config.tpg_serial_port='COM3'
+        self.e.adam.restart_usb.return_value={'ok':True,'port':'COM4'}
+        self.e.adam.read_inputs.side_effect=ModbusError('USB endpoint stalled')
+        await self.e._io_cycle()
+        await self.e._io_cycle()
+        self.e.adam.restart_usb.assert_not_awaited()
+        self.e.adam.read_inputs.side_effect=None
+        await self.e._io_cycle()
+        self.e.adam.restart_usb.assert_awaited_once_with('COM3')
+        self.assertTrue(self.e._adam_connected)
+        self.assertFalse(self.e._io_manual_reset_required)
+
+    async def test_manual_reset_includes_usb_recovery_after_exhausted_attempts(self):
+        self.e.interlock='fault'
+        self.e._io_manual_reset_required=True
+        self.e.adam.restart_usb.return_value={'ok':True}
+        await self.e.clear_fault()
+        self.e.adam.restart_usb.assert_awaited_once()
+        self.assertEqual(self.e.interlock,'disarmed')
+
+    async def test_provisional_on_deadline_is_rechecked_after_state_lock(self):
+        async with self.e._lock:
+            self.e._debug_deadlines[0]=time.monotonic()-1
+            poll=asyncio.create_task(self.e._io_cycle())
+            await asyncio.sleep(.02)
+            self.e._debug_deadlines[0]=None  # Successful held ON finishes.
+        await poll
+        self.e.adam.write_output.assert_not_awaited()
+        self.assertIsNone(self.e._debug_deadlines[0])
+
     async def test_failed_debug_write_enters_recovery_and_retains_off_obligation(self):
         self.e.adam.write_output.side_effect = ModbusError('echo lost')
         with self.assertRaises(ModbusError):

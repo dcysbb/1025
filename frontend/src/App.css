@@ -307,3 +307,5 @@
 .events-aside .aside-heading>div { display:flex; }
 .metric-card .device-state-row { padding:6px 0; border:0; }
 @media(max-width:760px) { .event-row { grid-template-columns:110px 7px minmax(0,1fr); } }
+
+.chart-event-toggle { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted, var(--text-secondary)); }

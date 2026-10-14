@@ -529,6 +529,8 @@ class InterlockEngine:
                 async with self._io_lock:
                     if not self._adam_connected or self._io_error:
                         await self.adam.close()
+                    if self._io_manual_reset_required:
+                        await self._restart_dam_usb()
                     await self.adam.connect()
             await self._clear_debug_outputs()
             if self.mode == "real":
@@ -777,6 +779,14 @@ class InterlockEngine:
             self._debug_deadlines.pop(channel, None)
 
     @serialized
+    async def _expire_debug_outputs(self) -> None:
+        # Recheck after obtaining the state lock. A poll may have seen the
+        # provisional cleanup deadline while an ON request was still pending.
+        for channel, deadline in list(self._debug_deadlines.items()):
+            if deadline is not None and time.monotonic() >= deadline:
+                await self.debug_set_relay(channel, False, 1, 'system')
+
+    @serialized
     async def debug_relays(self) -> dict:
         if self.config.io_device != "dam0808d":
             raise InterlockError("Debug 继电器菜单仅支持 DAM0808D")
@@ -974,6 +984,15 @@ class InterlockEngine:
         self._io_manual_reset_required = False
         self._io_recovery_at = None
 
+    async def _restart_dam_usb(self) -> dict:
+        protected = self.config.tpg_serial_port if self.config.tpg_connection == 'usb' else ''
+        result = await self.adam.restart_usb(protected)
+        if not isinstance(result, dict):
+            return {'ok': False, 'error': '驱动未提供 USB 重启结果'}
+        self._event('io_usb_restart', 'info' if result.get('ok') else 'warning',
+                    'DAM USB 设备已重启' if result.get('ok') else 'DAM USB 设备重启失败', details=result)
+        return result
+
     async def _io_cycle(self) -> None:
         if self._io_manual_reset_required or self._stopping:
             return
@@ -986,14 +1005,14 @@ class InterlockEngine:
             if reconnect:
                 async with self._io_lock:
                     await self.adam.close()
+                    if self.config.io_device == 'dam0808d' and self._io_reconnect_attempt == 2:
+                        await self._restart_dam_usb()
                     await self.adam.connect()
             await self._poll_io()
             self._finish_io_recovery()
             self._next_io_poll = time.monotonic() + 0.2
             # Only pending OFF operations are resumed. Never replay an OPEN.
-            for channel, deadline in list(self._debug_deadlines.items()):
-                if deadline is not None and time.monotonic() >= deadline:
-                    await self.debug_set_relay(channel, False, 1, "system")
+            await self._expire_debug_outputs()
             if self._off_retry_pending and time.monotonic() >= self._next_off_retry:
                 await self._safe_open_output()
         except (ModbusError, OSError, ValueError, InterlockError) as exc:
