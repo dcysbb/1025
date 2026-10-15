@@ -59,11 +59,11 @@ jobs:
       - name: Package Windows application
         shell: pwsh
         working-directory: backend
-        run: python -m PyInstaller --clean --noconfirm --onedir --name VacuumInterlock --collect-all uvicorn --collect-all fastapi --collect-all cryptography --add-data "../frontend/dist;frontend/dist" run.py
+        run: python -m PyInstaller --clean --noconfirm --onedir --name VacuumInterlock --collect-all uvicorn --collect-all fastapi --collect-all cryptography --collect-all thorlabs_xa --add-data "../frontend/dist;frontend/dist" run.py
       - name: Package Windows service
         shell: pwsh
         working-directory: backend
-        run: python -m PyInstaller --clean --noconfirm --onedir --name VacuumInterlockService --collect-all uvicorn --collect-all fastapi --collect-all cryptography --hidden-import win32timezone --add-data "../frontend/dist;frontend/dist" windows_service.py
+        run: python -m PyInstaller --clean --noconfirm --onedir --name VacuumInterlockService --collect-all uvicorn --collect-all fastapi --collect-all cryptography --collect-all thorlabs_xa --hidden-import win32timezone --add-data "../frontend/dist;frontend/dist" windows_service.py
       - name: Smoke test packaged server
         shell: pwsh
         run: |

@@ -26,12 +26,14 @@ from .drivers.tpg366 import TPG366Error
 from .drivers.adam6050 import ModbusError
 from .models import ActionRequest, AppConfig, ConfigPatch, InjectPressure, LoginRequest
 from .storage import HistoryStore
+from .stage import StageController, StageError, install_stage_routes
 
 
 DATA_DIR = data_directory()
 CONFIG = ConfigurationStore(DATA_DIR)
 HISTORY = HistoryStore(DATA_DIR / "history.sqlite3")
 ENGINE = InterlockEngine(CONFIG, HISTORY)
+STAGE = StageController(DATA_DIR, ENGINE._event)
 SESSIONS: dict[str, float] = {}
 LOGIN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
 SESSION_COOKIE = "vacuum_interlock_session"
@@ -137,6 +139,10 @@ def set_session(response: Response, token: str, request: Request) -> None:
 async def lifespan(_: FastAPI):
     await ENGINE.start()
     yield
+    try:
+        await STAGE.disconnect()
+    except StageError:
+        pass  # Fault is retained in the stage status; vacuum shutdown still runs.
     await ENGINE.stop()
     HISTORY.close()
 
@@ -156,6 +162,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type"],
 )
+
+install_stage_routes(app, STAGE, require_read_access, require_operator, verify_origin)
 
 
 @app.middleware("http")
