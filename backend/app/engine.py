@@ -810,7 +810,6 @@ class InterlockEngine:
             if time.monotonic() - self._last_io_read > self.config.stale_timeout_s:
                 raise InterlockError("DAM 数据尚未更新，正在检查连接")
         return {"mode": self.mode, "outputs": outputs,
-                "output_labels": list(self.config.dam_output_labels),
                 "interlock": self.interlock,
                 "remaining_s": {str(ch): max(0, deadline-time.monotonic())
                                 for ch, deadline in self._debug_deadlines.items() if deadline is not None}}
