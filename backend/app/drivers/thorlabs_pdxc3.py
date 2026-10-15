@@ -10,7 +10,9 @@ import ctypes
 import ipaddress
 import json
 import os
+import re
 import subprocess
+import time
 
 
 def local_networks():
@@ -37,10 +39,11 @@ def local_networks():
 class Pdxc3Driver:
     TIMEOUT_MS = 1000
 
-    def __init__(self, serial_number, host="", port=40303):
+    def __init__(self, serial_number, host="", port=40303, connection="tcp"):
         self.serial_number = serial_number
         self.host = host
         self.port = port
+        self.connection = connection
         self.manager = None
         self.device = None
         self.channels = {}
@@ -56,8 +59,11 @@ class Pdxc3Driver:
         self.manager = SystemManager.instance()
         # 0 disables background USB discovery. Every open below supplies an
         # explicit Ethernet transport, so the vacuum gauge is never probed.
-        self.manager.startup("deviceDiscovery.interval=0")
-        if self.host:
+        self.manager.startup("deviceDiscovery.connections=\ndeviceDiscovery.interval=" +
+                             ("250" if self.connection == "usb" else "0"))
+        if self.connection == "usb":
+            transport = self.find_usb_transport()
+        elif self.host:
             transport = f"{ipaddress.IPv4Address(self.host)}:{self.port}"
         else:
             found = [d for d in self.discover(self.manager, self.port)
@@ -73,6 +79,21 @@ class Pdxc3Driver:
         self.channels = {n: self.device.get_subchannel(n) for n in (1, 2, 3)}
         self.stage_names = {n: c.get_stage_axis_params(self.TIMEOUT_MS).part_number for n, c in self.channels.items()}
         # Connecting reads state only: no enable, home, position-zero or movement.
+
+    def find_usb_transport(self):
+        # Windows XA enumerates its native USB devices without probing COM ports.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            found = [d for d in self.manager.get_device_list()
+                     if d.part_number == "PDXC3" and d.device == self.serial_number
+                     and d.transport and not re.fullmatch(r"\d+(?:\.\d+){3}:\d+", d.transport)
+                     and not d.transport.upper().startswith(("COM", "\\\\.\\COM", "TCP", "ETHERNET"))]
+            if len(found) == 1:
+                return found[0].transport
+            if len(found) > 1:
+                raise RuntimeError("发现多个匹配的 USB 设备，请检查序列号")
+            time.sleep(0.1)
+        raise RuntimeError("未找到指定序列号的 PDXC3 USB 设备；请检查 USB 连接和 Thorlabs 驱动")
 
     @staticmethod
     def discover(manager, port):
@@ -130,7 +151,6 @@ class Pdxc3Driver:
         name = str(target.get_stage_axis_params(self.TIMEOUT_MS).part_number).upper()
         if not name.startswith("PD1") or name.startswith("PD1D"):
             raise RuntimeError(f"CH{channel} 当前配置为 {name or '未知'}；请在 Thorlabs 软件中配置 PD1V/M")
-        target.set_connected_product(name)
         target.set_position_control_mode(TLMC_PZ_PositionControlMode.TLMC_PZ_PositionControlMode_OpenLoop,
                                          self.TIMEOUT_MS)
         target.set_enable_state(TLMC_EnableState.TLMC_Enabled)

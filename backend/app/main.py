@@ -24,7 +24,7 @@ from .configuration import ConfigurationStore, data_directory
 from .engine import InterlockEngine, InterlockError
 from .drivers.tpg366 import TPG366Error
 from .drivers.adam6050 import ModbusError
-from .models import ActionRequest, AppConfig, ConfigPatch, InjectPressure, LoginRequest
+from .models import ActionRequest, AppConfig, ConfigPatch, ConfigUpdate, InjectPressure, LoginRequest
 from .storage import HistoryStore
 from .stage import StageController, StageError, install_stage_routes
 
@@ -255,6 +255,56 @@ async def put_config(body: ConfigPatch, request: Request, actor: str = Depends(r
         "version": CONFIG.version,
         "restart_required": previous.allow_lan != ENGINE.config.allow_lan,
     }
+
+
+@app.patch("/api/config")
+async def patch_config(body: ConfigUpdate, request: Request, actor: str = Depends(require_operator)):
+    verify_origin(request)
+    previous = ENGINE.config
+    try:
+        await ENGINE.patch_config(body.config, actor)
+    except (ValueError, InterlockError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"config": ENGINE.config.model_dump(mode="json"), "version": CONFIG.version,
+            "restart_required": previous.allow_lan != ENGINE.config.allow_lan}
+
+
+@app.get("/api/hardware/ports", dependencies=[Depends(require_read_access)])
+async def hardware_ports():
+    from serial.tools import list_ports
+    ports = await asyncio.to_thread(list_ports.comports)
+    return {"ports": [{"device": p.device, "description": p.description,
+                       "serial_number": p.serial_number} for p in ports]}
+
+
+@app.get("/api/hardware/status", dependencies=[Depends(require_read_access)])
+async def hardware_status():
+    fresh = ENGINE._adam_connected and time.monotonic() - ENGINE._last_io_read <= ENGINE.config.stale_timeout_s
+    inputs = list(ENGINE._io_inputs)
+    outputs = list(ENGINE._io_outputs)
+    if ENGINE.mode == "simulation":
+        status = ENGINE.snapshot()
+        fresh = status["adam_connected"]
+        inputs[ENGINE.config.valve_closed_di] = (status["valve_closed_sensor"] == ENGINE.config.valve_closed_active_high)
+        if ENGINE.config.valve_open_di is not None:
+            inputs[ENGINE.config.valve_open_di] = (status["valve_open_sensor"] == ENGINE.config.valve_open_active_high)
+        outputs = list(ENGINE._debug_sim_outputs)
+        outputs[ENGINE.config.open_output] = ENGINE._open_output
+    return {"tpg": {"connected": ENGINE._tpg_connected, "error": getattr(ENGINE, "_tpg_error", None)},
+            "io": {"connected": ENGINE._adam_connected, "error": ENGINE._io_error,
+                   "inputs": inputs if fresh else None,
+                   "outputs": outputs if fresh else None,
+                   "manual_reset_required": ENGINE._io_manual_reset_required}}
+
+
+@app.post("/api/devices/connect-io")
+async def connect_io(request: Request, actor: str = Depends(require_operator)):
+    verify_origin(request)
+    result = await ENGINE.connect_io()
+    ENGINE._event("io_connect", "info" if result["ok"] else "error", "连接 I/O 控制器", actor, result)
+    if not result["ok"]:
+        raise HTTPException(409, result.get("error", "I/O 连接失败"))
+    return ENGINE.snapshot()
 
 
 @app.get("/api/debug/relays")

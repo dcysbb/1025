@@ -37,8 +37,8 @@ beforeEach(() => {
 })
 afterEach(async () => { await act(async () => root.unmount()); dom.window.close() })
 
-async function render(auth = true) {
-  await act(async () => { root.render(<StagePanel auth={auth} connected />); await new Promise(r => setTimeout(r, 10)) })
+async function render(auth = true, configuration = false) {
+  await act(async () => { root.render(<StagePanel auth={auth} connected configuration={configuration} />); await new Promise(r => setTimeout(r, 10)) })
 }
 function button(label: string) {
   const found = [...container.querySelectorAll<HTMLButtonElement>('button')].find(x => x.textContent?.trim() === label || x.getAttribute('aria-label') === label)
@@ -73,10 +73,10 @@ test('one click sends exactly one bounded axis move and no homing or enable call
 test('failed real connection remains real and does not silently simulate', async () => {
   state.channels = []
   rejectConnection = true
-  await render()
+  await render(true, true)
   await act(async () => { button('连接控制器').click(); await new Promise(r => setTimeout(r, 0)) })
   assert.ok(container.textContent?.includes('未找到设备'))
-  assert.equal(button('X 轴正向移动').disabled, true)
+  assert.equal(container.querySelector('[aria-label="X 轴正向移动"]'), null)
   assert.equal(container.querySelector('.stage-simulation'), null)
 })
 

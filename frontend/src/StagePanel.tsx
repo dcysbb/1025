@@ -4,6 +4,7 @@ import { ArrowLeftRight, Plug, Square, Unplug } from 'lucide-react'
 type Axis = 'x' | 'y' | 'z'
 type StageConfig = {
   mode: 'real' | 'simulation'
+  connection: 'usb' | 'tcp'
   serial_number: string
   host: string
   port: number
@@ -33,7 +34,7 @@ async function request<T>(path = '', method = 'GET', body?: unknown): Promise<T>
   return result
 }
 
-export default function StagePanel({ auth, connected }: { auth: boolean; connected: boolean }) {
+export default function StagePanel({ auth, connected, configuration = false, onDirtyChange }: { auth: boolean; connected: boolean; configuration?: boolean; onDirtyChange?: (dirty: boolean) => void }) {
   const [state, setState] = useState<StageState | null>(null)
   const [draft, setDraft] = useState<StageConfig | null>(null)
   const [steps, setSteps] = useState(10)
@@ -51,7 +52,7 @@ export default function StagePanel({ auth, connected }: { auth: boolean; connect
         const next = await request<StageState>()
         if (!cancelled) {
           setState(next)
-          setDraft(prior => prior ?? structuredClone(next.config))
+          setDraft(prior => configuration ? prior ?? structuredClone(next.config) : structuredClone(next.config))
           setOnline(true)
         }
       } catch {
@@ -62,7 +63,7 @@ export default function StagePanel({ auth, connected }: { auth: boolean; connect
     }
     void refresh()
     return () => { cancelled = true; clearTimeout(timer) }
-  }, [])
+  }, [configuration])
 
   async function act(path: string, body?: unknown, success = '') {
     const isStop = path === '/stop'
@@ -86,6 +87,7 @@ export default function StagePanel({ auth, connected }: { auth: boolean; connect
 
   const writable = auth && connected && online
   const dirty = draft && state && JSON.stringify(draft) !== JSON.stringify(state.config)
+  useEffect(() => { onDirtyChange?.(!!dirty) }, [dirty, onDirtyChange])
   const validMapping = draft && new Set(Object.values(draft.axes)).size === 3
   const validSteps = Number.isSafeInteger(steps) && steps >= 1 && steps <= (state?.config.max_steps ?? 1000)
   const moving = state?.channels.some(c => c.moving !== false)
@@ -115,19 +117,22 @@ export default function StagePanel({ auth, connected }: { auth: boolean; connect
     {!auth && <p>登录后可配置和控制位移台。</p>}
     {state?.config.mode === 'simulation' && <div className="stage-simulation">模拟模式：按钮只改变模拟数据。</div>}
 
-    <section className="content-panel glass-panel">
+    {configuration && <section className="content-panel glass-panel">
       <div className="panel-heading"><h2>连接与轴映射</h2></div>
       {!draft ? <p>{online ? '正在读取配置…' : '等待后台连接…'}</p> : <>
         <fieldset disabled={!writable || busy || !!state?.connected || !!state?.channels.length} className="stage-config">
           <label className="field">连接模式<select value={draft.mode} onChange={e => setDraft({ ...draft, mode: e.target.value as StageConfig['mode'] })}>
-            <option value="real">真实设备 · 网线</option><option value="simulation">模拟设备</option>
+            <option value="real">真实设备</option><option value="simulation">模拟设备</option>
           </select></label>
           <label className="field">控制器序列号<input placeholder="129…" inputMode="numeric" value={draft.serial_number}
             onChange={e => setDraft({ ...draft, serial_number: e.target.value.trim() })} /></label>
+          <label className="field">PDXC3 连接方式<select value={draft.connection ?? 'tcp'} onChange={e => setDraft({ ...draft, connection: e.target.value as 'usb' | 'tcp' })}><option value="tcp">以太网 TCP</option><option value="usb">原生 USB</option></select></label>
+          {(draft.connection ?? 'tcp') === 'tcp' && <>
           <label className="field">IPv4 地址（留空自动发现）<input placeholder="自动发现本机网段" value={draft.host}
             onChange={e => setDraft({ ...draft, host: e.target.value.trim() })} /></label>
           <label className="field">网络端口<input type="number" min={1} max={65535} value={draft.port}
             onChange={e => setDraft({ ...draft, port: Number(e.target.value) })} /></label>
+          </>}
           <label className="field">单次步数上限<input type="number" min={1} max={100000} value={draft.max_steps}
             onChange={e => setDraft({ ...draft, max_steps: Number(e.target.value) })} /></label>
           {AXES.map(axis => <div className="stage-mapping" key={axis}>
@@ -139,19 +144,20 @@ export default function StagePanel({ auth, connected }: { auth: boolean; connect
               onChange={e => setDraft({ ...draft, inverted: { ...draft.inverted, [axis]: e.target.checked } })} />反转方向</label>
           </div>)}
         </fieldset>
+        {dirty && <p className="subtle-note">有未保存的更改</p>}
         {!validMapping && <p className="inline-error">XYZ 不能使用重复通道。</p>}
         <div className="stage-actions">
           <button className="button button--quiet" disabled={!writable || busy || state?.connected || !dirty || !validMapping}
-            onClick={() => void act('/config', draft, '配置已保存')}>保存配置</button>
+            onClick={() => void act('/config', draft, '配置已保存')}>保存位移台配置</button>
           <button className="button button--primary" disabled={!writable || busy || state?.connected || !!dirty}
             onClick={() => void act('/connect', undefined, '位移台已连接')}><Plug size={15} />{busy ? '处理中…' : '连接控制器'}</button>
           <button className="button button--quiet" disabled={!writable || busy || !state?.connected && !state?.error}
             onClick={() => void act('/disconnect', undefined, '位移台已断开')}><Unplug size={15} />断开</button>
         </div>
       </>}
-    </section>
+    </section>}
 
-    <section className="content-panel glass-panel">
+    {!configuration && <section className="content-panel glass-panel">
       <div className="panel-heading stage-move-heading"><h2>轴运动</h2>
         <label className="field">每次移动（步）<input aria-label="每次移动步数" type="number" min={1}
           max={state?.config.max_steps ?? 1000} value={steps} onChange={e => setSteps(Number(e.target.value))} /></label>
@@ -176,6 +182,6 @@ export default function StagePanel({ auth, connected }: { auth: boolean; connect
         </article>
       })}</div>
       <p className="stage-note"><ArrowLeftRight size={14} />实际位移随负载和驱动设置变化；每次点击只发送一次有限步数移动。</p>
-    </section>
+    </section>}
   </div>
 }

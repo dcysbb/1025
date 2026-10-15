@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ChannelConfig(BaseModel):
@@ -33,6 +33,10 @@ class AppConfig(BaseModel):
     dam_serial_port: str = ""
     dam_baudrate: Literal[2400, 4800, 9600, 19200, 38400] = 9600
     dam_unit_id: int = Field(default=1, ge=1, le=255)
+    dam_input_labels: list[str] = Field(default_factory=lambda: [""] * 8)
+    dam_output_labels: list[str] = Field(default_factory=lambda: [""] * 8)
+    dam_input_notes: list[str] = Field(default_factory=lambda: [""] * 8)
+    dam_output_notes: list[str] = Field(default_factory=lambda: [""] * 8)
     adam_host: str = ""
     adam_port: int = Field(default=502, ge=1, le=65535)
     adam_unit_id: int = Field(default=1, ge=0, le=255)
@@ -54,6 +58,14 @@ class AppConfig(BaseModel):
         default_factory=lambda: [ChannelConfig() for _ in range(6)]
     )
 
+    @field_validator("dam_input_labels", "dam_output_labels", "dam_input_notes", "dam_output_notes")
+    @classmethod
+    def validate_terminal_text(cls, value: list[str], info):
+        limit = 160 if info.field_name.endswith("notes") else 32
+        if len(value) != 8 or any(len(item.strip()) > limit for item in value):
+            raise ValueError(f"端子定义须为8项，每项不超过{limit}个字符")
+        return [item.strip() for item in value]
+
     @model_validator(mode="after")
     def verify_channel_count_and_mapping(self) -> "AppConfig":
         if len(self.channels) != 6:
@@ -66,7 +78,8 @@ class AppConfig(BaseModel):
             if any(item > 7 for item in used):
                 raise ValueError("DAM0808D 输入编号必须为 0 至 7")
             if (self.tpg_connection == "usb" and self.dam_serial_port.strip()
-                and self.dam_serial_port.strip().casefold() == self.tpg_serial_port.strip().casefold()):
+                and self.dam_serial_port.strip().upper().removeprefix('\\\\.\\')
+                    == self.tpg_serial_port.strip().upper().removeprefix('\\\\.\\')):
                 raise ValueError("DAM 与真空规必须使用不同串口")
         elif self.open_output > 5:
             raise ValueError("ADAM6050 输出编号必须为 0 至 5")
@@ -75,6 +88,11 @@ class AppConfig(BaseModel):
 
 class ConfigPatch(BaseModel):
     config: AppConfig
+
+
+class ConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    config: dict[str, Any]
 
 
 class ActionRequest(BaseModel):

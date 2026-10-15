@@ -50,6 +50,8 @@ beforeEach(async()=>{
       resetCalls.push(JSON.parse(String(options?.body)))
       return new Response(JSON.stringify(resetFailure?{detail:'历史重置失败'}:{ok:true,deleted:6}),{status:resetFailure?503:200,headers:{'Content-Type':'application/json'}})
     }
+    if(path.includes('/hardware/status'))return new Response(JSON.stringify({tpg:{connected:true,error:null},io:{connected:true,error:null,inputs:null,outputs:null}}),{headers:{'Content-Type':'application/json'}})
+    if(path.includes('/stage'))return new Response(JSON.stringify({config:{mode:'real',connection:'tcp',serial_number:'129123456',host:'',port:40303,axes:{x:1,y:2,z:3},inverted:{x:false,y:false,z:false},max_steps:1000},connected:false,error:null,channels:[]}),{headers:{'Content-Type':'application/json'}})
     const data=path.includes('/auth/status')?{configured:true,authenticated:true,local:true}:path.includes('/config')?{config}:path.includes('/events')?{events:[],has_more:false}:path.includes('/history')?{rows:[],count:0,truncated:false}:status
     return new Response(JSON.stringify(data),{headers:{'Content-Type':'application/json'}})
   }
@@ -176,27 +178,21 @@ test('fault acknowledgement uses clear-fault without automatically arming',async
   assert.ok(container.textContent?.includes('故障已清除，联锁未启用'))
   assert.ok(byText('启用联锁'))
 })
-test('USB connection fields and gauge-only action are available in real mode',async()=>{
-  await click(byText('设置'));await click(byText('真实设备'))
+test('hardware navigation owns connections and valve mapping',async()=>{
+  await click(byText('设置'))
+  assert.equal(container.textContent?.includes('TPG366 真空规'),false)
+  await click(byText('硬件连接'))
   const select=[...container.querySelectorAll<HTMLSelectElement>('select')].find(x=>x.querySelector('option[value="usb"]'))!
   await act(async()=>{select.value='usb';select.dispatchEvent(new dom.window.Event('change',{bubbles:true}))})
-  assert.ok(container.querySelector('input[placeholder="COM3"]'))
-  assert.ok(container.textContent?.includes('USB 波特率'))
-  assert.equal(container.textContent?.includes('TPG 366 IP 地址'),false)
-  assert.equal(container.textContent?.includes('TPG TCP 端口'),false)
-  assert.ok(byText('仅连接真空规'))
+  assert.ok(container.textContent?.includes('真空规波特率'))
+  assert.ok(byText('连接真空规'))
+  await click(byText('插板阀映射'))
+  assert.ok(container.textContent?.includes('关闭到位输入'))
+  assert.ok(container.textContent?.includes('打开到位输入'))
+  assert.ok(container.textContent?.includes('电磁阀控制输出'))
+  assert.ok(container.textContent?.includes('继电器吸合'))
 })
-test('DAM settings expose valve sensors and relay without external circuit fields',async()=>{
-  await click(byText('设置'))
-  assert.ok(container.querySelector('input[placeholder="例如 COM4（须区别于真空规）"]'))
-  const inputs=[...container.querySelectorAll<HTMLInputElement>('input[type="number"]')]
-  assert.ok(inputs.some(x=>x.max==='7'))
-  for(const label of ['压力许可 DI','看门狗正常 DI','锁存就绪 DI','硬件复位 DO','旧 ADAM 心跳 DO','气源正常 DI'])assert.equal(container.textContent?.includes(label),false)
-  assert.ok(container.textContent?.includes('电磁阀控制 DO'))
-  assert.ok(container.textContent?.includes('关闭到位 DI'))
-  assert.ok(container.textContent?.includes('打开到位 DI'))
-  assert.ok(container.querySelector('select option[value="dam0808d"]'))
-})
+
 test('large histories preserve spikes, troughs and invalid gaps',()=>{
   const points:Point[]=Array.from({length:100000},(_,i)=>({timestamp:new Date(i*1000).toISOString(),channels:[{channel:4,pressure_pa:i===55555?1:i===33333?1e-9:.01,valid:i!==44444}]}))
   const reduced=reducePoints(points)

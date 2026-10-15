@@ -102,6 +102,8 @@ class InterlockEngine:
         self.tpg: Optional[TPG366Client] = None
         self.adam: Optional[Adam6050Client | Dam0808DClient] = None
         self._last_tpg_read: Optional[float] = None
+        self._gauge_config_pending = False
+        self._io_config_pending = False
         self._last_history_write = 0.0
         self._history_recording = True
         self._history_error: Optional[str] = None
@@ -653,7 +655,7 @@ class InterlockEngine:
         self._publish()
 
     @serialized
-    async def apply_config(self, config: AppConfig, actor: str = "operator") -> None:
+    async def apply_config(self, config: AppConfig, actor: str = "operator", reconnect: bool = True) -> None:
         async with self._lock:
             await self._clear_debug_outputs()
             if self.interlock == "armed":
@@ -664,6 +666,16 @@ class InterlockEngine:
             else:
                 await self._safe_open_output()
             old = self.config
+            routing_changed = any(getattr(old, key) != getattr(config, key) for key in (
+                "io_device", "dam_serial_port", "dam_baudrate", "dam_unit_id",
+                "adam_host", "adam_port", "adam_unit_id", "open_output"))
+            if routing_changed and self._off_retry_pending:
+                raise InterlockError("旧开阀输出关闭尚未确认，拒绝切换 I/O 或输出映射")
+            if self.mode == "real" and self.adam and old.open_output != config.open_output and not any(
+                getattr(old, key) != getattr(config, key) for key in (
+                    "io_device", "dam_serial_port", "dam_baudrate", "dam_unit_id",
+                    "adam_host", "adam_port", "adam_unit_id")):
+                await self._write_output(config.open_output, False)
             self.config_store.update(config)
             self.config = config
             self.mode = config.mode
@@ -696,13 +708,50 @@ class InterlockEngine:
                  "changes": {key: {"before": old.model_dump()[key], "after": config.model_dump()[key]}
                              for key in old.model_dump() if old.model_dump()[key] != config.model_dump()[key]}},
             )
-        if config.mode == "real":
+        if config.mode == "real" and reconnect:
             await self.connect_devices()
         self._refresh_status()
         self._publish()
 
     @serialized
+    async def patch_config(self, changes: dict, actor: str = "operator") -> None:
+        unknown = set(changes) - set(AppConfig.model_fields)
+        if unknown:
+            raise ValueError("未知配置字段：" + ", ".join(sorted(unknown)))
+        previous = self.config.model_dump()
+        candidate = AppConfig.model_validate({**previous, **changes})
+        changed = {key for key in previous if previous[key] != candidate.model_dump()[key]}
+        if not changed:
+            return
+        captions = {"dam_input_labels", "dam_output_labels", "dam_input_notes", "dam_output_notes"}
+        if changed <= captions:
+            self.config_store.update(candidate)
+            self.config = candidate
+            self._event("terminal_definitions_changed", "info", "端子名称与备注已保存", actor,
+                        {"fields": sorted(changed)})
+            self._refresh_status()
+            self._publish()
+            return
+        gauge = {"mode", "tpg_connection", "tpg_serial_port", "tpg_baudrate", "tpg_host", "tpg_port"}
+        io = {"mode", "io_device", "dam_serial_port", "dam_baudrate", "dam_unit_id",
+              "adam_host", "adam_port", "adam_unit_id"}
+        mapping = {"valve_closed_di", "valve_open_di", "valve_closed_active_high",
+                   "valve_open_active_high", "open_output"}
+        if changed & (gauge | io | mapping):
+            candidate.fail_closed_confirmed = False
+        pending = self._gauge_config_pending, self._io_config_pending
+        if candidate.mode == "real":
+            self._gauge_config_pending = self._gauge_config_pending or bool(changed & gauge)
+            self._io_config_pending = self._io_config_pending or bool(changed & io)
+        try:
+            await self.apply_config(candidate, actor, reconnect=False)
+        except Exception:
+            self._gauge_config_pending, self._io_config_pending = pending
+            raise
+
+    @serialized
     async def connect_gauge(self) -> dict:
+        self._gauge_config_pending = False
         if self.mode != "real":
             return {"ok": True, "mode": self.mode}
         if self.interlock == "armed":
@@ -736,14 +785,23 @@ class InterlockEngine:
     async def connect_devices(self) -> dict:
         if self.mode != "real":
             return {"ok": True, "mode": self.mode}
-        results = {"tpg": await self.connect_gauge()}
+        results = {"tpg": await self.connect_gauge(), "adam": await self.connect_io()}
+        return {"ok": all(item.get("ok") for item in results.values()), **results}
+
+    @serialized
+    async def connect_io(self) -> dict:
+        self._io_config_pending = False
+        if self.mode != "real":
+            return {"ok": True, "mode": self.mode}
+        if self.interlock == "armed":
+            await self.trip("重新连接 I/O，联锁保持锁存关闭", kind="io_reconnect")
         dam = self.config.io_device == "dam0808d"
         address = self.config.dam_serial_port if dam else self.config.adam_host
         port = self.config.dam_baudrate if dam else self.config.adam_port
         unit = self.config.dam_unit_id if dam else self.config.adam_unit_id
         driver = Dam0808DClient if dam else Adam6050Client
         if self._io_manual_reset_required:
-            results["adam"] = {"ok": False, "error": "DAM 三次重连失败，请使用人工复位"}
+            result = {"ok": False, "error": "DAM 三次重连失败，请使用人工复位"}
         elif address:
             async with self._io_lock:
                 if self.adam is None or not isinstance(self.adam, driver) or (self.adam.host, self.adam.port, self.adam.unit_id) != (address, port, unit):
@@ -754,16 +812,16 @@ class InterlockEngine:
                 await self._poll_io()
                 self._adam_connected = True
                 self._io_error = None
-                results["adam"] = {"ok": True, "device": self.config.io_device}
+                result = {"ok": True, "device": self.config.io_device}
                 self._finish_io_recovery()
             except ModbusError as exc:
                 self._begin_io_recovery(str(exc))
-                results["adam"] = {"ok": False, "error": str(exc)}
+                result = {"ok": False, "error": str(exc)}
         else:
-            results["adam"] = {"ok": False, "error": "未配置 DAM 串口" if dam else "未配置 IP"}
+            result = {"ok": False, "error": "未配置 DAM 串口" if dam else "未配置 IP"}
         self._refresh_status()
         self._publish()
-        return {"ok": all(item.get("ok") for item in results.values()), **results}
+        return result
 
     async def _ensure_io_driver(self) -> None:
         if self.adam is not None:
@@ -810,6 +868,9 @@ class InterlockEngine:
             if time.monotonic() - self._last_io_read > self.config.stale_timeout_s:
                 raise InterlockError("DAM 数据尚未更新，正在检查连接")
         return {"mode": self.mode, "outputs": outputs,
+                "output_labels": self.config.dam_output_labels,
+                "output_notes": self.config.dam_output_notes,
+                "valve_output": self.config.open_output,
                 "interlock": self.interlock,
                 "remaining_s": {str(ch): max(0, deadline-time.monotonic())
                                 for ch, deadline in self._debug_deadlines.items() if deadline is not None}}
@@ -1003,7 +1064,7 @@ class InterlockEngine:
         return result
 
     async def _io_cycle(self) -> None:
-        if self._io_manual_reset_required or self._stopping:
+        if self._io_manual_reset_required or self._stopping or self._io_config_pending:
             return
         reconnect = self._io_reconnecting
         if reconnect:
@@ -1039,6 +1100,8 @@ class InterlockEngine:
             self._publish()
 
     async def _gauge_cycle(self, tick: float) -> None:
+        if self._gauge_config_pending:
+            return
         try:
             if self.mode == "real" and self.tpg is None:
                 usb = self.config.tpg_connection == "usb"

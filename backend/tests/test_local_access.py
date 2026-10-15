@@ -46,6 +46,28 @@ class LocalAccess(unittest.IsolatedAsyncioTestCase):
         self.assertIn('COM5',error.exception.detail)
         recovery.assert_called_once()
 
+    async def test_hardware_routes_keep_permission_guards_and_origin_checks(self):
+        routes = {route.path: route for route in self.main.app.routes if hasattr(route, 'dependant')}
+        for path in ('/api/devices/connect-io',):
+            self.assertIn(self.main.require_operator, [dep.call for dep in routes[path].dependant.dependencies])
+        patch_route = next(route for route in self.main.app.routes if getattr(route, 'path', None) == '/api/config' and 'PATCH' in getattr(route, 'methods', set()))
+        self.assertIn(self.main.require_operator, [dep.call for dep in patch_route.dependant.dependencies])
+        for path in ('/api/hardware/ports', '/api/hardware/status'):
+            self.assertIn(self.main.require_read_access, [dep.call for dep in routes[path].dependant.dependencies])
+        from app.models import ConfigUpdate
+        with patch.object(self.main.ENGINE, 'patch_config', new=AsyncMock()) as update:
+            with self.assertRaises(HTTPException):
+                await self.main.patch_config(ConfigUpdate(config={}), self.request(), 'test')
+            update.assert_not_called()
+
+    async def test_port_listing_only_enumerates_and_does_not_open_serial_ports(self):
+        from types import SimpleNamespace
+        port = SimpleNamespace(device='COM3', description='TPG', serial_number='123')
+        with patch('serial.tools.list_ports.comports', return_value=[port]), patch('serial.Serial') as open_port:
+            result = await self.main.hardware_ports()
+        self.assertEqual(result['ports'][0]['device'], 'COM3')
+        open_port.assert_not_called()
+
     async def test_remote_control_still_requires_session(self):
         request=self.request('192.168.1.25')
         with self.assertRaises(HTTPException) as error: self.main.require_operator(request)

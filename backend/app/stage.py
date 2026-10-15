@@ -17,6 +17,7 @@ class StageError(Exception):
 class StageConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["real", "simulation"] = "real"
+    connection: Literal["usb", "tcp"] = "tcp"
     serial_number: str = Field(default="", pattern=r"^([0-9]{8,12})?$")
     host: str = ""
     port: int = Field(default=40303, ge=1, le=65535)
@@ -104,7 +105,8 @@ class StageController:
                 driver = SimulatedStage()
             else:
                 from .drivers.thorlabs_pdxc3 import Pdxc3Driver
-                driver = Pdxc3Driver(self.config.serial_number, self.config.host, self.config.port)
+                driver = Pdxc3Driver(self.config.serial_number, self.config.host, self.config.port,
+                                     connection=self.config.connection)
             try:
                 await self._call(driver.connect)
                 channels = await self._call(driver.status)
