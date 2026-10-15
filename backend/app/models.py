@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ChannelConfig(BaseModel):
@@ -33,6 +33,10 @@ class AppConfig(BaseModel):
     dam_serial_port: str = ""
     dam_baudrate: Literal[2400, 4800, 9600, 19200, 38400] = 9600
     dam_unit_id: int = Field(default=1, ge=1, le=255)
+    # Display-only terminal captions for IN1-IN8 / OUT1-OUT8; control logic
+    # stays driven by the DI/DO index fields below.
+    dam_input_labels: list[str] = Field(default_factory=lambda: [""] * 8)
+    dam_output_labels: list[str] = Field(default_factory=lambda: [""] * 8)
     adam_host: str = ""
     adam_port: int = Field(default=502, ge=1, le=65535)
     adam_unit_id: int = Field(default=1, ge=0, le=255)
@@ -53,6 +57,16 @@ class AppConfig(BaseModel):
     channels: list[ChannelConfig] = Field(
         default_factory=lambda: [ChannelConfig() for _ in range(6)]
     )
+
+    @field_validator("dam_input_labels", "dam_output_labels")
+    @classmethod
+    def terminal_labels_are_bounded(cls, value: list[str]) -> list[str]:
+        if len(value) != 8:
+            raise ValueError("DAM0808D 端子标签必须为 8 项")
+        cleaned = [item.strip() for item in value]
+        if any(len(item) > 24 for item in cleaned):
+            raise ValueError("DAM0808D 端子标签不能超过 24 个字符")
+        return cleaned
 
     @model_validator(mode="after")
     def verify_channel_count_and_mapping(self) -> "AppConfig":

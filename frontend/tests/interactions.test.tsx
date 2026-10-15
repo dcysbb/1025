@@ -18,7 +18,8 @@ let debugCalls:Array<{channel:number;enabled:boolean;duration_s:number}>=[]
 let relayOutputs=Array<boolean>(8).fill(false)
 let clearFaultCalls=0
 const status={timestamp:new Date().toISOString(),mode:'simulation',interlock:'disarmed',interlock_label:'未启用',valve:'closed',valve_closed_sensor:true,tpg_connected:true,adam_connected:true,pressure_ok:true,history_recording:true,channels:[]}
-const config={io_device:'dam0808d',dam_serial_port:'',dam_baudrate:9600,dam_unit_id:1,mode:'simulation',tpg_connection:'tcp',tpg_serial_port:'',tpg_baudrate:9600,tpg_host:'',tpg_port:8000,adam_host:'',adam_port:502,adam_unit_id:1,sample_interval_s:1,stale_timeout_s:1,valve_timeout_s:2,recovery_hold_s:5,history_retention_days:null,allow_lan:false,valve_closed_di:0,valve_open_di:null,valve_closed_active_high:true,valve_open_active_high:true,open_output:0,fail_closed_confirmed:false,channels:Array.from({length:6},()=>({enabled:false,label:'',trip_pa:null,reset_pa:null}))}
+const baseConfig={io_device:'dam0808d',dam_serial_port:'',dam_baudrate:9600,dam_unit_id:1,dam_input_labels:Array<string>(8).fill(''),dam_output_labels:Array<string>(8).fill(''),mode:'simulation',tpg_connection:'tcp',tpg_serial_port:'',tpg_baudrate:9600,tpg_host:'',tpg_port:8000,adam_host:'',adam_port:502,adam_unit_id:1,sample_interval_s:1,stale_timeout_s:1,valve_timeout_s:2,recovery_hold_s:5,history_retention_days:null,allow_lan:false,valve_closed_di:0,valve_open_di:null,valve_closed_active_high:true,valve_open_active_high:true,open_output:0,fail_closed_confirmed:false,channels:Array.from({length:6},()=>({enabled:false,label:'',trip_pa:null,reset_pa:null}))}
+let config:typeof baseConfig=structuredClone(baseConfig)
 class Socket {
   static instances:Socket[]=[]
   onopen:(()=>void)|null=null;onclose:(()=>void)|null=null;onmessage:((event:{data:string})=>void)|null=null
@@ -26,7 +27,7 @@ class Socket {
   close(){}
 }
 beforeEach(async()=>{
-  offline=false;resetCalls=[];resetFailure=false;Socket.instances=[];debugCalls=[];relayOutputs=Array<boolean>(8).fill(false);clearFaultCalls=0
+  offline=false;resetCalls=[];resetFailure=false;Socket.instances=[];debugCalls=[];relayOutputs=Array<boolean>(8).fill(false);clearFaultCalls=0;config=structuredClone(baseConfig)
   dom=new JSDOM('<!doctype html><div id="root"></div>',{url:'http://localhost'})
   Object.assign(globalThis,{window:dom.window,document:dom.window.document,localStorage:dom.window.localStorage,location:dom.window.location,Event:dom.window.Event,WebSocket:Socket,IS_REACT_ACT_ENVIRONMENT:true})
   Object.defineProperty(globalThis,'navigator',{value:dom.window.navigator,configurable:true})
@@ -50,7 +51,7 @@ beforeEach(async()=>{
       resetCalls.push(JSON.parse(String(options?.body)))
       return new Response(JSON.stringify(resetFailure?{detail:'历史重置失败'}:{ok:true,deleted:6}),{status:resetFailure?503:200,headers:{'Content-Type':'application/json'}})
     }
-    const data=path.includes('/auth/status')?{configured:true,authenticated:true,local:true}:path.includes('/config')?{config}:path.includes('/events')?{events:[],has_more:false}:path.includes('/history')?{rows:[],count:0,truncated:false}:status
+    const data=path.includes('/auth/status')?{configured:true,authenticated:true,local:true}:path.includes('/stage')?{config:{mode:'simulation',serial_number:'01234567',host:'',port:40303},connected:false}:path.includes('/config')?{config}:path.includes('/events')?{events:[],has_more:false}:path.includes('/history')?{rows:[],count:0,truncated:false}:status
     return new Response(JSON.stringify(data),{headers:{'Content-Type':'application/json'}})
   }
   container=document.getElementById('root')!
@@ -133,7 +134,7 @@ test('history rejects an empty channel selection without retaining export',async
   assert.ok(container.textContent?.includes('至少一个通道'))
 })
 test('all five pages render without exceptions',async()=>{
-  for(const label of ['设置','事件日志','历史数据','联锁控制','总览','Debug']){
+  for(const label of ['设置','事件日志','历史数据','联锁控制','总览','Debug','硬件连接']){
     await click(byText(label))
     assert.ok(container.querySelector('h1'))
   }
@@ -177,25 +178,26 @@ test('fault acknowledgement uses clear-fault without automatically arming',async
   assert.ok(byText('启用联锁'))
 })
 test('USB connection fields and gauge-only action are available in real mode',async()=>{
-  await click(byText('设置'));await click(byText('真实设备'))
-  const select=[...container.querySelectorAll<HTMLSelectElement>('select')].find(x=>x.querySelector('option[value="usb"]'))!
+  config.mode='real'
+  await click(byText('硬件连接'))
+  const select=[...container.querySelectorAll<HTMLSelectElement>('select')].find(x=>x.querySelector('option[value="tcp"]')&&x.querySelector('option[value="usb"]'))!
   await act(async()=>{select.value='usb';select.dispatchEvent(new dom.window.Event('change',{bubbles:true}))})
   assert.ok(container.querySelector('input[placeholder="COM3"]'))
   assert.ok(container.textContent?.includes('USB 波特率'))
-  assert.equal(container.textContent?.includes('TPG 366 IP 地址'),false)
-  assert.equal(container.textContent?.includes('TPG TCP 端口'),false)
+  assert.equal(container.querySelector('input[placeholder="例如 192.168.1.20"]'),null)
   assert.ok(byText('仅连接真空规'))
 })
-test('DAM settings expose valve sensors and relay without external circuit fields',async()=>{
-  await click(byText('设置'))
+test('DAM hardware page exposes valve sensors and relay without external circuit fields',async()=>{
+  await click(byText('硬件连接'))
   assert.ok(container.querySelector('input[placeholder="例如 COM4（须区别于真空规）"]'))
-  const inputs=[...container.querySelectorAll<HTMLInputElement>('input[type="number"]')]
-  assert.ok(inputs.some(x=>x.max==='7'))
-  for(const label of ['压力许可 DI','看门狗正常 DI','锁存就绪 DI','硬件复位 DO','旧 ADAM 心跳 DO','气源正常 DI'])assert.equal(container.textContent?.includes(label),false)
-  assert.ok(container.textContent?.includes('电磁阀控制 DO'))
-  assert.ok(container.textContent?.includes('关闭到位 DI'))
-  assert.ok(container.textContent?.includes('打开到位 DI'))
+  assert.ok(container.textContent?.includes('USB（USB 转 RS485）'))
+  assert.ok(container.textContent?.includes('关闭到位传感器'))
+  assert.ok(container.textContent?.includes('打开到位传感器'))
+  assert.ok(container.textContent?.includes('开阀电磁阀输出'))
+  assert.ok(container.querySelector('input[aria-label="IN1 功能标签"]'))
+  assert.ok(container.querySelector('input[aria-label="OUT8 功能标签"]'))
   assert.ok(container.querySelector('select option[value="dam0808d"]'))
+  for(const label of ['压力许可 DI','看门狗正常 DI','锁存就绪 DI','硬件复位 DO','旧 ADAM 心跳 DO','气源正常 DI'])assert.equal(container.textContent?.includes(label),false)
 })
 test('large histories preserve spikes, troughs and invalid gaps',()=>{
   const points:Point[]=Array.from({length:100000},(_,i)=>({timestamp:new Date(i*1000).toISOString(),channels:[{channel:4,pressure_pa:i===55555?1:i===33333?1e-9:.01,valid:i!==44444}]}))

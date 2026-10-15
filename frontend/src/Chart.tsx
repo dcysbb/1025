@@ -1,13 +1,22 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Activity } from 'lucide-react'
 import { domain, nearestPoint, reducePoints, timeRange, type Point } from './chartData'
+import type { Unit } from './lib/types'
+import { FACTOR } from './lib/format'
 
-type Unit = 'Pa' | 'mbar' | 'Torr'
-type Marker = {id:number; timestamp:string; severity:string; type:string; message:string}
-const FACTOR = {Pa:1, mbar:100, Torr:133.32236842105263}
-const COLORS = ['#b99bff','#67e8cf','#ffcb72','#67a9ff','#ff8d9b','#d4ee83']
-const date = (ms:number) => new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false}).format(new Date(ms))
-const format = (value:number) => value.toExponential(2)
+type Marker = { id: number; timestamp: string; severity: string; type: string; message: string }
+const COLORS = ['#b99bff', '#67e8cf', '#ffcb72', '#67a9ff', '#ff8d9b', '#d4ee83']
+const date = (ms: number) =>
+  new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(ms))
+const format = (value: number) => value.toExponential(2)
 
 export default function Chart({points,channels,unit,compact=false,events=[]}:{points:Point[]; channels:number[]; unit:Unit; compact?:boolean; events?:Marker[]}) {
   const [view,setView] = useState<[number,number]|null>(null)
