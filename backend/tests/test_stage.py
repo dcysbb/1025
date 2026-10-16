@@ -1,4 +1,6 @@
+import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -122,6 +124,133 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
         for steps in (0, -1, 1.5, True, "10", 100001):
             with self.assertRaises(ValidationError):
                 StageMove(axis="x", direction=1, steps=steps)
+
+    def move_results(self):
+        return [call.args[4] for call in self.events.call_args_list if call.args[0] == "stage_move"]
+
+    async def pause_polling(self):
+        self.stage._poll_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await self.stage._poll_task
+        self.stage._poll_task = None
+
+    async def test_move_waits_for_a_later_complete_idle_sample(self):
+        await self.simulate()
+        await self.pause_polling()
+        command = StageMove(axis="x", direction=1, steps=10)
+        response = await self.stage.move(command, "test")
+        self.assertTrue(response["motion_pending"])
+        with self.assertRaises(StageError):
+            await self.stage.move(command, "other_operator")
+        original = self.stage.driver.status
+        for moving in (True, None):
+            rows = original()
+            rows[0]["moving"] = moving
+            self.stage.driver.status = lambda: rows
+            await self.stage._poll_once()
+            self.assertTrue(self.stage.motion_pending)
+        self.stage.driver.status = lambda: original()[:2]
+        await self.stage._poll_once()
+        self.assertTrue(self.stage.motion_pending)
+        self.stage.driver.status = original
+        await self.stage._poll_once()
+        self.assertFalse(self.stage.motion_pending)
+        await self.stage.move(command, "test")
+        self.assertEqual(self.stage.driver.counts[1], 20)
+        self.assertEqual([row["result"] for row in self.move_results()], ["submitted", "rejected", "submitted"])
+
+    async def test_move_results_distinguish_rejection_and_ambiguous_send(self):
+        command = StageMove(axis="y", direction=-1, steps=5)
+        with self.assertRaises(StageError):
+            await self.stage.move(command, "test")
+        self.assertEqual(self.move_results()[-1]["result"], "rejected")
+        await self.simulate(axes={"x": 3, "y": 1, "z": 2}, inverted={"x": False, "y": True, "z": False})
+        driver = self.stage.driver
+        original = driver.status
+        driver.status = Mock(side_effect=OSError("preflight read failed"))
+        driver.move = Mock()
+        with self.assertRaises(StageError):
+            await self.stage.move(command, "test")
+        driver.move.assert_not_called()
+        self.assertEqual(self.move_results()[-1]["result"], "rejected")
+        driver.status = original
+        self.stage.connected = True
+        driver.move.side_effect = OSError("ack lost")
+        driver.stop = Mock()
+        with self.assertRaises(StageError):
+            await self.stage.move(command, "test")
+        result = self.move_results()[-1]
+        self.assertEqual((result["result"], result["channel"], result["hardware_direction"], result["mode"]),
+                         ("unconfirmed", 1, 1, "simulation"))
+        self.assertIn("ack lost", result["reason"])
+        self.assertTrue(self.stage.motion_pending)
+        self.assertFalse(self.stage.connected)
+        driver.move.assert_called_once_with(1, 1, 5)
+        await self.stage.stop("test")
+        self.assertFalse(self.stage.motion_pending)
+        self.assertFalse(self.stage.connected)  # A stop never silently reconnects a faulted driver.
+
+    async def test_concurrent_move_is_rejected_without_queueing(self):
+        await self.simulate()
+        await self.pause_polling()
+        driver = self.stage.driver
+        entered, release = threading.Event(), threading.Event()
+        def blocked_move(*_):
+            entered.set()
+            if not release.wait(2):
+                raise TimeoutError("test worker timed out")
+        driver.move = Mock(side_effect=blocked_move)
+        command = StageMove(axis="x", direction=1, steps=3)
+        first = asyncio.create_task(self.stage.move(command, "first"))
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            with self.assertRaises(StageError):
+                await asyncio.wait_for(self.stage.move(command, "second"), .1)
+        finally:
+            release.set()
+        await first
+        driver.move.assert_called_once()
+        self.assertEqual(self.move_results()[0]["result"], "rejected")
+
+    async def test_stop_cancels_admitted_move_still_waiting_for_preflight(self):
+        await self.simulate()
+        await self.pause_polling()
+        driver = self.stage.driver
+        original = driver.status
+        entered, release = threading.Event(), threading.Event()
+        calls = 0
+        def blocked_status():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                if not release.wait(2):
+                    raise TimeoutError("test worker timed out")
+            return original()
+        driver.status = blocked_status
+        driver.move, driver.stop = Mock(), Mock()
+        first = asyncio.create_task(self.stage.move(StageMove(axis="x", direction=1, steps=3), "test"))
+        self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+        stop = asyncio.create_task(self.stage.stop("test"))
+        await asyncio.sleep(0)
+        release.set()
+        with self.assertRaisesRegex(StageError, "未下发"):
+            await first
+        response = await stop
+        driver.move.assert_not_called()
+        driver.stop.assert_called_once()
+        self.assertFalse(response["motion_pending"])
+
+    async def test_failed_stop_keeps_pending_and_successful_disconnect_resets_it(self):
+        await self.simulate()
+        await self.stage.move(StageMove(axis="z", direction=1, steps=1), "test")
+        self.stage.driver.stop = Mock(side_effect=OSError("stop failed"))
+        with self.assertRaises(StageError):
+            await self.stage.stop("test")
+        self.assertTrue(self.stage.snapshot()["motion_pending"])
+        self.stage.driver.stop = Mock()
+        await self.stage.disconnect("test")
+        self.assertFalse(self.stage.snapshot()["motion_pending"])
 
 
 class DriverTests(unittest.TestCase):

@@ -1,0 +1,57 @@
+.stage-panel .inline-error { overflow-wrap: anywhere; }
+.stage-panel .stage-state { padding: 7px 0; font-size: 12px; opacity: 1; color: var(--muted); }
+.stage-panel .stage-state--on { color: var(--green); }
+.stage-panel .stage-stop { min-height: 42px; padding-inline: 18px; color: var(--red) !important; border-color: rgba(255,123,134,.4) !important; background: rgba(255,123,134,.10); }
+.stage-stop:hover:not(:disabled) { background: rgba(255,123,134,.16); }
+.stage-panel .stage-note, .stage-header p { color: var(--muted); opacity: 1; font-size: 12px; }
+.stage-panel .stage-note svg { flex-shrink: 0; margin-top: 2px; }
+.stage-open-loop { font: 10px 'Cascadia Mono', Consolas, monospace; letter-spacing: .12em; color: var(--dim); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.stage-keyboard-area { border-radius: 12px; outline: 2px solid transparent; outline-offset: 5px; transition: outline-color 160ms ease; }
+.stage-keyboard-area--armed:focus-within { outline-color: rgba(var(--accent-rgb),.4); }
+.stage-keyboard-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 14px; background: var(--field-bg); border: 1px solid var(--line); border-radius: 12px; }
+.stage-keyboard-toolbar>div { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.stage-keyboard-area--armed .stage-keyboard-toolbar>div { color: var(--accent); }
+.stage-keyboard-toolbar>button { margin-left: auto; font-size: 11px; min-height: 32px; padding: 6px 12px; }
+.stage-keyboard-toolbar>p { width: 100%; margin: 0; color: var(--dim); font-size: 11px; }
+.stage-workbench .stage-axis-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 16px; margin: 20px 0; }
+.stage-workbench .stage-axis { min-width: 0; border: 1px solid var(--line); border-radius: 15px; padding: 18px; background: linear-gradient(135deg, rgba(var(--accent-rgb),.025), transparent), var(--field-bg); }
+.stage-workbench .stage-axis-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.stage-workbench .stage-axis-title>strong { font: 500 30px/1.2 'Cascadia Mono', Consolas, monospace; color: var(--accent); }
+.stage-workbench .stage-axis--y .stage-axis-title>strong { color: var(--green); }
+.stage-workbench .stage-axis--z .stage-axis-title>strong { color: #bb9de9; }
+:root[data-theme='light'] .stage-workbench .stage-axis--z .stage-axis-title>strong { color: #8061aa; }
+.stage-workbench .stage-axis-channel { font-size: 11px; color: var(--muted); opacity: 1; }
+.stage-workbench .stage-axis-status { margin-left: auto; font-size: 10px; color: var(--muted); padding: 4px 7px; border-radius: 6px; border: 1px solid var(--line); opacity: 1; }
+.stage-workbench .stage-axis-status--ready { color: var(--green); background: rgba(100,223,189,.05); }
+.stage-axis-details { display: grid; gap: 8px; margin: 18px 0; padding-bottom: 16px; border-bottom: 1px solid var(--line); font-size: 11px; }
+.stage-axis-details>div { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
+.stage-axis-details dt { color: var(--dim); }
+.stage-axis-details dd { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.stage-step-field input { font-family: 'Cascadia Mono', Consolas, monospace; font-size: 16px !important; font-variant-numeric: tabular-nums; }
+.stage-step-presets { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 5px; margin: 9px 0 16px; }
+.stage-step-presets button { min-width: 0; min-height: 30px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); color: var(--muted); font: 11px 'Cascadia Mono', Consolas, monospace; cursor: pointer; }
+.stage-step-presets button:hover:not(:disabled), .stage-step-presets button[aria-pressed='true'] { color: var(--accent); border-color: rgba(var(--accent-rgb),.4); background: rgba(var(--accent-rgb),.07); }
+.stage-workbench .stage-axis-buttons { display: flex; gap: 9px; margin: 0; }
+.stage-workbench .stage-axis-buttons .button { flex: 1; min-height: 46px; font-size: 14px; gap: 10px; }
+.stage-axis-buttons .button>span { font-size: 22px; font-weight: 400; }
+.stage-workbench .stage-axis-reason { min-height: 38px; margin: 12px 0 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; opacity: 1; }
+.stage-workbench .stage-axis-reason--ready { color: var(--green); }
+.stage-panel .stage-workbench-note { align-items: flex-start; padding-top: 2px; font-size: 11px; }
+.stage-movement-history .panel-heading>div { display: flex; align-items: center; gap: 8px; }
+.stage-history-scroll { max-height: 360px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+.stage-history-scroll table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 11px; }
+.stage-history-scroll th, .stage-history-scroll td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--line); }
+.stage-history-scroll th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: var(--surface-strong); font-size: 10px; font-weight: 500; white-space: nowrap; }
+.stage-history-scroll td { color: var(--muted); white-space: nowrap; }
+.stage-history-scroll td:last-child { white-space: normal; min-width: 180px; overflow-wrap: anywhere; }
+.stage-history-scroll tr:last-child td { border-bottom: 0; }
+.stage-result { display: inline-flex; padding: 3px 6px; border-radius: 5px; font-size: 10px; background: var(--surface-soft); }
+.stage-result--submitted { color: var(--accent); }
+.stage-result--rejected { color: var(--amber); }
+.stage-result--unconfirmed { color: var(--red); }
+.stage-history-empty { color: var(--dim); padding: 24px; text-align: center; border: 1px dashed var(--line); border-radius: 12px; font-size: 12px; }
+@media (max-width: 1050px) { .stage-header { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 900px) { .stage-workbench .stage-axis-grid { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .stage-panel .content-panel { padding: 16px; } .stage-header { gap: 14px; } .stage-actions { gap: 8px; } .stage-keyboard-toolbar { padding: 10px; } .stage-keyboard-toolbar>p { font-size: 10px; } .stage-movement-history .subtle-note { max-width: none; } }
+@media (max-width: 540px) { .stage-workbench .stage-axis { padding: 16px; } .stage-open-loop { display: none; } }
+@media (prefers-reduced-motion: reduce) { .stage-keyboard-area { transition: none; } }

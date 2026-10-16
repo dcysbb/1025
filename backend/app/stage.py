@@ -60,11 +60,31 @@ class StageController:
         self._lock = asyncio.Lock()
         self._poll_task = None
         self._must_stop = False
+        self.motion_pending = False
+        self._move_admitting = False
+        self._stopping_count = 0
+        self._disconnecting_count = 0
+        self._stop_epoch = 0
 
     def snapshot(self):
         return {"config": self.config.model_dump(), "connected": self.connected,
                 "error": self.error, "channels": self.channels, "model": "PDXC3",
-                "stage": "PD1V/M", "position_feedback": False}
+                "stage": "PD1V/M", "position_feedback": False,
+                "motion_pending": self.motion_pending}
+
+    @staticmethod
+    def _idle(channels):
+        return (len(channels) == 3 and {row.get("channel") for row in channels} == {1, 2, 3}
+                and all(row.get("moving") is False for row in channels))
+
+    def _move_event(self, command, actor, result, reason=""):
+        channel = self.config.axes[command.axis]
+        labels = {"submitted": "请求已下发", "rejected": "未下发", "unconfirmed": "结果未确认"}
+        self.event("stage_move", "info" if result == "submitted" else "warning" if result == "rejected" else "error",
+                   f"{command.axis.upper()} 轴移动：{labels[result]}", actor,
+                   {**command.model_dump(), "channel": channel,
+                    "hardware_direction": command.direction * (-1 if self.config.inverted[command.axis] else 1),
+                    "mode": self.config.mode, "result": result, "reason": reason})
 
     async def _call(self, fn, *args):
         # Keep native SDK calls off the vacuum acquisition/event loop. Await the
@@ -90,6 +110,7 @@ class StageController:
             self.config = config.model_copy(deep=True)
             self.error = None
             self.channels = []
+            self.motion_pending = False
             self.event("stage_config", "info", "位移台配置已保存", actor, config.model_dump())
             return self.snapshot()
 
@@ -123,6 +144,7 @@ class StageController:
             self.connected = True
             self.error = None
             self.channels = channels
+            self.motion_pending = False
             self.event("stage_connect", "info", "位移台已连接", actor,
                        {"mode": self.config.mode, "serial_number": self.config.serial_number})
             self._poll_task = asyncio.create_task(self._poll())
@@ -131,68 +153,107 @@ class StageController:
     async def _poll(self):
         while True:
             await asyncio.sleep(0.5)
+            if not await self._poll_once():
+                return
+
+    async def _poll_once(self):
+        async with self._lock:
+            if not self.connected or self.driver is None:
+                return False
+            try:
+                self.channels = await self._call(self.driver.status)
+                if self._idle(self.channels):
+                    self.motion_pending = False
+            except Exception as exc:
+                if self._must_stop or any(row.get("moving") is True for row in self.channels):
+                    try:
+                        await self._call(self.driver.stop)
+                    except Exception:
+                        pass
+                self.connected = False
+                self.error = f"位移台通信中断，运动状态未知：{exc}"
+                self.channels = []
+                self.event("stage_fault", "error", self.error, "system")
+                return False
+            return True
+
+    async def move(self, command: StageMove, actor):
+        # Reserve admission before awaiting the SDK lock. A second HTTP request
+        # must be rejected, never queued behind a move or stop.
+        if self._move_admitting or self.motion_pending or self._stopping_count or self._disconnecting_count:
+            reason = "请等待当前移动或停止确认后再移动"
+            self._move_event(command, actor, "rejected", reason)
+            raise StageError(reason)
+        self._move_admitting = True
+        epoch = self._stop_epoch
+        invoked = False
+        try:
             async with self._lock:
-                if not self.connected or self.driver is None:
-                    return
                 try:
+                    if not self.connected or self.driver is None:
+                        raise StageError("位移台未连接")
+                    if command.steps > self.config.max_steps:
+                        raise StageError(f"单次移动不能超过 {self.config.max_steps} 步")
+                    if epoch != self._stop_epoch or self._stopping_count or self._disconnecting_count:
+                        raise StageError("停止或断开已请求，本次移动未下发")
+                    channel = self.config.axes[command.axis]
+                    direction = command.direction * (-1 if self.config.inverted[command.axis] else 1)
                     self.channels = await self._call(self.driver.status)
-                except Exception as exc:
-                    if self._must_stop or any(row.get("moving") is True for row in self.channels):
+                    if not self._idle(self.channels):
+                        raise StageError("请等待当前移动完成或停止后再移动")
+                    target = next((row for row in self.channels if row["channel"] == channel), None)
+                    if target is None or target.get("ready") is not True:
+                        raise StageError(f"CH{channel} 未就绪：{(target or {}).get('error') or '请核对位移台配置'}")
+                    if epoch != self._stop_epoch or self._stopping_count or self._disconnecting_count:
+                        raise StageError("停止或断开已请求，本次移动未下发")
+                    self._must_stop = True
+                    self.motion_pending = True
+                    invoked = True
+                    await self._call(self.driver.move, channel, direction, command.steps)
+                    self._move_event(command, actor, "submitted")
+                    return self.snapshot()
+                except (Exception, asyncio.CancelledError) as exc:
+                    if isinstance(exc, StageError) and not invoked:
+                        self._move_event(command, actor, "rejected", str(exc))
+                        raise
+                    if invoked:
                         try:
                             await self._call(self.driver.stop)
                         except Exception:
                             pass
                     self.connected = False
-                    self.error = f"位移台通信中断，运动状态未知：{exc}"
                     self.channels = []
-                    self.event("stage_fault", "error", self.error, "system")
-                    return
-
-    async def move(self, command: StageMove, actor):
-        async with self._lock:
-            if not self.connected or self.driver is None:
-                raise StageError("位移台未连接")
-            if command.steps > self.config.max_steps:
-                raise StageError(f"单次移动不能超过 {self.config.max_steps} 步")
-            channel = self.config.axes[command.axis]
-            direction = command.direction * (-1 if self.config.inverted[command.axis] else 1)
-            try:
-                self.channels = await self._call(self.driver.status)
-                if any(row.get("moving") is not False for row in self.channels):
-                    raise StageError("请等待当前移动完成或停止后再移动")
-                target = next((row for row in self.channels if row["channel"] == channel), None)
-                if target is None or target.get("ready") is not True:
-                    raise StageError(f"CH{channel} 未就绪：{(target or {}).get('error') or '请核对位移台配置'}")
-                self._must_stop = True
-                await self._call(self.driver.move, channel, direction, command.steps)
-            except StageError:
-                raise
-            except Exception as exc:
-                try:
-                    await self._call(self.driver.stop)
-                except Exception:
-                    pass
-                self.connected = False
-                self.channels = []
-                self.error = f"移动未确认，勿重复发送，请先停止并重新连接：{exc}"
-                self.event("stage_fault", "error", self.error, actor)
-                raise StageError(self.error) from exc
-            self.event("stage_move", "info", f"{command.axis.upper()} 轴移动请求", actor,
-                       {**command.model_dump(), "channel": channel, "hardware_direction": direction,
-                        "mode": self.config.mode})
-            return self.snapshot()
+                    self.error = (f"移动未确认，勿重复发送，请先停止并重新连接：{exc}" if invoked else
+                                  f"移动未下发，状态读取失败，请检查连接：{exc}")
+                    self._move_event(command, actor, "unconfirmed" if invoked else "rejected", self.error)
+                    self.event("stage_fault", "error", self.error, actor)
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    raise StageError(self.error) from exc
+        finally:
+            self._move_admitting = False
 
     async def stop(self, actor):
+        self._stopping_count += 1
+        self._stop_epoch += 1
+        try:
+            return await self._stop_locked(actor)
+        finally:
+            self._stopping_count -= 1
+
+    async def _stop_locked(self, actor):
         async with self._lock:
             if self.driver is None:
                 raise StageError("位移台未建立连接，无法确认停止")
             try:
                 await self._call(self.driver.stop)
                 self.channels = await self._call(self.driver.status)
-                self._must_stop = any(row.get("moving") is not False for row in self.channels)
+                self._must_stop = not self._idle(self.channels)
+                self.motion_pending = self._must_stop
             except Exception as exc:
                 self.connected = False
                 self.channels = []
+                self.motion_pending = True
                 self.error = f"无法确认停止：{exc}"
                 raise StageError(self.error) from exc
             self.event("stage_stop", "warning", "已发送位移台全部通道停止指令", actor,
@@ -200,6 +261,14 @@ class StageController:
             return self.snapshot()
 
     async def disconnect(self, actor="system"):
+        self._disconnecting_count += 1
+        self._stop_epoch += 1
+        try:
+            return await self._disconnect_locked(actor)
+        finally:
+            self._disconnecting_count -= 1
+
+    async def _disconnect_locked(self, actor):
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -213,18 +282,20 @@ class StageController:
                     if self._must_stop or not self.channels or any(row.get("moving") is not False for row in self.channels):
                         await self._call(self.driver.stop)
                         self.channels = await self._call(self.driver.status)
-                        if any(row.get("moving") is not False for row in self.channels):
+                        if not self._idle(self.channels):
                             raise StageError("停止后的运动状态尚未确认")
                     await self._call(self.driver.close)
                 except Exception as exc:
                     self.connected = False
                     self.channels = []
+                    self.motion_pending = True
                     self.error = f"断开前停止未确认，请检查控制器：{exc}"
                     raise StageError(self.error) from exc
                 self.driver = None
                 self._must_stop = False
             self.connected = False
             self.channels = []
+            self.motion_pending = False
             return self.snapshot()
 
 
