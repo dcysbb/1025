@@ -125,6 +125,7 @@
 | `frontend/src/App.css` | 应用布局与基础组件样式 |
 | `frontend/src/Chart.css` | 图表字号、工具栏、网格、图例与主题颜色 |
 | `frontend/src/HardwarePanel.css` | 硬件连接、端子与阀门映射布局 |
+| `frontend/src/TerminalWorkbench.tsx` | DAM 端子功能分配、输入反馈及输出控制；复用现有配置和控制接口 |
 | `frontend/src/StagePanel.css` / `StageWorkbench.css` | 位移台工作区、方向操作和运动记录 |
 
 扩展时先复用共享类名、令牌与组件，再添加局部样式；局部覆盖应限定到相应业务容器，避免影响其他页面。主题和动效规则调整后同步更新本规范。

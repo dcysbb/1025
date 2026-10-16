@@ -13,3 +13,49 @@
 .valve-truth{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:24px}.valve-truth>div{padding:18px;border-radius:10px;border:1px solid rgba(128,128,128,.22);display:flex;align-items:center;justify-content:space-between;gap:16px}.valve-truth span{color:var(--text-muted)}
 .debug-relay-card--valve{outline:1px solid var(--success,#29b896)}.debug-relay-card .relay-function{font-size:12px;line-height:1.5;min-height:20px;overflow-wrap:anywhere}
 @media(max-width:700px){.hardware-actions>span{max-width:100%;width:100%}.valve-truth{grid-template-columns:1fr}.hardware-tabs .button{flex:1}.hardware-table th,.hardware-table td{padding:10px 8px}}
+
+.terminal-workbench .panel-heading>div { min-width:0; }
+.terminal-workbench .panel-heading p,.terminal-help { color:var(--muted);font-size:12px;line-height:1.65; }
+.terminal-section-links { display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px; }
+.terminal-section-links a { padding:7px 11px;border:1px solid var(--line);border-radius:9px;color:var(--accent);background:var(--surface-soft);text-decoration:none;font-size:12px; }
+.terminal-section-links a:hover { border-color:var(--accent); }
+.terminal-section-links a:focus-visible { outline:2px solid var(--accent);outline-offset:2px; }
+#dam-output-controls,#dam-input-assignments,#dam-physical-wiring { scroll-margin-top:20px; }
+.terminal-workbench h3 { margin:24px 0 14px;font-size:14px;font-weight:600; }
+.terminal-assignment-notice,.terminal-manual-toolbar { padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--field-bg);margin-bottom:16px;font-size:12px; }
+.terminal-assignment-notice>b { color:var(--accent); }
+.terminal-assignment-notice p,.terminal-manual-toolbar p { color:var(--muted);line-height:1.65;margin:8px 0; }
+.terminal-assignment-notice .hardware-actions { margin-top:12px;padding-top:12px; }
+.terminal-manual-toolbar>label { display:flex;align-items:flex-start;gap:8px; }
+.terminal-manual-toolbar input[type=checkbox] { accent-color:var(--accent);flex-shrink:0;margin-top:3px; }
+.terminal-manual-toolbar>div { display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:12px; }
+.terminal-manual-toolbar .field { display:flex;align-items:center;gap:8px; }
+.terminal-manual-toolbar input[type=number] { width:80px; }
+.terminal-manual-toolbar button { margin-left:auto; }
+.terminal-output-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr));gap:16px; }
+.terminal-output-card { min-width:0;display:flex;flex-direction:column;gap:12px;padding:18px;border:1px solid var(--line);border-radius:15px;background:var(--field-bg); }
+.terminal-output-card--valve { border-color:color-mix(in srgb,var(--accent) 50%,var(--line));background:linear-gradient(135deg,rgba(var(--accent-rgb),.05),transparent),var(--field-bg); }
+.terminal-output-card header { display:flex;align-items:center;justify-content:space-between;gap:10px; }
+.terminal-output-card h4 { margin:0;font:500 18px 'Cascadia Mono',Consolas,monospace; }
+.terminal-output-card h4 small { font-size:11px;color:var(--muted); }
+.terminal-output-card .field { min-width:0;font-size:12px; }
+.terminal-output-card .field input,.terminal-output-card .field select { width:100%;min-width:0;font-size:12px; }
+.terminal-contact { margin:0;color:var(--muted);font-size:11px;line-height:1.6; }
+.terminal-level { padding:4px 7px;border:1px solid var(--line);border-radius:7px;font-size:11px;color:var(--muted);white-space:nowrap; }
+.terminal-level--on { color:var(--amber);border-color:color-mix(in srgb,var(--amber) 40%,var(--line)); }
+.terminal-output-card p { overflow-wrap:anywhere; }
+.terminal-draft-note { margin:0;color:var(--amber);font-size:11px;line-height:1.6; }
+.terminal-valve-position { margin:0;color:var(--text);font-size:12px; }
+.terminal-valve-position small { display:block;margin-top:5px;color:var(--muted);font-size:11px; }
+.terminal-output-actions { display:flex;gap:10px;padding-top:4px; }
+.terminal-output-details { margin-top:auto;font-size:12px;color:var(--muted); }
+.terminal-output-details .motion-reveal__content { padding-top:12px; }
+.terminal-output-details .field+.field { margin-top:10px; }
+.terminal-output-actions .button { flex:1;min-height:40px;font-size:12px; }
+.terminal-disabled-reason { margin:0;min-height:36px;color:var(--muted);font-size:11px;line-height:1.6; }
+.terminal-output-card .inline-error,.terminal-output-card .hardware-message { margin:0;font-size:12px; }
+.terminal-input-table { min-width:800px; }
+.terminal-input-table small { display:block;margin-top:6px;color:var(--muted);font-size:11px;line-height:1.5; }
+.terminal-input-table select { min-height:38px;max-width:190px;padding:7px 8px;border:1px solid var(--line-strong);border-radius:8px;background:var(--field-bg);color:var(--text);font:inherit; }
+.terminal-wiring { margin-top:24px;padding-top:20px;border-top:1px solid var(--line);font-size:12px;color:var(--muted); }
+@media(max-width:760px){.terminal-output-card{padding:16px}.terminal-output-grid{gap:12px}.terminal-assignment-notice,.terminal-manual-toolbar{padding:12px}.terminal-manual-toolbar button{margin-left:0}.terminal-assignment-notice .hardware-actions{justify-content:flex-start}}

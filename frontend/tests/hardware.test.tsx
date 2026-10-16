@@ -3,6 +3,7 @@ import { JSDOM } from 'jsdom'
 import assert from 'node:assert/strict'
 import { beforeEach, afterEach, test } from 'node:test'
 import type { Root } from 'react-dom/client'
+import type { TerminalSystemState } from '../src/TerminalWorkbench'
 const initial = new JSDOM('<div/>', { url: 'http://localhost' })
 Object.assign(globalThis, { window: initial.window, document: initial.window.document })
 const { createRoot } = await import('react-dom/client')
@@ -11,11 +12,13 @@ let dom: JSDOM, root: Root, container: HTMLElement
 let writes: { path: string; body: Record<string, unknown> }[]
 let config: Record<string, unknown>
 let failure: boolean
+let outputs: boolean[], system: TerminalSystemState
 const stage = { config: { mode: 'real', connection: 'tcp', serial_number: '129123456', host: '101.6.241.172', port: 40303, axes: { x: 1, y: 2, z: 3 }, inverted: { x: false, y: false, z: false }, max_steps: 1000 }, connected: false, error: null, channels: [] }
 beforeEach(() => {
   dom = new JSDOM('<div id="root"/>', { url: 'http://localhost' })
   Object.assign(globalThis, { window: dom.window, document: dom.window.document, Event: dom.window.Event, IS_REACT_ACT_ENVIRONMENT: true })
-  writes = []; failure = false
+  writes = []; failure = false; outputs = Array(8).fill(false)
+  system = {mode:'simulation',interlock:'disarmed',valve:'closed',pressure_ok:true,adam_connected:true,history_recording:true}
   config = { mode: 'simulation', tpg_connection: 'tcp', tpg_host: '192.168.1.2', tpg_port: 8000, tpg_serial_port: 'COM3', tpg_baudrate: 9600, io_device: 'dam0808d', dam_serial_port: 'COM4', dam_baudrate: 9600, dam_unit_id: 1, adam_host: '', adam_port: 502, adam_unit_id: 1, valve_closed_di: 0, valve_open_di: null, valve_closed_active_high: true, valve_open_active_high: true, open_output: 0 }
   globalThis.fetch = async (url, options) => {
     const path = String(url)
@@ -23,14 +26,15 @@ beforeEach(() => {
       const body = JSON.parse(String(options.body ?? '{}')); writes.push({ path, body })
       if (failure) return new Response(JSON.stringify({ detail: 'DAM 与真空规必须使用不同串口' }), { status: 422 })
       if (path === '/api/config') config = { ...config, ...body.config }
+      if (path.startsWith('/api/debug/relays/')) outputs[Number(path.split('/').at(-1))] = body.enabled
     }
-    const data = path.includes('/stage') ? stage : path.includes('/ports') ? { ports: [] } : path.includes('/hardware/status') ? { tpg: { connected: true, error: null }, io: { connected: true, error: null, inputs: Array(8).fill(false), outputs: Array(8).fill(false) } } : { config }
+    const data = path.includes('/debug/relays') ? {mode:system.mode,interlock:system.interlock,outputs,valve_output:config.open_output,remaining_s:{}} : path.includes('/stage') ? stage : path.includes('/ports') ? { ports: [] } : path.includes('/hardware/status') ? { tpg: { connected: true, error: null }, io: { connected: true, error: null, inputs: Array(8).fill(false), outputs } } : { config }
     return new Response(JSON.stringify(data))
   }
   container = document.getElementById('root')!; root = createRoot(container)
 })
 afterEach(async () => { await act(async () => root.unmount()); dom.window.close() })
-async function render(auth = true) { await act(async () => { root.render(<HardwarePanel auth={auth} connected />); await new Promise(r => setTimeout(r, 20)) }) }
+async function render(auth = true) { await act(async () => { root.render(<HardwarePanel auth={auth} connected systemState={system}/>); await new Promise(r => setTimeout(r, 20)) }) }
 function button(name: string) { const node = [...container.querySelectorAll<HTMLButtonElement>('button')].find(x => x.textContent?.trim() === name || x.getAttribute('aria-label') === name); assert.ok(node, name); return node }
 function field(name: string) { const label = [...container.querySelectorAll('label')].find(x => x.firstChild?.textContent === name); assert.ok(label, name); return label.querySelector<HTMLInputElement | HTMLSelectElement>('input,select')! }
 async function change(node: HTMLInputElement | HTMLSelectElement, value: string) {
@@ -46,7 +50,8 @@ test('opening and inspecting all terminals issues no writes', async () => {
   await render(); await click('DAM 端子')
   assert.ok(container.textContent?.includes('37 COM / 36 NO / 38 NC'))
   assert.ok(container.textContent?.includes('26、25 · 常开触点两端'))
-  assert.equal(container.querySelectorAll('#hardware-terminals tbody tr').length, 26)
+  assert.equal(container.querySelectorAll('#hardware-terminals tbody tr').length, 18)
+  assert.equal(container.querySelectorAll('.terminal-output-card').length, 8)
   assert.deepEqual(writes, [])
 })
 
@@ -99,4 +104,139 @@ test('errors retain unsaved draft and unauthenticated controls cannot write', as
   await act(async () => root.render(<HardwarePanel auth={false} connected />))
   assert.equal(button('保存I/O').disabled, true)
   assert.equal(button('连接真空规').disabled, true)
+})
+
+function terminalSelect(label: string) { const node = container.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`); assert.ok(node,label); return node }
+async function acknowledge() {
+  const input = [...container.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find(node => node.parentElement?.textContent?.includes('启用普通输出手动控制'))!
+  await act(async () => { if (!input.checked) input.click() })
+}
+
+test('terminal assignments edit the actual shared valve mapping and save only mapping fields', async () => {
+  await render(); await click('DAM 端子')
+  await change(terminalSelect('IN2 控制功能'),'closed')
+  assert.equal(terminalSelect('IN1 控制功能').value,'monitor')
+  await change(terminalSelect('IN3 控制功能'),'open')
+  await change(terminalSelect('IN3 反馈有效电平'),'false')
+  await change(terminalSelect('OUT5 控制功能'),'valve')
+  assert.deepEqual(writes,[])
+  assert.equal(button('吸合 OUT2').disabled,true)
+  await click('插板阀映射')
+  assert.equal(field('电磁阀控制输出').value,'4')
+  assert.equal(field('关闭到位输入').value,'1')
+  assert.equal(field('打开到位输入').value,'2')
+  await click('DAM 端子');await click('保存功能分配')
+  assert.equal(writes.length,1)
+  assert.equal(writes[0].path,'/api/config')
+  assert.deepEqual(writes[0].body.config,{valve_closed_di:1,valve_open_di:2,open_output:4,valve_closed_active_high:true,valve_open_active_high:false})
+})
+
+test('required closed feedback and the single valve output cannot be silently unassigned', async () => {
+  await render(); await click('DAM 端子')
+  assert.equal(terminalSelect('IN1 控制功能').querySelector<HTMLOptionElement>('option[value=monitor]')!.disabled,true)
+  assert.equal(terminalSelect('IN1 控制功能').querySelector<HTMLOptionElement>('option[value=open]')!.disabled,true)
+  assert.equal(terminalSelect('OUT1 控制功能').querySelector<HTMLOptionElement>('option[value=manual]')!.disabled,true)
+  await change(terminalSelect('IN2 控制功能'),'open')
+  assert.equal(terminalSelect('IN2 控制功能').querySelector<HTMLOptionElement>('option[value=closed]')!.disabled,true)
+  await change(terminalSelect('IN2 控制功能'),'monitor')
+  await click('插板阀映射')
+  assert.equal(field('打开到位输入').value,'')
+  assert.deepEqual(writes,[])
+})
+
+test('ordinary output controls require acknowledgement and route one finite request to the selected relay', async () => {
+  await render(); await click('DAM 端子')
+  assert.equal(button('吸合 OUT2').disabled,true)
+  await acknowledge()
+  assert.equal(button('吸合 OUT2').disabled,false)
+  await act(async () => { button('吸合 OUT2').click(); button('吸合 OUT2').click(); await new Promise(resolve=>setTimeout(resolve,0)) })
+  assert.deepEqual(writes,[{path:'/api/debug/relays/1',body:{enabled:true,duration_s:0}}])
+  assert.ok(container.textContent?.includes('OUT2 已读回吸合'))
+  await click('释放 OUT2')
+  assert.deepEqual(writes.at(-1),{path:'/api/debug/relays/1',body:{enabled:false,duration_s:0}})
+  assert.ok(container.textContent?.includes('OUT2 已读回释放'))
+})
+
+test('ordinary timed output sends the selected duration and rejects an invalid duration', async () => {
+  await render(); await click('DAM 端子');await acknowledge()
+  const timer = [...container.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find(node=>node.parentElement?.textContent?.includes('普通输出定时释放'))!
+  await act(async()=>timer.click())
+  const duration=container.querySelector<HTMLInputElement>('[aria-label="普通输出自动释放秒数"]')!
+  await change(duration,'61')
+  assert.equal(button('吸合 OUT8').disabled,true)
+  await change(duration,'12');await click('吸合 OUT8')
+  assert.deepEqual(writes,[{path:'/api/debug/relays/7',body:{enabled:true,duration_s:12}}])
+})
+
+test('valve output uses the protected valve APIs and never bypasses interlock with a raw relay write', async () => {
+  system.interlock='armed'
+  await render();await click('DAM 端子')
+  assert.equal(button('端子页打开插板阀').disabled,false)
+  assert.equal(button('吸合 OUT2').disabled,true)
+  await click('端子页打开插板阀')
+  await click('端子页关闭插板阀')
+  assert.deepEqual(writes.map(write=>write.path),['/api/valve/open','/api/valve/close'])
+  assert.ok(container.textContent?.includes('实际位置以到位反馈为准'))
+})
+
+test('read-only users cannot assign functions or control outputs',async()=>{
+  await render(false);await click('DAM 端子')
+  assert.equal(terminalSelect('IN2 控制功能').disabled,true)
+  assert.equal(terminalSelect('OUT2 控制功能').disabled,true)
+  assert.equal(button('吸合 OUT2').disabled,true)
+  assert.equal(button('释放 OUT2').disabled,true)
+  assert.equal(button('端子页关闭插板阀').disabled,true)
+  assert.deepEqual(writes,[])
+})
+
+test('an unknown output result blocks further energising while release remains reachable',async()=>{
+  await render();await click('DAM 端子');await acknowledge()
+  const original=globalThis.fetch
+  globalThis.fetch=async(url,options)=>{
+    if(String(url)==='/api/debug/relays/1' && options?.method==='POST' && JSON.parse(String(options.body)).enabled)throw new TypeError('Failed to fetch')
+    return original(url,options)
+  }
+  await click('吸合 OUT2')
+  assert.ok(container.textContent?.includes('结果未确认'))
+  await acknowledge()
+  assert.equal(button('吸合 OUT3').disabled,true)
+  assert.equal(button('释放 OUT2').disabled,false)
+  await click('释放 OUT2');await acknowledge()
+  assert.equal(button('吸合 OUT3').disabled,false)
+})
+
+test('release remains independent of an outstanding energise request and its older response cannot win',async()=>{
+  await render();await click('DAM 端子');await acknowledge()
+  const original=globalThis.fetch
+  let finish:((response:Response)=>void)|undefined
+  globalThis.fetch=async(url,options)=>{
+    if(String(url)==='/api/debug/relays/1'&&options?.method==='POST'&&JSON.parse(String(options.body)).enabled){
+      writes.push({path:String(url),body:JSON.parse(String(options.body))})
+      return new Promise<Response>(resolve=>{finish=resolve})
+    }
+    return original(url,options)
+  }
+  await act(async()=>{button('吸合 OUT2').click();await new Promise(resolve=>setTimeout(resolve,0))})
+  assert.equal(button('释放 OUT2').disabled,false)
+  await click('释放 OUT2')
+  assert.deepEqual(writes.map(row=>row.body.enabled),[true,false])
+  await act(async()=>{finish!(new Response(JSON.stringify({mode:'simulation',interlock:'disarmed',valve_output:0,outputs:[false,true,...Array(6).fill(false)],remaining_s:{}})));await new Promise(resolve=>setTimeout(resolve,0))})
+  const card=container.querySelectorAll('.terminal-output-card')[1]
+  assert.equal(card.querySelector('.terminal-level')?.textContent,'释放')
+  assert.ok(card.textContent?.includes('OUT2 已读回释放'))
+})
+
+test('a pre-command output poll cannot overwrite a confirmed relay result',async()=>{
+  await render();await click('DAM 端子');await acknowledge()
+  const original=globalThis.fetch
+  let finish:((response:Response)=>void)|undefined,held=false
+  globalThis.fetch=async(url,options)=>{
+    if(String(url)==='/api/debug/relays'&&!held){held=true;return new Promise<Response>(resolve=>{finish=resolve})}
+    return original(url,options)
+  }
+  await click('刷新输出状态')
+  await click('吸合 OUT2')
+  await act(async()=>{finish!(new Response(JSON.stringify({mode:'simulation',interlock:'disarmed',valve_output:0,outputs:Array(8).fill(false),remaining_s:{}})));await new Promise(resolve=>setTimeout(resolve,0))})
+  assert.equal(container.querySelectorAll('.terminal-output-card')[1].querySelector('.terminal-level')?.textContent,'吸合')
+  assert.equal(writes.length,1)
 })

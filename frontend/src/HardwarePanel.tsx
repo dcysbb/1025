@@ -3,6 +3,8 @@ import { Check, Plug, RefreshCw } from 'lucide-react'
 import StagePanel from './StagePanel'
 import { Disclosure } from './Motion'
 import { apiRequest, errorMessage } from './apiClient'
+import TerminalWorkbench, { type TerminalSystemState } from './TerminalWorkbench'
+import { outputTerminals } from './terminalDefinitions'
 
 type TerminalText = 'dam_input_labels' | 'dam_output_labels' | 'dam_input_notes' | 'dam_output_notes'
 export type HardwareConfig = {
@@ -22,9 +24,6 @@ const FIXED = [
   [5, 'PB', '厂家标识；软件未使用'], [6, 'TX', 'RS232 发送'], [7, 'RX', 'RS232 接收'], [8, 'GND', '通信地'],
   [9, 'COM+', '输入公共正端'], [18, 'COM−', '输入公共负端'],
 ] as const
-function outputTerminals(index: number) {
-  return index < 4 ? `${37 - index * 3} COM / ${36 - index * 3} NO / ${38 - index * 3} NC` : `${26 - (index - 4) * 2}、${25 - (index - 4) * 2} · 常开触点两端`
-}
 function request<T>(path: string, method = 'GET', body?: unknown, operation?: string): Promise<T> {
   return apiRequest<T>(`/api${path}`, { method, operation, body: body === undefined ? undefined : JSON.stringify(body) })
 }
@@ -33,7 +32,7 @@ function normalize(config: HardwareConfig) {
   return { ...config, ...Object.fromEntries(TEXT.map(key => [key, config[key] ?? Array(8).fill('')])) } as HardwareConfig
 }
 
-export default function HardwarePanel({ auth, connected, onDirtyChange }: { auth: boolean; connected: boolean; onDirtyChange?: (dirty: boolean) => void }) {
+export default function HardwarePanel({ auth, connected, systemState, onDirtyChange }: { auth: boolean; connected: boolean; systemState?: TerminalSystemState | null; onDirtyChange?: (dirty: boolean) => void }) {
   const [tab, setTab] = useState<'devices' | 'terminals' | 'valve'>('devices')
   const [saved, setSaved] = useState<HardwareConfig | null>(null)
   const [draft, setDraft] = useState<HardwareConfig | null>(null)
@@ -41,11 +40,12 @@ export default function HardwarePanel({ auth, connected, onDirtyChange }: { auth
   const [online, setOnline] = useState(false)
   const [ports, setPorts] = useState<{ device: string; description: string }[]>([])
   const [busy, setBusy] = useState('')
+  const [terminalBusy, setTerminalBusy] = useState(false), [lastRead, setLastRead] = useState(0)
   const [messages, setMessages] = useState<Record<string, string>>({})
   const [loadVersion, setLoadVersion] = useState(0)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [stageDirty, setStageDirty] = useState(false)
-  const writable = auth && connected && online && !busy && !errors.load
+  const writable = auth && connected && online && !busy && !terminalBusy && !errors.load
   const dirty = (keys: (keyof HardwareConfig)[]) => !!draft && !!saved && keys.some(key => JSON.stringify(draft[key]) !== JSON.stringify(saved[key]))
   const anyDirty = dirty([...TPG, ...IO, ...MAPPING, ...TEXT]) || stageDirty
   useEffect(() => { onDirtyChange?.(anyDirty) }, [anyDirty, onDirtyChange])
@@ -55,13 +55,18 @@ export default function HardwarePanel({ auth, connected, onDirtyChange }: { auth
     return () => window.removeEventListener('beforeunload', warn)
   }, [anyDirty])
   useEffect(() => {
+    if (!lastRead) return
+    const timer = setTimeout(() => setOnline(false), Math.max(0, 3500 - (Date.now() - lastRead)))
+    return () => clearTimeout(timer)
+  }, [lastRead])
+  useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
     void request<{ config: HardwareConfig }>('/config', 'GET', undefined, '读取硬件连接配置').then(data => {
       if (!cancelled) { setSaved(normalize(data.config)); setDraft(normalize(data.config)); setErrors(prior => ({ ...prior, load: '' })) }
     }).catch(error => { if (!cancelled) setErrors(prior => ({ ...prior, load: errorMessage(error, '读取硬件连接配置失败') })) })
     async function poll() {
-      try { const next = await request<HardwareStatus>('/hardware/status'); if (!cancelled) { setState(next); setOnline(true); setErrors(prior => ({ ...prior, status: '' })) } }
+      try { const next = await request<HardwareStatus>('/hardware/status'); if (!cancelled) { setState(next); setOnline(true); setLastRead(Date.now()); setErrors(prior => ({ ...prior, status: '' })) } }
       catch (error) { if (!cancelled) { setOnline(false); setErrors(prior => ({ ...prior, status: errorMessage(error, '读取真空规与 I/O 控制器状态失败') })) } }
       finally { if (!cancelled) timer = setTimeout(poll, 2000) }
     }
@@ -90,16 +95,16 @@ export default function HardwarePanel({ auth, connected, onDirtyChange }: { auth
     }, '已保存')
   }
   const notice = (id: string) => <>{errors[id] && <p className="inline-error" role="alert">{errors[id]}</p>}{messages[id] && <p role="status" className="hardware-message">{messages[id]}</p>}</>
-  const actions = (id: string, keys: (keyof HardwareConfig)[], path?: string) => <div className="hardware-actions">
+  const actions = (id: string, keys: (keyof HardwareConfig)[], path?: string, saveLabel?: string) => <div className="hardware-actions">
     <span className="subtle-note">{dirty(keys) ? '有未保存的更改' : '已保存'}{id !== 'terminals' && dirty(keys) ? ' · 应用配置将关阀并撤销现场验证' : ''}</span>
-    <button className="button button--quiet" disabled={!dirty(keys) || !!busy} onClick={() => setDraft(prior => prior && saved && ({ ...prior, ...Object.fromEntries(keys.map(key => [key, saved[key]])) }))}>放弃更改</button>
-    <button className="button button--primary" aria-label={`保存${id === 'tpg' ? '真空规' : id === 'io' ? 'I/O' : id === 'valve' ? '阀门映射' : '端子定义'}`} disabled={!writable || !dirty(keys)} onClick={() => save(id, keys)}><Check size={15} />保存</button>
+    <button className="button button--quiet" disabled={!dirty(keys) || !!busy || terminalBusy} onClick={() => setDraft(prior => prior && saved && ({ ...prior, ...Object.fromEntries(keys.map(key => [key, saved[key]])) }))}>放弃更改</button>
+    <button className="button button--primary" aria-label={saveLabel ?? `保存${id === 'tpg' ? '真空规' : id === 'io' ? 'I/O' : id === 'valve' ? '阀门映射' : '端子定义'}`} disabled={!writable || !dirty(keys) || id === 'valve' && (dirty(IO) || draft?.valve_closed_di === draft?.valve_open_di)} onClick={() => save(id, keys)}><Check size={15} />{saveLabel ?? '保存'}</button>
     {path && <button className="button" disabled={!writable || dirty(keys) || (id === 'io' && state?.io.manual_reset_required)} onClick={() => void run(id, async () => { await request(path, 'POST', {}); setState(await request('/hardware/status')) }, '设备连接成功')}><Plug size={15} />连接{id === 'tpg' ? '真空规' : 'I/O'}</button>}
   </div>
   const status = (id: 'tpg' | 'io') => <><span className={`status-chip ${online && state?.[id].connected ? 'status-chip--ok' : 'status-chip--muted'}`}>{online ? state?.[id].connected ? '在线' : '未连接' : '状态未知'}</span>{state?.[id].error && <p className="inline-error">{state[id].error}</p>}</>
   const serialField = (key: 'tpg_serial_port' | 'dam_serial_port', label: string) => <label className="field">{label}<input list="hardware-com-ports" value={draft?.[key] ?? ''} placeholder="例如 COM4" onChange={event => patch(key, event.target.value.trim())} /></label>
   const numberField = (key: 'tpg_port' | 'tpg_baudrate' | 'dam_baudrate' | 'dam_unit_id' | 'adam_port' | 'adam_unit_id', label: string, max = 65535) => <label className="field">{label}<input type="number" min={key === 'adam_unit_id' ? 0 : 1} max={max} value={draft?.[key] ?? 0} onChange={event => patch(key, Number(event.target.value))} /></label>
-  const inputRole = (index: number) => draft?.valve_closed_di === index ? '插板阀关闭到位' : draft?.valve_open_di === index ? '插板阀打开到位' : '未分配控制功能'
+
 
   return <div className="page-content hardware-panel">
     <div className="hardware-tabs" role="tablist" aria-label="硬件配置">
@@ -125,23 +130,20 @@ export default function HardwarePanel({ auth, connected, onDirtyChange }: { auth
         <StagePanel auth={auth} connected={connected} configuration onDirtyChange={setStageDirty} />
       </div>
       <div role="tabpanel" aria-labelledby="hardware-tab-terminals" id="hardware-terminals" hidden={tab !== 'terminals'}>
-        <section className="content-panel glass-panel"><div className="panel-heading"><h2>DAM0808D 端子定义</h2><span className="subtle-note">物理端子号与软件编号分别标注</span></div>
+        <section className="content-panel glass-panel">
+          {saved && state && <TerminalWorkbench draft={draft} saved={saved} active={tab === 'terminals'} auth={auth} connected={connected} online={online} io={state.io} systemState={systemState}
+            configurationBusy={!!busy} routingDirty={dirty([...IO, ...MAPPING])} onPatch={changes => setDraft(prior => prior && ({ ...prior, ...changes }))} onBusyChange={setTerminalBusy}
+            mappingActions={<>{actions('valve', MAPPING, undefined, '保存功能分配')}{notice('valve')}{dirty(IO) && <p className="inline-error">请先保存或放弃 I/O 连接更改，再保存功能分配。</p>}{draft.valve_closed_di === draft.valve_open_di && <p className="inline-error">打开与关闭到位必须使用不同输入。</p>}</>}
+            textActions={<>{actions('terminals', TEXT)}{notice('terminals')}</>}/>}
+          <div id="dam-physical-wiring"><Disclosure className="terminal-wiring" title="查看物理端子与接线图">
           <div className="terminal-diagram" aria-label="DAM0808D 端子示意图">
             <div className="terminal-strip">{Array.from({ length: 8 }, (_, i) => <div className={draft.io_device === 'dam0808d' && draft.open_output === i ? 'terminal-chip terminal-chip--valve' : 'terminal-chip'} key={i}><b>OUT{i + 1} / DO{i}</b><small>{outputTerminals(i)}</small></div>)}</div>
             <div className="terminal-board">DAM0808D <span>OUT1–OUT4：COM / NO / NC · OUT5–OUT8：两端常开触点</span></div>
             <div className="terminal-strip terminal-strip--inputs">{Array.from({ length: 18 }, (_, i) => <div className="terminal-chip" key={i}><b>{i + 1}</b><small>{i >= 9 && i <= 16 ? `IN${i - 8} (DI${i - 9})` : FIXED.find(row => row[0] === i + 1)?.[1]}</small></div>)}</div>
           </div>
           <Disclosure className="terminal-fixed" title="电源与通信端子（固定定义）"><table className="hardware-table"><thead><tr><th>物理端子</th><th>标识</th><th>功能</th></tr></thead><tbody>{FIXED.map(([pin, label, description]) => <tr key={pin}><td>{pin}</td><td>{label}</td><td>{description}</td></tr>)}</tbody></table></Disclosure>
-          <p className="subtle-note">IN1 对应机身 DI1、软件 DI0。名称和备注仅用于记录接线；实际控制功能由“插板阀映射”指定。</p>
-          {(['input', 'output'] as const).map(kind => <div className="hardware-table-wrap" key={kind}><h3>{kind === 'input' ? '输入 IN1–IN8' : '继电器 OUT1–OUT8'}</h3><table className="hardware-table"><thead><tr><th>通道 / 软件编号</th><th>物理端子</th><th>控制用途</th><th>名称</th><th>用途备注</th><th>状态</th></tr></thead><tbody>{Array.from({ length: 8 }, (_, index) => {
-            const labelKey: TerminalText = `dam_${kind}_labels`, noteKey: TerminalText = `dam_${kind}_notes`
-            const valve = draft.io_device === 'dam0808d' && (kind === 'output' ? draft.open_output === index : draft.valve_closed_di === index || draft.valve_open_di === index)
-            const values = state?.io[kind === 'input' ? 'inputs' : 'outputs']
-            const value = draft.io_device === 'dam0808d' && online && state?.io.connected ? values?.[index] : undefined
-            const edit = (key: TerminalText, value: string) => { const items = [...draft[key]]; items[index] = value; patch(key, items) }
-            return <tr key={index} className={valve ? 'terminal-row--valve' : ''}><td>{kind === 'input' ? `IN${index + 1} / DI${index}` : `OUT${index + 1} / DO${index}`}</td><td>{kind === 'input' ? index + 10 : outputTerminals(index)}</td><td>{draft.io_device !== 'dam0808d' ? 'DAM 未选用' : kind === 'input' ? inputRole(index) : valve ? '插板阀电磁阀' : '未分配控制功能'}</td><td><input aria-label={`${kind === 'input' ? 'IN' : 'OUT'}${index + 1} 名称`} maxLength={32} disabled={!writable} value={draft[labelKey][index]} onChange={event => edit(labelKey, event.target.value)} /></td><td><input aria-label={`${kind === 'input' ? 'IN' : 'OUT'}${index + 1} 备注`} maxLength={160} disabled={!writable} value={draft[noteKey][index]} onChange={event => edit(noteKey, event.target.value)} /></td><td>{value === undefined ? '未知' : kind === 'output' ? value ? '吸合' : '释放' : value ? '高' : '低'}</td></tr>
-          })}</tbody></table></div>)}
-          {actions('terminals', TEXT)}{notice('terminals')}
+          <p className="terminal-help">IN1 对应机身 DI1、软件 DI0。固定电气定义不可修改；功能分配、名称和备注在上方工作台编辑。</p>
+          </Disclosure></div>
         </section>
       </div>
       <div role="tabpanel" aria-labelledby="hardware-tab-valve" id="hardware-valve" hidden={tab !== 'valve'}>
