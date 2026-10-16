@@ -27,11 +27,11 @@ export function reducePoints(points:Point[], budget=1800):Point[]{
   return [...keep].sort((a,b)=>a-b).map(i=>points[i])
 }
 
-export function domain(points:Point[],channels:number[]):[number,number]{
+export function domain(points:Point[],channels:number[],factor=1):[number,number]{
   let low=Infinity,high=-Infinity
   for(const point of points)for(const sample of point.channels){
     if(channels.includes(sample.channel)&&sample.valid&&sample.pressure_pa!=null&&Number.isFinite(sample.pressure_pa)&&sample.pressure_pa>0){
-      const value=Math.log10(sample.pressure_pa);low=Math.min(low,value);high=Math.max(high,value)
+      const value=Math.log10(sample.pressure_pa/factor);low=Math.min(low,value);high=Math.max(high,value)
     }
   }
   const min=Number.isFinite(low)?Math.floor(low):-8

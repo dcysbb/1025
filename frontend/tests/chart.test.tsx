@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import type {Root} from 'react-dom/client'
 import Chart from '../src/Chart'
 import {nearestPoint,timeRange,type Point} from '../src/chartData'
+import {axisTime,linearExponent,linearTicks,logTicks,scientificParts,timeTicks} from '../src/chartAxes'
 
 const initialDom=new JSDOM('<!doctype html><div/>',{url:'http://localhost'})
 Object.assign(globalThis,{window:initialDom.window,document:initialDom.window.document})
@@ -70,4 +71,65 @@ test('fault event lines are hidden by default and shown only when requested',asy
   assert.equal(container.querySelectorAll('[data-event-marker]').length,80)
   await act(async()=>checkbox.click())
   assert.equal(container.querySelectorAll('[data-event-marker]').length,0)
+})
+
+test('log axis uses whole decades and bounds tick density over wide pressure ranges',()=>{
+  assert.deepEqual(logTicks(1e-7,1e-3),[1e-7,1e-6,1e-5,1e-4,1e-3])
+  const wide=logTicks(1e-12,1e3)
+  assert.ok(wide.length<=7)
+  assert.ok(wide.every(n=>Math.abs(Math.log10(n)-Math.round(Math.log10(n)))<1e-10))
+  assert.deepEqual(logTicks(2e-7,4e-7),[2e-7,3e-7,4e-7])
+  const narrow=logTicks(2.11e-7,2.19e-7)
+  assert.ok(narrow.length>=2&&narrow.every(n=>n>=2.11e-7&&n<=2.19e-7))
+})
+
+test('linear ticks use readable increments and one shared scientific exponent',()=>{
+  assert.deepEqual(linearTicks(0,9.8e-6,6),[0,2e-6,4e-6,6e-6,8e-6])
+  assert.equal(linearExponent(0,9.8e-6),-6)
+  assert.equal(linearExponent(0,98),0)
+  assert.deepEqual(scientificParts(1e-7),{coefficient:'1',exponent:-7})
+  assert.deepEqual(scientificParts(2.5e-6),{coefficient:'2.5',exponent:-6})
+})
+
+test('time ticks use local clock intervals and fewer labels on narrow plots',()=>{
+  const end=base+86400000
+  const wide=timeTicks(base,end,1000),narrow=timeTicks(base,end,240)
+  assert.ok(wide.length>narrow.length&&narrow.length<=3)
+  assert.ok(wide.every(n=>n>=base&&n<=end&&n%3600000===0))
+  assert.deepEqual(axisTime(base,86400000),['08:00','10/13'])
+  const days=timeTicks(base,base+8*86400000,800)
+  assert.ok(days.every(n=>(n+8*3600000)%86400000===0))
+})
+
+test('Torr auto bounds and rendered major ticks align to the displayed unit',async()=>{
+  await act(async()=>root.render(<Chart points={points} channels={[4]} unit="Torr"/>))
+  const ticks=[...container.querySelectorAll('[data-y-tick]')].map(n=>Number(n.getAttribute('data-y-tick')))
+  assert.deepEqual(ticks,[1e-9,1e-8,1e-7,1e-6,1e-5,1e-4])
+  assert.ok(container.querySelector('.chart-axis-title')?.textContent?.includes('Torr'))
+  assert.ok([...container.querySelectorAll('.chart-axis--y tspan')].every(n=>n.getAttribute('baseline-shift')==='super'))
+})
+
+test('responsive chart changes its coordinates without scaling the CSS pixel height',async()=>{
+  let onResize:ResizeObserverCallback|undefined,disconnected=false
+  const prior=globalThis.ResizeObserver
+  globalThis.ResizeObserver=class {
+    constructor(callback:ResizeObserverCallback){onResize=callback}
+    observe(){}
+    unobserve(){}
+    disconnect(){disconnected=true}
+  } as unknown as typeof ResizeObserver
+  try{
+    await act(async()=>root.unmount())
+    root=createRoot(container)
+    await act(async()=>root.render(<Chart points={points} channels={[4]} unit="Pa"/>))
+    await act(async()=>onResize!([{contentRect:{width:328}}] as ResizeObserverEntry[],{} as ResizeObserver))
+    assert.equal(container.querySelector('.trend-chart')?.getAttribute('viewBox'),'0 0 328 340')
+    assert.ok(container.querySelectorAll('[data-time-tick]').length<=3)
+    await act(async()=>root.unmount())
+    assert.equal(disconnected,true)
+    root=createRoot(container)
+  }finally{
+    if(prior)globalThis.ResizeObserver=prior
+    else Reflect.deleteProperty(globalThis,'ResizeObserver')
+  }
 })
