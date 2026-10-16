@@ -244,6 +244,27 @@ test('poll failure marks controls stale while a stop can still be attempted', as
   assert.equal(button('X 轴正向移动').disabled, true)
   assert.equal(button('全部停止').disabled, false)
   assert.ok(container.textContent?.includes('状态过期'))
+  assert.ok(container.textContent?.includes('读取 PDXC3 位移台状态失败'))
+  assert.ok(container.textContent?.includes('停止入口保留'))
+})
+
+test('a server error during movement stays unconfirmed until an explicit stop resolves it', async () => {
+  state.connected = true
+  await render()
+  const original = globalThis.fetch
+  let moves = 0
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/move')) { moves++; return new Response('internal error', { status: 500 }) }
+    return original(url, init)
+  }
+  await act(async () => { button('Y 轴反向移动').click() })
+  assert.ok(container.textContent?.includes('Y 轴反向点动 10 步失败（HTTP 500）'))
+  assert.ok(container.textContent?.includes('结果未确认'))
+  assert.equal(button('Y 轴反向移动').disabled, true)
+  assert.equal(button('全部停止').disabled, false)
+  assert.equal(moves, 1)
+  await act(async () => { button('全部停止').click() })
+  assert.equal(button('Y 轴反向移动').disabled, false)
 })
 
 test('ambiguous HTTP delivery never unlocks movement just because polling later reports idle', async () => {

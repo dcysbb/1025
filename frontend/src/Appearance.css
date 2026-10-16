@@ -88,12 +88,31 @@ select option { color: var(--text); background: var(--bg); }
 .modal-backdrop { animation: material-fade 160ms ease-out; }
 .login-card { animation: panel-enter var(--motion-enter) var(--ease-out); }
 .toast-message { animation: toast-enter 220ms var(--ease-out); font-size: 12px; }
+.toast-message { overflow-wrap: anywhere; }
+.toast-message>span, .toast-message>button { flex-shrink: 0; }
+.toast-message--error { border-color: var(--red); }
+.toast-message--error>span { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
+.toast-message--info>span { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); }
+.request-notice {
+  display: flex; align-items: flex-start; gap: 14px; margin-top: 14px; padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); border-radius: 12px;
+  background: var(--surface); color: var(--text); font-size: 12px; overflow-wrap: anywhere;
+}
+.request-notice>div { min-width: 0; flex: 1; }
+.request-notice b { color: var(--amber); font-weight: 600; }
+.request-notice p { margin: 5px 0; line-height: 1.65; }
+.request-notice small { color: var(--muted); font-size: 11px; }
+.request-notice>button { flex-shrink: 0; }
+.request-notice--error { border-color: color-mix(in srgb, var(--red) 55%, var(--line)); }
+.request-notice--error b { color: var(--red); }
 .page-view { min-width: 0; animation: panel-enter var(--motion-enter) var(--ease-out); }
 .hardware-panel [role='tabpanel']:not([hidden]) { animation: panel-enter 240ms var(--ease-out); }
 @keyframes panel-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes material-fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes toast-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @media (max-width: 760px) {
+  .request-notice { flex-wrap: wrap; padding: 12px; gap: 10px; }
+  .request-notice>div { flex-basis: calc(100% - 44px); }
   .sidebar { padding: 12px 14px; align-items: center; flex-wrap: nowrap; }
   .brand-row { margin: 0; padding: 0; }
   .sidebar .user-row { width: auto; }

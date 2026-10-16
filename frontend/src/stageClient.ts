@@ -1,3 +1,5 @@
+import { ApiError, apiRequest } from './apiClient'
+
 export type Axis = 'x' | 'y' | 'z'
 export type StageConfig = {
   mode: 'real' | 'simulation'
@@ -24,19 +26,15 @@ export class StageRequestError extends Error {
 }
 
 export async function stageApi<T>(path: string, method = 'GET', body?: unknown, timeout = 5000): Promise<T> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeout)
+  const move = path === '/api/stage/move' && body && typeof body === 'object' ? body as { axis?: string; direction?: number; steps?: number } : null
   try {
-    const response = await fetch(path, {
-      method, credentials: 'same-origin', signal: controller.signal,
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    return await apiRequest<T>(path, {
+      method, timeoutMs: timeout,
+      operation: move ? `${move.axis?.toUpperCase()} 轴${move.direction === 1 ? '正向' : '反向'}点动 ${move.steps} 步` : undefined,
       body: body === undefined ? undefined : JSON.stringify(body),
     })
-    const result = await response.json()
-    if (!response.ok) {
-      if (response.status === 401) window.dispatchEvent(new Event('auth-needed'))
-      throw new StageRequestError(typeof result.detail === 'string' ? result.detail : '请检查配置或输入范围', response.status)
-    }
-    return result as T
-  } finally { clearTimeout(timer) }
+  } catch (error) {
+    if (error instanceof ApiError && error.kind === 'http' && error.status != null && error.status < 500) throw new StageRequestError(error.message, error.status)
+    throw error
+  }
 }

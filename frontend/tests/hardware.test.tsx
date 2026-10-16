@@ -49,6 +49,26 @@ test('opening and inspecting all terminals issues no writes', async () => {
   assert.equal(container.querySelectorAll('#hardware-terminals tbody tr').length, 26)
   assert.deepEqual(writes, [])
 })
+
+test('network failure names hardware reads, pauses writes and permits a read-only recovery', async () => {
+  const original = globalThis.fetch
+  let offline = true
+  globalThis.fetch = async (url, options) => {
+    if (offline && !String(url).includes('/stage')) throw new TypeError('Failed to fetch')
+    return original(url, options)
+  }
+  await render()
+  assert.ok(container.textContent?.includes('读取硬件连接配置失败'))
+  assert.ok(container.textContent?.includes('读取真空规与 I/O 控制器状态失败'))
+  assert.ok(container.textContent?.includes('设备是否在线尚未确认'))
+  assert.equal(container.textContent?.includes('Failed to fetch'), false)
+  assert.deepEqual(writes, [])
+  offline = false
+  await click('重新读取硬件配置')
+  assert.equal(container.textContent?.includes('读取硬件连接配置失败'), false)
+  assert.equal(button('连接真空规').disabled, false)
+  assert.deepEqual(writes, [])
+})
 test('transport switches preserve hidden fields and saves only that device', async () => {
   await render(); await change(field('真空规连接方式'), 'usb')
   assert.equal(field('真空规串口').value, 'COM3')

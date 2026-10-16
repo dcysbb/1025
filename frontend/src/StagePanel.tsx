@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plug, Square, Unplug } from 'lucide-react'
 import StageWorkbench from './StageWorkbench'
 import { AXES, StageRequestError, stageApi, type Axis, type StageConfig, type StageState } from './stageClient'
+import { errorMessage } from './apiClient'
 
 function request<T>(path = '', method = 'GET', body?: unknown) {
   return stageApi<T>(`/api/stage${path}`, method, body, path === '/connect' ? 30000 : method === 'GET' ? 5000 : 10000)
@@ -13,6 +14,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
   const [online, setOnline] = useState(false)
   const [busy, setBusy] = useState(false), [stopping, setStopping] = useState(false)
   const [message, setMessage] = useState(''), [error, setError] = useState('')
+  const [readError, setReadError] = useState('')
   const [uncertain, setUncertain] = useState(false), [awaitingRefresh, setAwaitingRefresh] = useState(false)
   const [lastRead, setLastRead] = useState(0), [historyVersion, setHistoryVersion] = useState(0)
   const commandRef = useRef(false), stopRef = useRef(false), generation = useRef(0), actionId = useRef(0)
@@ -22,6 +24,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
     setState(next)
     setDraft(prior => configuration ? prior ?? structuredClone(next.config) : structuredClone(next.config))
     setOnline(true)
+    setReadError('')
     setLastRead(Date.now())
     setAwaitingRefresh(false)
   }, [configuration])
@@ -42,8 +45,11 @@ export default function StagePanel({ auth, connected, configuration = false, onD
           if (!next.config || !Array.isArray(next.channels)) throw new Error('位移台状态格式无效')
           accept(next)
         }
-      } catch {
-        if (!cancelled && epoch === generation.current) setOnline(false)
+      } catch (error) {
+        if (!cancelled && epoch === generation.current) {
+          setOnline(false)
+          setReadError(errorMessage(error, '读取 PDXC3 位移台状态失败'))
+        }
       } finally {
         if (!cancelled) timer = setTimeout(refresh, 1000)
       }
@@ -76,7 +82,8 @@ export default function StagePanel({ auth, connected, configuration = false, onD
         const ambiguous = (path === '/move' || isStop) && !(e instanceof StageRequestError)
         if (ambiguous) setUncertain(true)
         setAwaitingRefresh(true)
-        setError(ambiguous ? '请求结果未确认，勿重复移动；请发送停止并检查连接。' : e instanceof Error ? e.message : '操作失败')
+        const reason = errorMessage(e, '位移台操作失败')
+        setError(ambiguous ? `${reason} ${isStop ? '无法确认设备已停止，禁止继续移动；请检查控制器连接和运动状态。' : '请求结果未确认，勿重复移动；请发送停止并检查连接。'}` : reason)
       }
     } finally {
       generation.current++
@@ -113,6 +120,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
           onClick={() => void act('/stop')}><Square size={15}/>{stopping ? '正在停止…' : '全部停止'}</button>
       </div>
     </section>
+    {readError && <div className="inline-error" role="alert">{readError} 当前位移台状态已过期，点动暂停；正在自动重试读取，停止入口保留。</div>}
     {error && <div className="inline-error" role="alert">{error}</div>}
     {state?.error && <div className="inline-error" role="alert">{state.error}</div>}
     {message && <p className="stage-message" role="status">{message}</p>}

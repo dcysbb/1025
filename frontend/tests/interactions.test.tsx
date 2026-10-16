@@ -12,6 +12,8 @@ const {createRoot}=await import('react-dom/client')
 
 let dom:JSDOM, root:Root, container:HTMLElement
 let offline=false
+let eventFailure=false, actionFailure=false, configFailure=false, historyFailure=false
+let historyHasData=false
 let resetCalls:Array<{scope:string}>=[]
 let resetFailure=false
 let debugCalls:Array<{channel:number;enabled:boolean;duration_s:number}>=[]
@@ -26,13 +28,17 @@ class Socket {
   close(){}
 }
 beforeEach(async()=>{
-  offline=false;resetCalls=[];resetFailure=false;Socket.instances=[];debugCalls=[];relayOutputs=Array<boolean>(8).fill(false);clearFaultCalls=0
+  offline=false;eventFailure=false;actionFailure=false;configFailure=false;historyFailure=false;historyHasData=false;resetCalls=[];resetFailure=false;Socket.instances=[];debugCalls=[];relayOutputs=Array<boolean>(8).fill(false);clearFaultCalls=0
   dom=new JSDOM('<!doctype html><div id="root"></div>',{url:'http://localhost'})
   Object.assign(globalThis,{window:dom.window,document:dom.window.document,localStorage:dom.window.localStorage,location:dom.window.location,Event:dom.window.Event,WebSocket:Socket,IS_REACT_ACT_ENVIRONMENT:true})
   Object.defineProperty(globalThis,'navigator',{value:dom.window.navigator,configurable:true})
   globalThis.fetch=async(url,options)=>{
     if(offline)throw new Error('offline')
     const path=String(url)
+    if(eventFailure&&path.includes('/events'))throw new TypeError('Failed to fetch')
+    if(configFailure&&path.endsWith('/config'))throw new TypeError('Failed to fetch')
+    if(historyFailure&&path.includes('/history?'))throw new TypeError('Failed to fetch')
+    if(actionFailure&&options?.method==='POST')throw new TypeError('Failed to fetch')
     if(path.endsWith('/interlock/clear-fault')){
       assert.equal(options?.method,'POST');clearFaultCalls++
       return new Response(JSON.stringify(status),{headers:{'Content-Type':'application/json'}})
@@ -52,7 +58,7 @@ beforeEach(async()=>{
     }
     if(path.includes('/hardware/status'))return new Response(JSON.stringify({tpg:{connected:true,error:null},io:{connected:true,error:null,inputs:null,outputs:null}}),{headers:{'Content-Type':'application/json'}})
     if(path.includes('/stage'))return new Response(JSON.stringify({config:{mode:'real',connection:'tcp',serial_number:'129123456',host:'',port:40303,axes:{x:1,y:2,z:3},inverted:{x:false,y:false,z:false},max_steps:1000},connected:false,error:null,channels:[]}),{headers:{'Content-Type':'application/json'}})
-    const data=path.includes('/auth/status')?{configured:true,authenticated:true,local:true}:path.includes('/config')?{config}:path.includes('/events')?{events:[],has_more:false}:path.includes('/history')?{rows:[],count:0,truncated:false}:status
+    const data=path.includes('/auth/status')?{configured:true,authenticated:true,local:true}:path.includes('/config')?{config}:path.includes('/events')?{events:[],has_more:false}:path.includes('/history')?{rows:historyHasData?[{timestamp:status.timestamp,channel:1,pressure_pa:.001,valid:true,mode:'simulation'}]:[],count:historyHasData?1:0,truncated:false}:status
     return new Response(JSON.stringify(data),{headers:{'Content-Type':'application/json'}})
   }
   container=document.getElementById('root')!
@@ -103,6 +109,100 @@ test('backend disconnect is visible and disables valve controls',async()=>{
   assert.ok(container.textContent?.includes('后台断连'))
   assert.equal(byText('关闭插板阀').disabled,true)
   assert.ok(container.querySelector('[role="alert"]'))
+  assert.ok(container.textContent?.includes('读取压力与联锁状态失败'))
+  assert.equal(container.textContent?.includes('Failed to fetch'),false)
+})
+
+test('an initial pending read is labelled connecting instead of reporting a disconnection',async()=>{
+  const original=globalThis.fetch
+  let release:()=>void=()=>{}
+  const gate=new Promise<void>(resolve=>{release=resolve})
+  globalThis.fetch=async(url,init)=>{if(String(url).endsWith('/api/status'))await gate;return original(url,init)}
+  await act(async()=>{root.unmount();root=createRoot(container);root.render(<App/>);await new Promise(resolve=>setTimeout(resolve,0))})
+  assert.equal(container.querySelector('.live-pill')?.textContent,'正在连接')
+  assert.equal(container.querySelector('.connection-warning'),null)
+  await act(async()=>{release();await new Promise(resolve=>setTimeout(resolve,0))})
+  assert.equal(container.querySelector('.live-pill')?.textContent,'服务在线')
+})
+
+test('event read failures stay as one labelled notice without repeated toasts and recover independently',async()=>{
+  eventFailure=true
+  await click(byText('事件日志'))
+  assert.ok(container.textContent?.includes('读取事件日志失败'))
+  assert.ok(container.textContent?.includes('不代表设备离线'))
+  assert.equal(container.querySelector('.toast-message'),null)
+  await click(byText('重试读取日志'))
+  await click(byText('重试读取日志'))
+  assert.equal(container.querySelectorAll('.request-notice').length,1)
+  assert.equal(container.querySelector('.toast-message'),null)
+  await click(byText('联锁控制'))
+  assert.equal(byText('关闭插板阀').disabled,false)
+  eventFailure=false
+  await click(byText('重试读取日志'))
+  assert.equal(container.querySelector('.request-notice'),null)
+})
+
+test('a failed control request names the action, warns of uncertain execution and uses an error notification',async()=>{
+  actionFailure=true
+  await click(byText('联锁控制'))
+  await click(byText('关闭插板阀'))
+  assert.ok(container.textContent?.includes('关闭插板阀结果未确认'))
+  assert.ok(container.textContent?.includes('勿直接重复提交'))
+  assert.ok(container.querySelector('.toast-message--error[role="alert"]'))
+  assert.ok(container.querySelector('.request-notice--error'))
+  assert.equal(container.textContent?.includes('Failed to fetch'),false)
+})
+
+test('settings read failures provide an explicit read-only retry',async()=>{
+  configFailure=true
+  await click(byText('设置'))
+  assert.ok(container.textContent?.includes('读取控制台设置失败'))
+  assert.equal(container.querySelector('.toast-message'),null)
+  configFailure=false
+  await click(byText('重新读取设置'))
+  assert.equal(container.querySelector('.request-notice'),null)
+  assert.ok(byText('保存设置'))
+})
+
+test('a failed settings reload cannot leave an old configuration writable',async()=>{
+  await click(byText('设置'))
+  assert.equal(byText('保存设置').disabled,false)
+  configFailure=true
+  await click(byText('放弃更改'))
+  assert.equal(byText('保存设置').disabled,true)
+  assert.ok(container.textContent?.includes('保存已暂停'))
+  configFailure=false
+  await click(byText('重新读取设置'))
+  assert.equal(byText('保存设置').disabled,false)
+})
+
+test('history event failure cannot discard successful pressure history or claim the curve failed',async()=>{
+  eventFailure=true;historyHasData=true
+  await click(byText('历史数据'))
+  assert.ok(container.textContent?.includes('历史曲线事件标记不可用'))
+  assert.equal(container.textContent?.includes('压力历史读取失败'),false)
+  assert.ok(container.textContent?.includes('压力曲线与 CSV 数据仍可使用'))
+  assert.ok(container.querySelector('a')?.getAttribute('href')?.includes('/history/export.csv'))
+  assert.equal(container.querySelector('.toast-message'),null)
+})
+
+test('history transport failure keeps export disabled and provides a named recovery action',async()=>{
+  historyFailure=true
+  await click(byText('历史数据'))
+  assert.ok(container.textContent?.includes('读取压力历史数据失败'))
+  assert.equal(container.querySelector('a')?.getAttribute('href'),null)
+  historyFailure=false
+  await click(byText('重新查询历史'))
+  assert.equal(container.querySelector('.request-notice'),null)
+})
+
+test('a closed push connection verifies HTTP health instead of briefly reporting an offline backend',async()=>{
+  const previous=Socket.instances[0]
+  await act(async()=>{Socket.instances.at(-1)!.onclose?.()})
+  assert.ok(container.textContent?.includes('服务在线'))
+  assert.equal(container.querySelector('.connection-warning'),null)
+  await act(async()=>previous.onclose?.())
+  assert.equal(container.querySelector('.connection-warning'),null)
 })
 test('old sample age is never displayed as an ever-growing acquisition delay',async()=>{
   await act(async()=>Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify({...status,sample_age_s:86400,sample_latency_s:.024,sample_stale:false})}))

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Check, Plug, RefreshCw } from 'lucide-react'
 import StagePanel from './StagePanel'
 import { Disclosure } from './Motion'
+import { apiRequest, errorMessage } from './apiClient'
 
 type TerminalText = 'dam_input_labels' | 'dam_output_labels' | 'dam_input_notes' | 'dam_output_notes'
 export type HardwareConfig = {
@@ -24,15 +25,10 @@ const FIXED = [
 function outputTerminals(index: number) {
   return index < 4 ? `${37 - index * 3} COM / ${36 - index * 3} NO / ${38 - index * 3} NC` : `${26 - (index - 4) * 2}、${25 - (index - 4) * 2} · 常开触点两端`
 }
-async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
-  const response = await fetch(`/api${path}`, { method, credentials: 'same-origin', headers: body === undefined ? {} : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
-  const data = await response.json()
-  if (!response.ok) {
-    if (response.status === 401) window.dispatchEvent(new Event('auth-needed'))
-    throw new Error(typeof data.detail === 'string' ? data.detail : '配置无效，请检查输入范围')
-  }
-  return data as T
+function request<T>(path: string, method = 'GET', body?: unknown, operation?: string): Promise<T> {
+  return apiRequest<T>(`/api${path}`, { method, operation, body: body === undefined ? undefined : JSON.stringify(body) })
 }
+
 function normalize(config: HardwareConfig) {
   return { ...config, ...Object.fromEntries(TEXT.map(key => [key, config[key] ?? Array(8).fill('')])) } as HardwareConfig
 }
@@ -46,9 +42,10 @@ export default function HardwarePanel({ auth, connected, onDirtyChange }: { auth
   const [ports, setPorts] = useState<{ device: string; description: string }[]>([])
   const [busy, setBusy] = useState('')
   const [messages, setMessages] = useState<Record<string, string>>({})
+  const [loadVersion, setLoadVersion] = useState(0)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [stageDirty, setStageDirty] = useState(false)
-  const writable = auth && connected && online && !busy
+  const writable = auth && connected && online && !busy && !errors.load
   const dirty = (keys: (keyof HardwareConfig)[]) => !!draft && !!saved && keys.some(key => JSON.stringify(draft[key]) !== JSON.stringify(saved[key]))
   const anyDirty = dirty([...TPG, ...IO, ...MAPPING, ...TEXT]) || stageDirty
   useEffect(() => { onDirtyChange?.(anyDirty) }, [anyDirty, onDirtyChange])
@@ -60,17 +57,17 @@ export default function HardwarePanel({ auth, connected, onDirtyChange }: { auth
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
-    void request<{ config: HardwareConfig }>('/config').then(data => {
-      if (!cancelled) { setSaved(normalize(data.config)); setDraft(normalize(data.config)) }
-    }).catch(error => { if (!cancelled) setErrors({ load: String(error.message) }) })
+    void request<{ config: HardwareConfig }>('/config', 'GET', undefined, '读取硬件连接配置').then(data => {
+      if (!cancelled) { setSaved(normalize(data.config)); setDraft(normalize(data.config)); setErrors(prior => ({ ...prior, load: '' })) }
+    }).catch(error => { if (!cancelled) setErrors(prior => ({ ...prior, load: errorMessage(error, '读取硬件连接配置失败') })) })
     async function poll() {
-      try { const next = await request<HardwareStatus>('/hardware/status'); if (!cancelled) { setState(next); setOnline(true) } }
-      catch { if (!cancelled) setOnline(false) }
+      try { const next = await request<HardwareStatus>('/hardware/status'); if (!cancelled) { setState(next); setOnline(true); setErrors(prior => ({ ...prior, status: '' })) } }
+      catch (error) { if (!cancelled) { setOnline(false); setErrors(prior => ({ ...prior, status: errorMessage(error, '读取真空规与 I/O 控制器状态失败') })) } }
       finally { if (!cancelled) timer = setTimeout(poll, 2000) }
     }
     void poll()
     return () => { cancelled = true; clearTimeout(timer) }
-  }, [])
+  }, [loadVersion])
   async function refreshPorts() {
     try { const next = await request<{ ports: typeof ports }>('/hardware/ports'); setPorts(next.ports); setErrors(prior => ({ ...prior, ports: '' })) }
     catch (error) { setErrors(prior => ({ ...prior, ports: error instanceof Error ? error.message : '串口列表读取失败' })) }
@@ -86,7 +83,7 @@ export default function HardwarePanel({ auth, connected, onDirtyChange }: { auth
     if (!draft) return
     const values = Object.fromEntries(keys.map(key => [key, draft[key]]))
     void run(section, async () => {
-      const next = await request<{ config: HardwareConfig }>('/config', 'PATCH', { config: values })
+      const next = await request<{ config: HardwareConfig }>('/config', 'PATCH', { config: values }, `保存${section === 'tpg' ? 'TPG366 真空规连接配置' : section === 'io' ? 'I/O 控制器连接配置' : section === 'valve' ? '插板阀映射' : 'DAM 端子名称与备注'}`)
       const normalized = normalize(next.config)
       setSaved(normalized)
       setDraft(prior => prior && ({ ...prior, ...Object.fromEntries(keys.map(key => [key, normalized[key]])) }))
@@ -108,7 +105,7 @@ export default function HardwarePanel({ auth, connected, onDirtyChange }: { auth
     <div className="hardware-tabs" role="tablist" aria-label="硬件配置">
       {([['devices', '设备连接'], ['terminals', 'DAM 端子'], ['valve', '插板阀映射']] as const).map(([id, title]) => <button role="tab" aria-selected={tab === id} aria-controls={`hardware-${id}`} id={`hardware-tab-${id}`} key={id} className={`button ${tab === id ? 'button--primary' : 'button--quiet'}`} onClick={() => setTab(id)}>{title}</button>)}
     </div>
-    {notice('load')}{!online && <p className="inline-error" role="alert">硬件状态暂不可用，保存和连接已暂停。</p>}
+    {notice('load')}{errors.load && <button className="button button--quiet" onClick={() => setLoadVersion(value => value + 1)}>重新读取硬件配置</button>}{!online && <p className="inline-error" role="alert">{errors.status || '正在读取硬件状态…'} 保存和连接已暂停；设备是否在线尚未确认，正在自动重试读取。</p>}
     {!draft ? <p>正在读取硬件配置…</p> : <>
       <datalist id="hardware-com-ports">{ports.map(port => <option key={port.device} value={port.device}>{port.description}</option>)}</datalist>
       <div role="tabpanel" aria-labelledby="hardware-tab-devices" id="hardware-devices" hidden={tab !== 'devices'}>

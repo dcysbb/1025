@@ -10,6 +10,7 @@ import Chart from './Chart'
 import StagePanel from './StagePanel'
 import HardwarePanel from './HardwarePanel'
 import { Disclosure, Presence, Reveal } from './Motion'
+import { apiRequest, errorMessage } from './apiClient'
 
 type Page = 'overview' | 'history' | 'control' | 'events' | 'settings' | 'debug' | 'stage' | 'hardware'
 type Unit = 'Pa' | 'mbar' | 'Torr'
@@ -33,13 +34,10 @@ const NAV:{id:Page;label:string;icon:typeof LayoutDashboard}[]=[
   {id:'control',label:'联锁控制',icon:Shield},{id:'stage',label:'位移台',icon:Workflow},{id:'hardware',label:'硬件连接',icon:Radio},{id:'events',label:'事件日志',icon:Bell},{id:'settings',label:'设置',icon:Settings2},{id:'debug',label:'Debug',icon:TerminalSquare},
 ]
 
-async function api<T>(path:string, init?:RequestInit):Promise<T>{
-  const response=await fetch(`${API}${path}`,{credentials:'same-origin',...init,headers:{...(init?.body?{'Content-Type':'application/json'}:{}),...init?.headers}})
-  const kind=response.headers.get('content-type')||''
-  const data=kind.includes('json')?await response.json():undefined
-  if(!response.ok){if(response.status===401)window.dispatchEvent(new Event('auth-needed'));throw new Error(data?.detail||`请求失败 (${response.status})`)}
-  return data as T
+function api<T>(path:string, init?:RequestInit):Promise<T>{
+  return apiRequest<T>(`${API}${path}`, init)
 }
+
 function pressure(value:number|null|undefined,unit:Unit){return value==null||!Number.isFinite(value)?'—':Number((value/FACTOR[unit]).toPrecision(3)).toExponential(2)}
 function time(value?:string|null,full=false){if(!value)return'—';return new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',second:full?'2-digit':undefined,hour12:false,...(full?{year:'numeric',month:'2-digit',day:'2-digit'}:{})}).format(new Date(value))}
 function localValue(date:Date){return new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16)}
@@ -79,18 +77,57 @@ function App(){
   const [status,setStatus]=useState<Status|null>(null);const [events,setEvents]=useState<EventItem[]>([]);const [points,setPoints]=useState<Point[]>([]);const [hist,setHist]=useState<Point[]>([]);const [histCount,setHistCount]=useState<number|null>(null);const [histTruncated,setHistTruncated]=useState(false);const [histReady,setHistReady]=useState(false);const [histBusy,setHistBusy]=useState(false)
   const [resetHistoryOpen,setResetHistoryOpen]=useState(false);const [resetScope,setResetScope]=useState<'simulation'|'all'>('simulation');const [resettingHistory,setResettingHistory]=useState(false)
   const [start,setStart]=useState(()=>localValue(new Date(Date.now()-86400000)));const [end,setEnd]=useState(()=>localValue(new Date()));const [channels,setChannels]=useState([1,2,3,4,5,6]);
-  const [draft,setDraft]=useState<Config|null>(null);const [confirm,setConfirm]=useState('');const [auth,setAuth]=useState(false);const [configured,setConfigured]=useState(true);const [local,setLocal]=useState(true);const [login,setLogin]=useState<'setup'|'login'|null>(null);const [toast,setToast]=useState('');const [busy,setBusy]=useState(false)
-  const notify=useCallback((message:string)=>{setToast(message);window.setTimeout(()=>setToast(''),4500)},[])
-  const refreshStatus=useCallback(async()=>{try{setStatus(await api<Status>('/status'));setConnected(true)}catch{setConnected(false)}},[])
-  const refreshEvents=useCallback(async()=>{try{const q=new URLSearchParams({limit:'200',offset:String(eventOffset)});if(eventStart)q.set('start',new Date(eventStart).toISOString());if(eventEnd)q.set('end',new Date(eventEnd).toISOString());if(eventKind)q.set('kind',eventKind);if(eventSeverity)q.set('severity',eventSeverity);const result=await api<{events:EventItem[];has_more:boolean}>(`/events?${q}`);setEvents(result.events);setEventMore(result.has_more)}catch(e){notify(e instanceof Error?e.message:'日志读取失败')}},[eventStart,eventEnd,eventKind,eventSeverity,eventOffset,notify])
-  const refreshAuth=useCallback(async()=>{try{const x=await api<{configured:boolean;authenticated:boolean;local:boolean}>('/auth/status');setAuth(x.authenticated);setConfigured(x.configured);setLocal(x.local)}catch{/* server starting */}},[])
+  const [draft,setDraft]=useState<Config|null>(null);const [confirm,setConfirm]=useState('');const [auth,setAuth]=useState(false);const [configured,setConfigured]=useState(true);const [local,setLocal]=useState(true);const [login,setLogin]=useState<'setup'|'login'|null>(null);const [toast,setToast]=useState('');const [toastKind,setToastKind]=useState<'success'|'error'|'info'>('success');const [busy,setBusy]=useState(false)
+  const [readErrors,setReadErrors]=useState<Record<string,string>>({})
+  const [actionError,setActionError]=useState('')
+  const toastTimer=useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const notify=useCallback((message:string,kind:'success'|'error'|'info'='success')=>{
+    clearTimeout(toastTimer.current);setToastKind(kind);setToast(message)
+    toastTimer.current=setTimeout(()=>setToast(''),4500)
+  },[])
+  useEffect(()=>()=>clearTimeout(toastTimer.current),[])
+  const readError=useCallback((resource:string,message:string)=>setReadErrors(prior=>({...prior,[resource]:message})),[])
+  const acceptStatus=useCallback((next:Status)=>{
+    if(!next || !Array.isArray(next.channels))throw new Error('后台返回的压力与联锁状态格式异常，请刷新页面并检查后台版本。')
+    setStatus(next);setConnected(true);readError('status','')
+    setPoints(prior=>{
+      const stamp=next.sample_timestamp??next.timestamp
+      if(next.sample_stale||!next.tpg_connected){
+        if(!prior.length||prior.at(-1)?.channels.every(channel=>!channel.valid))return prior
+        return [...prior,{timestamp:next.timestamp,channels:next.channels.map(channel=>({...channel,valid:false}))}].slice(-240)
+      }
+      if(prior.at(-1)?.timestamp===stamp)return prior
+      return [...prior,{timestamp:stamp,channels:next.channels}].slice(-240)
+    })
+  },[readError])
+  const refreshStatus=useCallback(async()=>{
+    try{acceptStatus(await api<Status>('/status'))}
+    catch(error){setConnected(false);readError('status',errorMessage(error,'读取压力与联锁状态失败'))}
+  },[acceptStatus,readError])
+  const refreshEvents=useCallback(async()=>{
+    try{
+      const q=new URLSearchParams({limit:'200',offset:String(eventOffset)})
+      if(eventStart)q.set('start',new Date(eventStart).toISOString());if(eventEnd)q.set('end',new Date(eventEnd).toISOString());if(eventKind)q.set('kind',eventKind);if(eventSeverity)q.set('severity',eventSeverity)
+      const result=await api<{events:EventItem[];has_more:boolean}>(`/events?${q}`)
+      if(!Array.isArray(result?.events))throw new Error('读取事件日志失败：后台返回的日志格式异常，请刷新页面并检查后台版本。')
+      setEvents(result.events);setEventMore(result.has_more);readError('events','')
+    }catch(error){readError('events',errorMessage(error,'读取事件日志失败'))}
+  },[eventStart,eventEnd,eventKind,eventSeverity,eventOffset,readError])
+  const refreshAuth=useCallback(async()=>{
+    try{const x=await api<{configured:boolean;authenticated:boolean;local:boolean}>('/auth/status');if(typeof x?.authenticated!=='boolean'||typeof x.local!=='boolean')throw new Error('读取操作员登录状态失败：后台返回的权限数据格式异常。');setAuth(x.authenticated);setConfigured(x.configured);setLocal(x.local);readError('auth','')}
+    catch(error){readError('auth',errorMessage(error,'读取操作员登录状态失败'))}
+  },[readError])
+  function reportError(error:unknown,fallback:string){const message=errorMessage(error,fallback);setActionError(message);notify(message,'error')}
   useEffect(()=>{
-    void refreshStatus();void refreshAuth();const statusTimer=window.setInterval(()=>void refreshStatus(),1000)
+    void refreshAuth();let statusTimer:ReturnType<typeof setTimeout>;let polling=true
+    const poll=async()=>{await refreshStatus();if(polling)statusTimer=setTimeout(()=>void poll(),1000)};void poll()
+    const authTimer=setInterval(()=>void refreshAuth(),10000)
     const authNeeded=()=>{if(local){void refreshAuth();return}setAuth(false);setLogin(configured?'login':null)};window.addEventListener('auth-needed',authNeeded)
     const scheme=location.protocol==='https:'?'wss:':'ws:';let socket:WebSocket|null=null;let retry=0;let cancelled=false
-    const connect=()=>{if(cancelled)return;socket=new WebSocket(`${scheme}//${location.host}/ws/status`);socket.onopen=()=>{retry=0;setConnected(true)};socket.onmessage=e=>{try{const s=JSON.parse(e.data) as Status;setStatus(s);setPoints(prior=>{const stamp=s.sample_timestamp??s.timestamp;if(s.sample_stale||!s.tpg_connected){if(!prior.length||prior.at(-1)?.channels.every(c=>!c.valid))return prior;return [...prior,{timestamp:s.timestamp,channels:s.channels.map(c=>({...c,valid:false}))}].slice(-240)}if(prior.at(-1)?.timestamp===stamp)return prior;return [...prior,{timestamp:stamp,channels:s.channels}].slice(-240)})}catch{/* ignore malformed frame */}};socket.onclose=()=>{setConnected(false);if(!cancelled)window.setTimeout(connect,Math.min(5000,700+retry++*500))}}
-    connect();return()=>{cancelled=true;socket?.close();clearInterval(statusTimer);window.removeEventListener('auth-needed',authNeeded)}
-  },[refreshStatus,refreshAuth,configured,local,auth])
+    const connect=()=>{if(cancelled)return;socket=new WebSocket(`${scheme}//${location.host}/ws/status`);socket.onopen=()=>{if(!cancelled)retry=0};socket.onmessage=e=>{if(cancelled)return;try{acceptStatus(JSON.parse(e.data) as Status)}catch{readError('status','实时状态数据格式异常，正在通过后台查询重新读取。')}};socket.onclose=()=>{if(cancelled)return;void refreshStatus();window.setTimeout(connect,Math.min(5000,700+retry++*500))}}
+
+    connect();return()=>{cancelled=true;polling=false;socket?.close();clearTimeout(statusTimer);clearInterval(authTimer);window.removeEventListener('auth-needed',authNeeded)}
+  },[refreshStatus,refreshAuth,configured,local,auth,acceptStatus,readError])
   useEffect(()=>{void refreshEvents();const timer=window.setInterval(()=>void refreshEvents(),7000);return()=>clearInterval(timer)},[refreshEvents])
   useEffect(()=>{document.documentElement.dataset.theme=theme;document.documentElement.style.setProperty('--glass-alpha',String(glass/1000));localStorage.setItem('vacuum-theme',theme);localStorage.setItem('vacuum-glass',String(glass))},[theme,glass])
   useEffect(()=>{localStorage.setItem('vacuum-unit',unit)},[unit])
@@ -98,19 +135,36 @@ function App(){
   useEffect(()=>{localStorage.setItem('vacuum-events',asideOpen?'open':'closed')},[asideOpen])
   useEffect(()=>{if(!login)return;const key=(e:KeyboardEvent)=>{if(e.key==='Escape')setLogin(null)};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key)},[login])
   useEffect(()=>{if(page==='settings')void loadConfig();if(page==='events')void refreshEvents();if(page==='history'&&!histReady)void loadHistory();void refreshAuth();/* eslint-disable-next-line react-hooks/exhaustive-deps */},[page])
-  async function loadConfig(){try{const x=await api<{config:Config}>('/config');setDraft(x.config)}catch(e){notify(e instanceof Error?e.message:'无法读取设置')}}
-  async function loadHistory(){if(!start||!end||!channels.length){setHist([]);setHistCount(0);setHistReady(false);notify('请选择有效时间范围和至少一个通道');return}if(new Date(end)<=new Date(start)){notify('结束时间必须晚于开始时间');return}setHistBusy(true);try{const q=new URLSearchParams({start:new Date(start).toISOString(),end:new Date(end).toISOString(),channels:channels.join(','),limit:'100000'});const r=await api<{rows:Array<Record<string,unknown>>;count:number;truncated:boolean}>(`/history?${q}`);const grouped=new Map<string,Point>();for(const row of r.rows){const key=String(row.timestamp);let p=grouped.get(key);if(!p){p={timestamp:key,channels:[]};grouped.set(key,p)}p.channels.push({channel:Number(row.channel),pressure_pa:row.pressure_pa==null?null:Number(row.pressure_pa),valid:Boolean(row.valid),mode:row.mode==='real'?'real':'simulation'})}setHist([...grouped.values()]);const ev=await api<{events:EventItem[]}>(`/events?${new URLSearchParams({start:new Date(start).toISOString(),end:new Date(end).toISOString(),limit:'1000'})}`);setHistoryEvents(ev.events);setHistCount(r.count);setHistTruncated(r.truncated);setHistReady(true)}catch(e){notify(e instanceof Error?e.message:'读取历史失败')}finally{setHistBusy(false)}}
-  async function act(path:string,success:string){setBusy(true);try{setStatus(await api<Status>(path,{method:'POST',body:'{}'}));await refreshEvents();notify(success)}catch(e){notify(e instanceof Error?e.message:'操作失败')}finally{setBusy(false)}}
+  async function loadConfig(){try{const x=await api<{config:Config}>('/config');setDraft(x.config);readError('config','')}catch(error){readError('config',errorMessage(error,'读取控制台设置失败'))}}
+  async function loadHistory(){
+    if(!start||!end||!channels.length){setHist([]);setHistCount(0);setHistReady(false);notify('请选择有效时间范围和至少一个通道','info');return}
+    if(new Date(end)<=new Date(start)){notify('结束时间必须晚于开始时间','info');return}
+    setHistBusy(true);setHistReady(false)
+    try{
+      const q=new URLSearchParams({start:new Date(start).toISOString(),end:new Date(end).toISOString(),channels:channels.join(','),limit:'100000'})
+      const result=await api<{rows:Array<Record<string,unknown>>;count:number;truncated:boolean}>(`/history?${q}`)
+      if(!Array.isArray(result?.rows)||!Number.isFinite(result.count))throw new Error('读取压力历史数据失败：后台返回的历史记录格式异常，请刷新页面并检查后台版本。')
+      const grouped=new Map<string,Point>()
+      for(const row of result.rows){const key=String(row.timestamp);let point=grouped.get(key);if(!point){point={timestamp:key,channels:[]};grouped.set(key,point)}point.channels.push({channel:Number(row.channel),pressure_pa:row.pressure_pa==null?null:Number(row.pressure_pa),valid:Boolean(row.valid),mode:row.mode==='real'?'real':'simulation'})}
+      setHist([...grouped.values()]);setHistCount(result.count);setHistTruncated(result.truncated);setHistReady(true);readError('history','')
+      try{
+        const events=await api<{events:EventItem[]}>(`/events?${new URLSearchParams({start:new Date(start).toISOString(),end:new Date(end).toISOString(),limit:'1000'})}`)
+        setHistoryEvents(events.events);readError('historyEvents','')
+      }catch(error){setHistoryEvents([]);readError('historyEvents',errorMessage(error,'读取历史区间事件标记失败'))}
+    }catch(error){readError('history',errorMessage(error,'读取压力历史数据失败'))}
+    finally{setHistBusy(false)}
+  }
+  async function act(path:string,success:string){setActionError('');setBusy(true);try{setStatus(await api<Status>(path,{method:'POST',body:'{}'}));await refreshEvents();notify(success)}catch(e){reportError(e,'操作失败')}finally{setBusy(false)}}
   const active=status?.channels||[]
   const patch=(key:keyof Config,value:unknown)=>setDraft(cur=>{if(!cur)return cur;if(key==='mode'&&value==='real'&&cur.mode!=='real')return{...cur,mode:'real',fail_closed_confirmed:false,channels:cur.channels.map(ch=>({...ch,enabled:false,trip_pa:null,reset_pa:null}))};return{...cur,[key]:value} as Config})
   const editChannel=(i:number,key:keyof ChanConfig,value:unknown)=>setDraft(cur=>{if(!cur)return cur;const cs=[...cur.channels];cs[i]={...cs[i],[key]:value};return{...cur,channels:cs}})
-  async function saveSettings(){if(!draft)return;if(draft.mode==='real'&&draft.fail_closed_confirmed&&confirm!=='现场确认'){notify('请先输入“现场确认”后保存真实硬件确认');return}setBusy(true);try{const body={...draft,fail_closed_confirmed:draft.mode==='real'&&draft.fail_closed_confirmed&&confirm==='现场确认'};const r=await api<{config:Config;restart_required:boolean}>('/config',{method:'PATCH',body:JSON.stringify({config:Object.fromEntries((['mode','channels','sample_interval_s','stale_timeout_s','valve_timeout_s','recovery_hold_s','history_retention_days','allow_lan','fail_closed_confirmed'] as const).map(key=>[key,body[key]]))})});setDraft(r.config);setConfirm('');notify(r.restart_required?'已保存。切换局域网监听需要重启后台。':'已保存，请核对联锁状态。');void refreshStatus()}catch(e){notify(e instanceof Error?e.message:'保存失败')}finally{setBusy(false)}}
-  async function logOut(){try{await api('/auth/logout',{method:'POST'});setAuth(false);notify('已退出操作员会话')}catch(e){notify(e instanceof Error?e.message:'退出失败')}}
-  async function connectDevices(){setBusy(true);try{const r=await api<{ok:boolean;tpg?:{ok:boolean;error?:string};adam?:{ok:boolean;error?:string}}>('/devices/connect',{method:'POST',body:'{}'});if(!r.ok)throw new Error(`设备连接失败：${[r.tpg?.error,r.adam?.error].filter(Boolean).join('；')}`);await refreshStatus();await refreshEvents();notify('设备已连接')}catch(e){notify(e instanceof Error?e.message:'设备检查失败')}finally{setBusy(false)}}
-  async function simPressure(high:boolean){try{setStatus(await api<Status>('/simulation/pressure',{method:'POST',body:JSON.stringify({channel:1,pressure_pa:high?0.02:0.001})}));notify(high?'已注入通道 1 压力超限':'通道 1 压力已恢复')}catch(e){notify(e instanceof Error?e.message:'模拟操作失败')}}
-  async function simFault(kind:'io'|'gauge'|'sensor'|'close'|'tpg',enabled:boolean){try{setStatus(await api<Status>('/simulation/fault',{method:'POST',body:JSON.stringify({kind,enabled,channel:1})}));notify(enabled?'已注入模拟故障':'模拟故障已恢复')}catch(e){notify(e instanceof Error?e.message:'模拟操作失败')}}
+  async function saveSettings(){if(!draft||readErrors.config)return;if(draft.mode==='real'&&draft.fail_closed_confirmed&&confirm!=='现场确认'){notify('请先输入“现场确认”后保存真实硬件确认','info');return}setActionError('');setBusy(true);try{const body={...draft,fail_closed_confirmed:draft.mode==='real'&&draft.fail_closed_confirmed&&confirm==='现场确认'};const r=await api<{config:Config;restart_required:boolean}>('/config',{method:'PATCH',body:JSON.stringify({config:Object.fromEntries((['mode','channels','sample_interval_s','stale_timeout_s','valve_timeout_s','recovery_hold_s','history_retention_days','allow_lan','fail_closed_confirmed'] as const).map(key=>[key,body[key]]))})});setDraft(r.config);setConfirm('');notify(r.restart_required?'已保存。切换局域网监听需要重启后台。':'已保存，请核对联锁状态。');void refreshStatus()}catch(e){reportError(e,'保存失败')}finally{setBusy(false)}}
+  async function logOut(){setActionError('');try{await api('/auth/logout',{method:'POST'});setAuth(false);notify('已退出操作员会话')}catch(e){reportError(e,'退出失败')}}
+  async function connectDevices(){setActionError('');setBusy(true);try{const r=await api<{ok:boolean;tpg?:{ok:boolean;error?:string};adam?:{ok:boolean;error?:string}}>('/devices/connect',{method:'POST',body:'{}'});if(!r.ok)throw new Error(`设备连接失败：${[r.tpg?.error&&`TPG366 真空规：${r.tpg.error}`,r.adam?.error&&`I/O 控制器：${r.adam.error}`].filter(Boolean).join('；')}`);await refreshStatus();await refreshEvents();notify('设备已连接')}catch(e){reportError(e,'设备检查失败')}finally{setBusy(false)}}
+  async function simPressure(high:boolean){setActionError('');try{setStatus(await api<Status>('/simulation/pressure',{method:'POST',body:JSON.stringify({channel:1,pressure_pa:high?0.02:0.001})}));notify(high?'已注入通道 1 压力超限':'通道 1 压力已恢复')}catch(e){reportError(e,'模拟操作失败')}}
+  async function simFault(kind:'io'|'gauge'|'sensor'|'close'|'tpg',enabled:boolean){setActionError('');try{setStatus(await api<Status>('/simulation/fault',{method:'POST',body:JSON.stringify({kind,enabled,channel:1})}));notify(enabled?'已注入模拟故障':'模拟故障已恢复')}catch(e){reportError(e,'模拟操作失败')}}
   async function resetHistory(){
-    setResettingHistory(true)
+    setActionError('');setResettingHistory(true)
     try{
       const result=await api<{deleted:number}>('/history/reset',{method:'POST',body:JSON.stringify({scope:resetScope})})
       setHist([]);setHistoryEvents([]);setHistCount(0);setHistTruncated(false);setHistReady(false)
@@ -118,7 +172,7 @@ function App(){
       setResetHistoryOpen(false)
       await loadHistory();await refreshEvents()
       notify(`已清除 ${result.deleted.toLocaleString()} 条${resetScope==='simulation'?'模拟':'压力'}记录，采集继续运行`)
-    }catch(e){notify(e instanceof Error?e.message:'历史重置失败')}
+    }catch(e){reportError(e,'历史重置失败')}
     finally{setResettingHistory(false)}
   }
   const refreshRelays=useCallback(async()=>{
@@ -131,9 +185,9 @@ function App(){
     return()=>clearInterval(timer)
   },[page,auth,refreshRelays])
   async function switchRelay(channel:number,enabled:boolean){
-    setDebugBusy(true)
+    setActionError('');setDebugBusy(true)
     try{setRelayState(await api<DebugState>(`/debug/relays/${channel}`,{method:'POST',body:JSON.stringify({enabled,duration_s:debugAutoOff?debugDuration:0})}));setDebugError('');notify(`OUT${channel+1} 已${enabled?'开启':'关闭'}`)}
-    catch(e){const message=e instanceof Error?e.message:'控制失败';await refreshRelays();setDebugError(message);notify(message)}
+    catch(e){const message=e instanceof Error?e.message:'控制失败';await refreshRelays();setDebugError(message);reportError(e,'继电器控制结果未确认')}
     finally{setDebugBusy(false)}
   }
   const eventsTrigger=useRef<HTMLButtonElement>(null)
@@ -149,10 +203,13 @@ function App(){
       {local?<div className="user-row"><span className="user-avatar">PC</span><span className="user-copy"><b>本机控制</b></span></div>:<><button className="user-row" onClick={()=>auth?void logOut():setLogin(configured?'login':local?'setup':null)} aria-label={auth?'退出操作员会话':'操作员登录'} title={collapsed?'操作员账户':undefined}><span className="user-avatar">{auth?'OP':<LockKeyhole size={16}/>}</span><span className="user-copy"><b>{auth?'操作员已登录':'操作员登录'}</b><small>{auth?'退出操作员会话':'需验证后控制'}</small></span>{auth?<LogOut size={15}/>:<ChevronDown size={15}/>}</button></>}
     </aside>
 
-    <main className="main-column"><header className="topbar glass-panel"><div className="page-heading"><h1>{page==='overview'?'运行总览':page==='history'?'历史数据':page==='control'?'联锁控制':page==='events'?'事件日志':page==='stage'?'位移台':page==='debug'?'继电器调试':page==='hardware'?'硬件连接':'设置'}</h1></div><div className="topbar-right"><button className="theme-toggle" aria-label={theme==='light'?'切换为深色':'切换为浅色'} title={theme==='light'?'切换为深色':'切换为浅色'} onClick={()=>setTheme(value=>value==='light'?'graphite':'light')}>{theme==='light'?<Sun size={16}/>:<Moon size={16}/>}</button>{page!=='events'&&<button ref={eventsTrigger} className="icon-button" aria-label={asideOpen?'收起事件栏':'展开事件栏'} aria-expanded={asideOpen} aria-controls="recent-events" onClick={()=>setAsideOpen(value=>!value)}><Bell size={16}/></button>}<label className="unit-select"><select aria-label="压力单位" value={unit} onChange={e=>setUnit(e.target.value as Unit)}><option>Pa</option><option>mbar</option><option>Torr</option></select></label>{status&&<span className="mode-badge" data-mode={status.mode}>{status.mode==='simulation'?'模拟模式':'真实设备'}</span>}<button className={`live-pill ${connected?'live-pill--on':''}`} onClick={()=>void refreshStatus()}><i/>{connected?'服务在线':'后台断连'}</button></div></header>
+    <main className="main-column"><header className="topbar glass-panel"><div className="page-heading"><h1>{page==='overview'?'运行总览':page==='history'?'历史数据':page==='control'?'联锁控制':page==='events'?'事件日志':page==='stage'?'位移台':page==='debug'?'继电器调试':page==='hardware'?'硬件连接':'设置'}</h1></div><div className="topbar-right"><button className="theme-toggle" aria-label={theme==='light'?'切换为深色':'切换为浅色'} title={theme==='light'?'切换为深色':'切换为浅色'} onClick={()=>setTheme(value=>value==='light'?'graphite':'light')}>{theme==='light'?<Sun size={16}/>:<Moon size={16}/>}</button>{page!=='events'&&<button ref={eventsTrigger} className="icon-button" aria-label={asideOpen?'收起事件栏':'展开事件栏'} aria-expanded={asideOpen} aria-controls="recent-events" onClick={()=>setAsideOpen(value=>!value)}><Bell size={16}/></button>}<label className="unit-select"><select aria-label="压力单位" value={unit} onChange={e=>setUnit(e.target.value as Unit)}><option>Pa</option><option>mbar</option><option>Torr</option></select></label>{status&&<span className="mode-badge" data-mode={status.mode}>{status.mode==='simulation'?'模拟模式':'真实设备'}</span>}<button className={`live-pill ${connected?'live-pill--on':''}`} onClick={()=>void refreshStatus()}><i/>{connected?'服务在线':readErrors.status?'后台断连':'正在连接'}</button></div></header>
 
 
-      {!connected&&<div className="inline-error connection-warning" role="alert"><TriangleAlert size={17}/>后台断连 · 显示上次状态，控制已暂停</div>}{status&&!status.history_recording&&<div className="inline-error connection-warning" role="alert">历史记录故障：{status.history_error||'存储不可用'}</div>}
+      {!connected&&readErrors.status&&<div className="inline-error connection-warning" role="alert"><TriangleAlert size={17}/>{readErrors.status} {status?'显示上次状态':'设备状态尚未读取成功'}，控制已暂停。后台恢复响应后自动更新。</div>}{status&&!status.history_recording&&<div className="inline-error connection-warning" role="alert">历史记录故障：{status.history_error||'存储不可用'}</div>}
+      {connected&&readErrors.events&&<div className="request-notice" role="alert"><div><b>事件日志暂不可用</b><p>{readErrors.events}</p><small>事件列表可能已过期；正在每 7 秒自动重试。此错误不代表设备离线，设备状态请看各自状态卡。</small></div><button className="button button--quiet" onClick={()=>void refreshEvents()}>重试读取日志</button></div>}
+      {connected&&readErrors.auth&&<div className="request-notice" role="alert"><div><b>操作权限状态未确认</b><p>{readErrors.auth}</p></div><button className="button button--quiet" onClick={()=>void refreshAuth()}>重新检查权限</button></div>}
+      {actionError&&<div className="request-notice request-notice--error" role="alert"><div><b>操作未能确认成功</b><p>{actionError}</p></div><button className="icon-button" aria-label="关闭操作错误提示" onClick={()=>setActionError('')}><X size={15}/></button></div>}
       <div className="page-view" key={page}>
       {page==='overview'&&<div className="page-content">
         <section className={`interlock-banner glass-panel interlock-banner--${interlockClass}`}><div className="interlock-icon">{interlockClass==='armed'?<ShieldCheck size={23}/>:interlockClass==='tripped'?<ShieldAlert size={23}/>:<Shield size={23}/>}</div><div className="interlock-banner__copy"><h2>{status?.interlock_label||'正在连接控制器'}</h2>{status?.trip_reason&&<p>{status.trip_reason}</p>}</div><div className="interlock-banner__actions">
@@ -167,6 +224,8 @@ function App(){
         {status?.mode==='simulation'&&<Disclosure className="sim-tools glass-panel" title="模拟故障测试"><div className="sim-tools__actions"><button className="button button--danger-soft" disabled={!connected||!auth} onClick={()=>void simPressure(true)}><TriangleAlert size={15}/>注入压力超限</button><button className="button button--quiet" disabled={!connected||!auth} onClick={()=>void simPressure(false)}>恢复压力</button><button className="button button--quiet" disabled={!connected||!auth} onClick={()=>void simFault('io',true)}>模拟 I/O 中断</button><button className="button button--quiet" disabled={!connected||!auth} onClick={()=>void simFault('io',false)}>恢复 I/O</button><button className="button button--quiet" disabled={!connected||!auth} onClick={()=>void simFault('gauge',true)}>真空规故障</button><button className="button button--quiet" disabled={!connected||!auth} onClick={()=>void simFault('gauge',false)}>恢复真空规</button><button className="button button--quiet" disabled={!connected||!auth} onClick={()=>void simFault('sensor',true)}>位置反馈冲突</button><button className="button button--quiet" disabled={!connected||!auth} onClick={()=>void simFault('sensor',false)}>恢复反馈</button><button className="button button--quiet" disabled={!connected||!auth} onClick={()=>void simFault('close',true)}>模拟关阀失败</button><button className="button button--quiet" disabled={!connected||!auth} onClick={()=>void simFault('close',false)}>恢复阀动作</button><button className="button button--quiet" disabled={!connected||!auth} onClick={()=>void simFault('tpg',true)}>TPG 通信中断</button><button className="button button--quiet" disabled={!connected||!auth} onClick={()=>void simFault('tpg',false)}>恢复 TPG 通信</button></div></Disclosure>}
       </div>}
 
+      {page==='history'&&readErrors.history&&<div className="request-notice" role="alert"><div><b>压力历史读取失败</b><p>{readErrors.history}</p><small>保留上次查询结果供参考；当前查询的导出已暂停。</small></div><button className="button button--quiet" disabled={histBusy} onClick={()=>void loadHistory()}>重新查询历史</button></div>}
+      {page==='history'&&histReady&&readErrors.historyEvents&&<div className="request-notice" role="alert"><div><b>历史曲线事件标记不可用</b><p>{readErrors.historyEvents}</p><small>压力曲线与 CSV 数据仍可使用。</small></div></div>}
       {page==='history'&&<div className="page-content"><section className="filter-panel glass-panel"><div className="filter-grid"><label className="field">开始时间<input type="datetime-local" value={start} onChange={e=>{setStart(e.target.value);setHistReady(false)}}/></label><label className="field">结束时间<input type="datetime-local" value={end} onChange={e=>{setEnd(e.target.value);setHistReady(false)}}/></label><div className="field channel-filter"><span className="field-label">显示通道</span><div>{[1,2,3,4,5,6].map(n=><label key={n}><input type="checkbox" checked={channels.includes(n)} onChange={e=>{setChannels(c=>e.target.checked?[...c,n].sort():c.filter(x=>x!==n));setHistReady(false)}}/>CH{n}</label>)}</div></div><div className="filter-buttons"><button className="button button--quiet" disabled={histBusy||resettingHistory} onClick={()=>void loadHistory()}><RefreshCw size={15} className={histBusy?'spin':''}/>{histBusy?'读取中':'查询数据'}</button><a className={`button button--primary ${histCount&&histReady&&channels.length?'':'is-disabled'}`} href={histCount&&histReady&&channels.length?exportUrl():undefined} onClick={e=>(!histCount||!histReady||!channels.length)&&e.preventDefault()}><ArrowDownToLine size={15}/>导出 CSV</a><button className="button button--quiet" disabled={!connected||!auth||histBusy||resettingHistory} onClick={()=>{setResetScope('simulation');setResetHistoryOpen(true)}}>重置历史</button></div></div></section>
         <section className="content-panel glass-panel history-chart-panel"><div className="panel-heading"><div><h2>历史真空曲线</h2></div><span className="history-count">{histCount==null?'选择时间范围查询':`${histCount.toLocaleString()} 条${histTruncated?' · 已达到查询上限':''}`}</span></div><Chart key={`${start}-${end}-${histCount}`} points={hist} channels={channels} unit={unit} events={historyEvents}/></section>
         <section className="content-panel glass-panel history-table-panel"><div className="panel-heading"><div><h2>采样记录</h2></div><span className="subtle-note">最近 80 个时间点 · CSV 导出全部</span></div><div className="table-scroll"><table><thead><tr><th>北京时间</th><th>通道</th><th>压力</th><th>状态</th><th>记录模式</th></tr></thead><tbody>{hist.slice(-80).reverse().flatMap(p=>p.channels.filter(c=>channels.includes(c.channel)).map(c=><tr key={`${p.timestamp}-${c.channel}`}><td>{time(p.timestamp,true)}</td><td>CH{c.channel}</td><td>{pressure(c.pressure_pa,unit)} {unit}</td><td>{c.valid?'正常':'异常'}</td><td>{c.mode==='simulation'?'模拟':'真实'}</td></tr>))}</tbody></table>{histReady&&!histCount&&<div className="empty-state"><Database size={22}/>时间范围内没有记录</div>}</div></section></div>}
@@ -179,6 +238,7 @@ function App(){
 
       {page==='events'&&<div className="page-content"><section className="filter-panel glass-panel"><div className="settings-grid"><label className="field">日志开始时间<input type="datetime-local" value={eventStart} onChange={e=>{setEventStart(e.target.value);setEventOffset(0)}}/></label><label className="field">日志结束时间<input type="datetime-local" value={eventEnd} onChange={e=>{setEventEnd(e.target.value);setEventOffset(0)}}/></label><label className="field">事件类型<input value={eventKind} placeholder="例如 pressure_trip" onChange={e=>{setEventKind(e.target.value);setEventOffset(0)}}/></label><label className="field">级别<select value={eventSeverity} onChange={e=>{setEventSeverity(e.target.value);setEventOffset(0)}}><option value="">全部</option>{['info','warning','error','critical'].map(x=><option key={x}>{x}</option>)}</select></label></div></section><section className="content-panel glass-panel full-events"><div className="panel-heading"><div><h2>系统事件</h2></div><button className="button button--quiet" onClick={()=>void refreshEvents()}><RefreshCw size={15}/>刷新</button></div><div className="event-feed">{events.map(e=><EventRow item={e} key={e.id}/>)}</div>{!events.length&&<div className="empty-state"><Bell size={22}/>暂无事件</div>}<div className="pagination"><button className="button" disabled={!eventOffset} onClick={()=>setEventOffset(n=>Math.max(0,n-200))}>上一页</button><span>第 {Math.floor(eventOffset/200)+1} 页</span><button className="button" disabled={!eventMore} onClick={()=>setEventOffset(n=>n+200)}>下一页</button></div></section></div>}
 
+      {page==='settings'&&readErrors.config&&<div className="request-notice" role="alert"><div><b>设置读取失败</b><p>{readErrors.config}</p><small>保存已暂停；成功重新读取设置后再保存。</small></div><button className="button button--quiet" onClick={()=>void loadConfig()}>重新读取设置</button></div>}
       {page==='settings'&&<div className="page-content settings-page">{!draft?<div className="empty-state glass-panel"><RefreshCw className="spin"/>正在读取设备设置…</div>:<>
         <section className="content-panel glass-panel"><div className="panel-heading"><div><h2>运行方式</h2></div></div><div className="mode-switch"><button className={draft.mode==='simulation'?'selected':''} onClick={()=>patch('mode','simulation')}><Activity size={18}/><b>模拟模式</b><small>不向真实硬件发送控制命令</small></button><button className={draft.mode==='real'?'selected mode-switch__real':''} onClick={()=>patch('mode','real')}><TerminalSquare size={18}/><b>真实设备</b><small>现场接线与阀位确认</small></button></div></section>
         <section className="content-panel glass-panel"><div className="panel-heading"><h2>采样与保护</h2></div><div className="settings-grid">{([['sample_interval_s','历史采样间隔（秒）',0.2,30],['stale_timeout_s','数据超时保护（秒）',0.5,10],['valve_timeout_s','阀门动作超时（秒）',0.5,20],['recovery_hold_s','压力恢复稳定时间（秒）',0,120]] as const).map(([key,label,min,max])=><label className="field" key={key}>{label}<input type="number" min={min} max={max} step="0.1" value={draft[key]} onChange={e=>patch(key,Number(e.target.value))}/></label>)}<label className="field">历史保留天数（留空不限）<input type="number" min="1" max="3650" value={draft.history_retention_days??''} onChange={e=>patch('history_retention_days',e.target.value===''?null:Number(e.target.value))}/></label></div></section>
@@ -186,7 +246,7 @@ function App(){
         {draft.mode==='real'&&<section className="content-panel glass-panel commissioning-panel"><div className="panel-heading"><div><h2>真实硬件启用确认</h2></div></div><div className="commissioning-note"><AlertOctagon size={20}/><p>程序或通信失效时无法保证关阀。启用前须验证断电关阀与阀位反馈。</p></div><label className="field confirm-field">现场确认口令<input value={confirm} placeholder="输入：现场确认" onChange={e=>setConfirm(e.target.value)}/></label><label className="check-row"><input type="checkbox" checked={draft.fail_closed_confirmed} onChange={e=>patch('fail_closed_confirmed',e.target.checked)}/>我已验证电磁阀断电关阀和阀位反馈</label></section>}
         <section className="content-panel glass-panel"><div className="panel-heading"><div><h2>局域网访问</h2></div></div><label className="check-row"><input type="checkbox" checked={draft.allow_lan} onChange={e=>patch('allow_lan',e.target.checked)}/>允许局域网内设备通过 HTTPS 访问控制台</label><div className="info-line"><LockKeyhole size={16}/>远程访问需要密码和可信证书；修改后须重启服务。</div></section>
         <Disclosure className="content-panel glass-panel appearance-settings" title="外观"><label className="field">玻璃强度<input type="range" min="25" max="100" value={glass} onChange={e=>setGlass(Number(e.target.value))}/></label></Disclosure>
-        <div className="settings-footer"><span>保存会关阀；已启用的联锁将锁存。</span><div><button className="button button--quiet" onClick={()=>void loadConfig()}>放弃更改</button><button className="button button--primary" disabled={!connected||busy||!auth} onClick={()=>void saveSettings()}>{busy?'保存中':'保存设置'} <Check size={15}/></button></div></div>
+        <div className="settings-footer"><span>保存会关阀；已启用的联锁将锁存。</span><div><button className="button button--quiet" onClick={()=>void loadConfig()}>放弃更改</button><button className="button button--primary" disabled={!connected||busy||!auth||!!readErrors.config} onClick={()=>void saveSettings()}>{busy?'保存中':'保存设置'} <Check size={15}/></button></div></div>
 
       </>}</div>}
       {page==='debug'&&<div className="page-content"><section className="content-panel glass-panel"><div className="panel-heading"><div><h2>DAM0808D 手动控制</h2></div><button className="button button--quiet" disabled={!auth||debugBusy} onClick={()=>void refreshRelays()}><RefreshCw size={15}/>刷新状态</button></div><p className="debug-warning">手动调试绕过压力保护，可使阀门动作；仅限停机调试。程序或通信故障时无法保证断电。</p>{!auth&&!local&&<button className="button button--primary" onClick={()=>setLogin(configured?'login':'setup')}>登录后调试</button>}<div className="settings-grid"><div className="debug-timer"><label><input type="checkbox" checked={debugAutoOff} onChange={e=>setDebugAutoOff(e.target.checked)}/>定时关闭（否则需手动关闭）</label><Reveal open={debugAutoOff}><label className="field">自动关闭时间（秒）<input disabled={!debugAutoOff} type="number" min="1" max="60" value={debugDuration} onChange={e=>setDebugDuration(Math.max(1,Math.min(60,Number(e.target.value)||1)))}/></label></Reveal></div><label><input type="checkbox" checked={debugAcknowledged} onChange={e=>setDebugAcknowledged(e.target.checked)}/>已确认设备可以动作，并已核对接线和线圈电压</label></div>{debugError&&<div className="inline-error" role="alert">{debugError}</div>}{status&&status.interlock!=='disarmed'&&<p className="inline-error">请先停用联锁，再手动开启。</p>}<div className="debug-relay-grid">{Array.from({length:8},(_,channel)=><article className={`glass-panel debug-relay-card ${relayState?.valve_output===channel?'debug-relay-card--valve':''}`} key={channel}><h3>OUT{channel+1} <small>DO{channel}</small></h3><div className="relay-function">{relayState?.output_labels?.[channel]}{relayState?.valve_output===channel&&<b> · 插板阀电磁阀</b>}{relayState?.output_notes?.[channel]&&<div>{relayState.output_notes[channel]}</div>}</div><p>{relayState?relayState.outputs[channel]?'已开启':'已关闭':'状态未知'}{relayState?.remaining_s[String(channel)]!=null&&` · ${Math.ceil(relayState.remaining_s[String(channel)])} 秒后关闭`}{relayState?.outputs[channel]&&relayState.remaining_s[String(channel)]==null&&" · 持续开启"}</p><div className="filter-buttons"><button className="button button--primary" aria-label={`开启 OUT${channel+1}`} disabled={!connected||!auth||!debugAcknowledged||debugBusy||!relayState||status?.interlock!=='disarmed'||relayState.interlock!=='disarmed'} onClick={()=>void switchRelay(channel,true)}>开启</button><button className="button button--quiet" aria-label={`关闭 OUT${channel+1}`} disabled={!connected||!auth||debugBusy||!relayState} onClick={()=>void switchRelay(channel,false)}>关闭</button></div></article>)}</div></section></div>}
@@ -198,7 +258,7 @@ function App(){
 
     <div className="mobile-nav">{NAV.map(({id,label,icon:Icon})=><button key={id} aria-current={page===id?'page':undefined} onClick={()=>navigate(id)}><Icon size={18}/><span>{label==='联锁控制'?'控制':label==='历史数据'?'历史':label==='事件日志'?'事件':label}</span></button>)}</div>
     <Presence show={resetHistoryOpen}>{resetHistoryOpen&&<div className="modal-backdrop"><section className="login-card glass-panel" role="dialog" aria-modal="true" aria-labelledby="history-reset-title"><h2 id="history-reset-title">重置压力历史</h2><p>清除所选范围内全部压力记录，不受页面筛选限制；不可撤销。事件日志保留，采集继续。</p><label className="field">重置范围<select value={resetScope} disabled={resettingHistory} onChange={e=>setResetScope(e.target.value as 'simulation'|'all')}><option value="simulation">仅清除模拟数据（保留真实数据）</option><option value="all">清除全部压力数据（包含真实数据）</option></select></label><div className="filter-buttons"><button className="button button--quiet" disabled={resettingHistory} onClick={()=>setResetHistoryOpen(false)}>取消</button><button className="button button--primary" disabled={resettingHistory||!connected||!auth} onClick={()=>void resetHistory()}>{resettingHistory?'重置中':'确认重置'}</button></div></section></div>}</Presence>
-    <Presence show={Boolean(toast)}>{toast&&<div className="toast-message" role="status"><span><Check size={16}/></span>{toast}<button onClick={()=>setToast('')}><X size={15}/></button></div>}</Presence><Presence show={Boolean(login)}>{login&&<Login kind={login} onClose={()=>setLogin(null)} onDone={()=>{setAuth(true);setConfigured(true);setLogin(null);notify('操作员已登录');void refreshStatus()}}/>}</Presence>
+    <Presence show={Boolean(toast)}>{toast&&<div className={`toast-message toast-message--${toastKind}`} role={toastKind==='error'?'alert':'status'}><span>{toastKind==='success'?<Check size={16}/>:<TriangleAlert size={16}/>}</span>{toast}<button aria-label="关闭消息" onClick={()=>setToast('')}><X size={15}/></button></div>}</Presence><Presence show={Boolean(login)}>{login&&<Login kind={login} onClose={()=>setLogin(null)} onDone={()=>{setAuth(true);setConfigured(true);setLogin(null);notify('操作员已登录');void refreshStatus()}}/>}</Presence>
   </div>
 }
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { ArrowLeftRight, Keyboard, RefreshCw } from 'lucide-react'
 import { AXES, stageApi, type Axis, type StageState } from './stageClient'
+import { errorMessage } from './apiClient'
 
 type Props = {
   state: StageState; auth: boolean; connected: boolean; online: boolean; busy: boolean; stopping: boolean
@@ -96,7 +97,7 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
       try {
         const data = await stageApi<{ events: Movement[] }>('/api/events?kind=stage_move&limit=20')
         if (!cancelled) { setEvents(Array.isArray(data.events) ? data.events.slice(0, 20) : []); setHistoryError('') }
-      } catch { if (!cancelled) setHistoryError('运动记录读取失败，当前列表可能已过期') }
+      } catch (error) { if (!cancelled) setHistoryError(`运动记录读取失败，当前列表可能已过期。${errorMessage(error, '请稍后重试。')} 此提示只涉及记录读取，运动状态和停止入口单独更新。`) }
       finally { if (!cancelled) timer = setTimeout(refresh, 2000) }
     }
     void refresh()
