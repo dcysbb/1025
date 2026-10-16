@@ -74,17 +74,20 @@ test('navigation can repeatedly collapse and expand with reachable controls',asy
   }
 })
 test('event pane can expand and collapse independently of navigation',async()=>{
-  assert.equal(container.querySelector('.events-aside'),null)
+  assert.equal(container.querySelector('.events-slot')?.getAttribute('inert'),'')
+  assert.equal(container.querySelector('.events-slot')?.getAttribute('aria-hidden'),'true')
   await click(byLabel('展开事件栏'))
   await click(byLabel('折叠导航'))
-  await click(byLabel('收起事件栏'))
+  await click(container.querySelector<HTMLButtonElement>('.events-aside button[aria-label="收起事件栏"]')!)
   assert.ok(container.querySelector('.app-shell--events-closed'))
-  assert.equal(container.querySelector('.aside-events'),null)
+  assert.equal(container.querySelector('.events-slot')?.getAttribute('data-open'),'false')
+  assert.equal(document.activeElement,byLabel('展开事件栏'))
   await click(byLabel('展开事件栏'))
   assert.ok(container.querySelector('.aside-events'))
   assert.ok(container.querySelector('.app-shell--collapsed'))
   await click(byText('事件日志'))
-  assert.equal(container.querySelector('.events-aside'),null)
+  assert.equal(container.querySelector('.events-slot')?.getAttribute('inert'),'')
+  assert.equal(container.querySelector('.events-slot')?.getAttribute('aria-hidden'),'true')
   await click(byText('总览'))
   assert.ok(container.querySelector('.aside-events'))
 })
@@ -162,12 +165,16 @@ test('debug timed shutoff is opt-in',async()=>{
   const timer=checkboxes.find(x=>x.parentElement?.textContent?.includes('定时关闭'))!
   const confirm=checkboxes.find(x=>x.parentElement?.textContent?.includes('已确认设备可以动作'))!
   assert.equal(timer.checked,false)
-  assert.equal(container.querySelector('input[type="number"]'),null)
+  assert.equal(container.querySelector<HTMLInputElement>('input[type="number"]')?.disabled,true)
   await click(timer);await click(confirm)
   const duration=container.querySelector<HTMLInputElement>('input[type="number"]')!
   assert.equal(duration.disabled,false)
   await click(byLabel('开启 OUT1'))
   assert.deepEqual(debugCalls,[{channel:0,enabled:true,duration_s:10}])
+  await click(timer)
+  assert.equal(duration.disabled,true)
+  assert.equal(duration.closest('.motion-reveal')?.hasAttribute('inert'),true)
+  assert.equal(debugCalls.length,1)
 })
 
 test('fault acknowledgement uses clear-fault without automatically arming',async()=>{
@@ -212,7 +219,7 @@ test('history reset defaults to simulation and cancellation sends no request',as
   assert.equal(resetCalls.length,0)
   await click(byText('重置历史'));await click(byText('确认重置'))
   assert.deepEqual(resetCalls,[{scope:'simulation'}])
-  assert.equal(container.querySelector('[aria-labelledby="history-reset-title"]'),null)
+  assert.equal(container.querySelector('[aria-labelledby="history-reset-title"]')?.closest('.motion-presence')?.getAttribute('inert'),'')
   assert.ok(container.textContent?.includes('已清除 6 条模拟记录'))
   assert.ok(container.textContent?.includes('0 条'))
 })

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Check, Plug, RefreshCw } from 'lucide-react'
 import StagePanel from './StagePanel'
+import { Disclosure } from './Motion'
 
 type TerminalText = 'dam_input_labels' | 'dam_output_labels' | 'dam_input_notes' | 'dam_output_notes'
 export type HardwareConfig = {
@@ -133,7 +134,7 @@ export default function HardwarePanel({ auth, connected, onDirtyChange }: { auth
             <div className="terminal-board">DAM0808D <span>OUT1–OUT4：COM / NO / NC · OUT5–OUT8：两端常开触点</span></div>
             <div className="terminal-strip terminal-strip--inputs">{Array.from({ length: 18 }, (_, i) => <div className="terminal-chip" key={i}><b>{i + 1}</b><small>{i >= 9 && i <= 16 ? `IN${i - 8} (DI${i - 9})` : FIXED.find(row => row[0] === i + 1)?.[1]}</small></div>)}</div>
           </div>
-          <details className="terminal-fixed"><summary>电源与通信端子（固定定义）</summary><table className="hardware-table"><thead><tr><th>物理端子</th><th>标识</th><th>功能</th></tr></thead><tbody>{FIXED.map(([pin, label, description]) => <tr key={pin}><td>{pin}</td><td>{label}</td><td>{description}</td></tr>)}</tbody></table></details>
+          <Disclosure className="terminal-fixed" title="电源与通信端子（固定定义）"><table className="hardware-table"><thead><tr><th>物理端子</th><th>标识</th><th>功能</th></tr></thead><tbody>{FIXED.map(([pin, label, description]) => <tr key={pin}><td>{pin}</td><td>{label}</td><td>{description}</td></tr>)}</tbody></table></Disclosure>
           <p className="subtle-note">IN1 对应机身 DI1、软件 DI0。名称和备注仅用于记录接线；实际控制功能由“插板阀映射”指定。</p>
           {(['input', 'output'] as const).map(kind => <div className="hardware-table-wrap" key={kind}><h3>{kind === 'input' ? '输入 IN1–IN8' : '继电器 OUT1–OUT8'}</h3><table className="hardware-table"><thead><tr><th>通道 / 软件编号</th><th>物理端子</th><th>控制用途</th><th>名称</th><th>用途备注</th><th>状态</th></tr></thead><tbody>{Array.from({ length: 8 }, (_, index) => {
             const labelKey: TerminalText = `dam_${kind}_labels`, noteKey: TerminalText = `dam_${kind}_notes`

@@ -7,6 +7,7 @@ import './index.css'
 import './Appearance.css'
 import './Chart.css'
 import './StageWorkbench.css'
+import './Motion.css'
 import App from './App.tsx'
 
 createRoot(document.getElementById('root')!).render(

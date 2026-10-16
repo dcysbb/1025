@@ -1,0 +1,143 @@
+/* Keep the same grid tracks in both states so the workspace resizes continuously. */
+.app-shell {
+  --layout-gap: 18px;
+  --nav-width: 248px;
+  --events-width: 304px;
+  --events-track: var(--events-width);
+  --events-gap: var(--layout-gap);
+  --motion-layout: 320ms;
+  grid-template-columns: var(--nav-width) var(--layout-gap) minmax(0,1fr) var(--events-gap) var(--events-track);
+  column-gap: 0;
+  row-gap: var(--layout-gap);
+  transition: grid-template-columns var(--motion-layout) var(--ease-out);
+}
+.app-shell.app-shell--collapsed { --nav-width: 76px; }
+.app-shell.app-shell--events-closed { --events-track: 0px; --events-gap: 0px; }
+.sidebar { grid-column: 1; align-items: stretch; padding-inline: 13px; }
+.main-column { grid-column: 3; }
+
+/* The logo, navigation icons and toggle keep the same anchors in either state. */
+.sidebar .brand-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0,1fr);
+  grid-template-rows: 34px 34px;
+  gap: 12px 10px;
+  width: 100%;
+  padding: 0 7px 16px;
+}
+.sidebar .brand-mark { grid-column: 1; grid-row: 1; }
+.sidebar .brand-copy { grid-column: 2; grid-row: 1; white-space: nowrap; }
+.sidebar .sidebar-toggle {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 0 8px;
+  margin: 0;
+  overflow: hidden;
+}
+.sidebar-toggle svg { flex-shrink: 0; transform: rotate(90deg); transition: transform var(--motion-layout) var(--ease-out); }
+.sidebar--collapsed .sidebar-toggle svg { transform: rotate(-90deg); }
+.sidebar-toggle-copy { font-size: 11px; white-space: nowrap; }
+.sidebar .nav-list { min-width: 0; grid-template-columns: minmax(0,1fr); }
+.sidebar .nav-item { min-width: 0; justify-content: flex-start; padding-inline: 11px; }
+.sidebar .nav-item>svg { flex-shrink: 0; }
+.sidebar .nav-item span { display: block; white-space: nowrap; }
+.sidebar .user-row { justify-content: flex-start; padding-inline: 7px; }
+.sidebar .user-copy { min-width: 110px; white-space: nowrap; }
+.sidebar .brand-copy, .sidebar .nav-item span, .sidebar .user-copy, .sidebar .user-row>svg, .sidebar-toggle-copy {
+  opacity: 1;
+  transform: translateX(0);
+  transition: opacity 180ms ease, transform var(--motion-layout) var(--ease-out);
+}
+.sidebar--collapsed .brand-copy, .sidebar--collapsed .nav-item span, .sidebar--collapsed .user-copy,
+.sidebar--collapsed .user-row>svg, .sidebar--collapsed .sidebar-toggle-copy {
+  opacity: 0;
+  transform: translateX(-8px);
+  pointer-events: none;
+}
+.sidebar .nav-alert { position: absolute; top: 10px; right: 8px; }
+
+.events-slot {
+  grid-column: 5;
+  position: sticky;
+  top: 18px;
+  min-width: 0;
+  overflow: clip;
+  border-radius: 18px;
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(0);
+  transition: opacity 220ms ease, transform var(--motion-layout) var(--ease-out), visibility 0s;
+}
+.events-slot .events-aside { position: relative; top: 0; width: var(--events-width); }
+.events-slot[data-open='false'] {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(12px);
+  pointer-events: none;
+  transition: opacity 180ms ease, transform var(--motion-layout) var(--ease-out), visibility 0s var(--motion-layout);
+}
+
+.disclosure__toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.disclosure__toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; border-radius: 3px; }
+.disclosure__toggle>svg { flex-shrink: 0; transition: transform var(--motion-enter) var(--ease-out); }
+.disclosure__toggle[aria-expanded='true']>svg { transform: rotate(90deg); }
+.motion-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition: grid-template-rows var(--motion-enter) var(--ease-out), opacity 180ms ease, visibility 0s var(--motion-enter);
+}
+.motion-reveal[data-open='true'] { grid-template-rows: 1fr; opacity: 1; visibility: visible; transition-delay: 0s; }
+.motion-reveal__clip { min-height: 0; overflow: hidden; }
+.motion-reveal__content { display: flow-root; }
+.terminal-fixed .motion-reveal__content, .event-row .motion-reveal__content { padding-top: 10px; }
+.debug-timer .field { margin-top: 12px; }
+
+.motion-presence { display: contents; }
+.motion-presence[data-open='false'] { pointer-events: none; }
+.motion-presence[data-open='false'] .modal-backdrop { animation: material-fade-out 200ms ease both; }
+.motion-presence[data-open='false'] .login-card { animation: panel-exit 200ms ease both; }
+.motion-presence[data-open='false'] .toast-message { animation: toast-exit 200ms ease both; }
+@keyframes material-fade-out { to { opacity: 0; } }
+@keyframes panel-exit { to { opacity: 0; transform: translateY(6px) scale(.99); } }
+@keyframes toast-exit { to { opacity: 0; transform: translateY(8px); } }
+
+@media (min-width: 1500px) {
+  .app-shell { --layout-gap: 21px; --nav-width: 260px; --events-width: 330px; }
+  .events-slot { top: 22px; }
+}
+@media (max-width: 1180px) {
+  .app-shell, .app-shell.app-shell--collapsed { grid-template-columns: var(--nav-width) var(--layout-gap) minmax(0,1fr); }
+  .app-shell { --nav-width: 215px; --layout-gap: 14px; }
+  .events-slot { position: fixed; z-index: 8; top: auto; right: 14px; bottom: 14px; width: 290px; overflow: visible; }
+  .events-slot .events-aside { position: relative; inset: auto; width: 100%; }
+}
+@media (max-width: 760px) {
+  .sidebar .brand-row { display: flex; flex: 1; width: auto; min-width: 0; padding: 0; gap: 10px; }
+  .sidebar .sidebar-toggle { display: none; }
+  .sidebar .brand-copy, .sidebar .user-copy, .sidebar .user-row>svg { opacity: 1; transform: none; }
+  .sidebar .user-copy { min-width: 0; }
+  .sidebar .user-row { padding: 0; }
+  .events-slot { z-index: 12; top: 90px; right: 9px; bottom: auto; left: 9px; width: auto; }
+  .events-slot[data-open='false'] { transform: translateY(-8px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-shell, .events-slot, .motion-reveal, .sidebar *, .disclosure__toggle>svg { transition: none !important; }
+}
