@@ -1,4 +1,4 @@
-"""PDXC3 Ethernet adapter using Thorlabs XA 1.8 and its documented C ABI.
+"""PDXC3 USB/Ethernet adapter using Thorlabs XA 1.8 and its documented C ABI.
 
 The Python SDK omits DiscoverEthernetDeviceInfo; bind that single function using
 the published tlmc_xa_native_api.h. TCP 40303 and explicit transports are described
@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import ipaddress
 import json
+import math
 import os
 import re
 import subprocess
@@ -37,7 +38,13 @@ def local_networks():
 
 
 class Pdxc3Driver:
-    TIMEOUT_MS = 1000
+    TIMEOUT_MS = 2000
+    PARAMETERS = {
+        "forward_amplitude": "amplifierOutput.forwardAmplifierLevel",
+        "reverse_amplitude": "amplifierOutput.reverseAmplifierLevel",
+        "step_rate": "jog.openLoopMaxVelocity",
+        "acceleration": "jog.openLoopAcceleration",
+    }
 
     def __init__(self, serial_number, host="", port=40303, connection="tcp"):
         self.serial_number = serial_number
@@ -48,8 +55,13 @@ class Pdxc3Driver:
         self.device = None
         self.channels = {}
         self.stage_names = {}
+        self.transport = ""
+        self._lease = None
+        self.last_latency_ms = None
+        self.move_budget_s = 30
 
     def connect(self):
+        self._acquire_lease()
         try:
             from thorlabs_xa.shared.system_manager import SystemManager
             from thorlabs_xa.shared.enums import TLMC_OperatingMode
@@ -74,11 +86,39 @@ class Pdxc3Driver:
         mode = (TLMC_OperatingMode.TLMC_OperatingMode_ManualStatusPolling |
                 TLMC_OperatingMode.TLMC_OperatingMode_SendEndOfMoveMessages |
                 TLMC_OperatingMode.TLMC_OperatingMode_DoNotLoadParamsOnConnect |
-                TLMC_OperatingMode.TLMC_OperatingMode_DoNotAutoSetConnectedProduct)
+                TLMC_OperatingMode.TLMC_OperatingMode_DoNotAutoCalibrate)
         self.device = self.manager.open_device_as(self.serial_number, transport, mode, Pdxc3)
+        self.transport = transport
         self.channels = {n: self.device.get_subchannel(n) for n in (1, 2, 3)}
         self.stage_names = {n: c.get_stage_axis_params(self.TIMEOUT_MS).part_number for n, c in self.channels.items()}
         # Connecting reads state only: no enable, home, position-zero or movement.
+
+    def _acquire_lease(self):
+        if os.name != "nt":
+            return
+        # XA and this console must never be active control owners simultaneously.
+        running = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "Get-Process -Name tlmc_xa_dotnet_ui -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"],
+            capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+        if running.stdout.strip():
+            raise RuntimeError("检测到 XA 进程仍在运行，请完全退出 XA 后再连接；仅关闭通道窗口可能仍占用设备")
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        kernel.CreateMutexW.restype = ctypes.c_void_p
+        handle = kernel.CreateMutexW(None, False, f"Global\\VacuumInterlock.PDXC3.{self.serial_number}")
+        error = ctypes.get_last_error()
+        if not handle:
+            raise RuntimeError("无法取得位移台独占连接锁")
+        if error == 183:
+            kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel.CloseHandle(handle)
+            raise RuntimeError("另一控制台进程已占用此 PDXC3，请先断开另一连接")
+        self._lease = handle
+
+    @staticmethod
+    def supported(name):
+        name = str(name).upper()
+        return name == "PDXC2AD" or name in ("PD1", "PD1/M", "PD1V", "PD1V/M")
 
     def find_usb_transport(self):
         # Windows XA enumerates its native USB devices without probing COM ports.
@@ -118,6 +158,7 @@ class Pdxc3Driver:
         return devices
 
     def status(self):
+        started = time.monotonic()
         result = []
         for n, channel in self.channels.items():
             channel.request_status(self.TIMEOUT_MS)
@@ -125,7 +166,8 @@ class Pdxc3Driver:
             states = {item.id.name.removeprefix("TLMC_StatusItemId_"): item.value for item in items}
             moving_keys = ("MovingClockwise", "MovingCounterclockwise", "JoggingClockwise", "JoggingCounterclockwise")
             available = [states[key] for key in moving_keys if key in states]
-            moving = any(available) if available else None
+            optimizing = states.get("PulseAcquiring", False)
+            moving = (any(available) or optimizing) if available else None
             faults = []
             for key, label in (("WrongStageDetected", "位移台类型不匹配"),
                                ("Overcurrent", "过流"), ("Overtemperature", "过温"),
@@ -133,30 +175,104 @@ class Pdxc3Driver:
                                ("Error", "控制器故障")):
                 if states.get(key):
                     faults.append(label)
-            if states.get("PowerOk") is False:
-                faults.append("输出电源未就绪")
+            name = self.stage_names.get(n, "")
+            if name and not self.supported(name):
+                faults.append(f"当前控制台仅支持 PD1/PD1V 开环台，识别为 {name}")
+            # PDXC3 firmware 0.51 returns PowerOk=False even while XA successfully
+            # drives PDXC2AD. It is diagnostic data, not an independent fault.
             result.append({"channel": n, "moving": moving,
-                           "enabled": bool(states.get("Enabled", False)), "stage": self.stage_names.get(n, ""),
-                           "ready": not faults and bool(self.stage_names.get(n)),
+                           "enabled": bool(states.get("Enabled", False)), "stage": name,
+                           "ready": not faults and self.supported(name),
+                           "optimizing": bool(optimizing), "optimized": bool(states.get("PulseAcquired", False)),
+                           "open_loop": not bool(states.get("ClosedLoopPositionControl", False)),
+                           "command_count": states.get("Position"), "power_ok_raw": states.get("PowerOk"),
                            "error": "；".join(faults) or None})
         if len(result) != 3:
             raise RuntimeError("控制器未返回三个通道")
+        self.last_latency_ms = round((time.monotonic() - started) * 1000, 1)
         return result
 
     def move(self, channel, direction, steps):
-        from thorlabs_xa.shared.enums import TLMC_EnableState, TLMC_MoveMode, TLMC_PZ_PositionControlMode
+        from thorlabs_xa.shared.enums import TLMC_EnableState, TLMC_MoveMode, TLMC_PZ_PositionControlMode, TLMC_JogMode
         target = self.channels[channel]
         # A vacuum PD1 uses the same open-loop drive family as PD1. Never set a
         # guessed stage profile or a voltage/frequency silently.
         name = str(target.get_stage_axis_params(self.TIMEOUT_MS).part_number).upper()
-        if not name.startswith("PD1") or name.startswith("PD1D"):
-            raise RuntimeError(f"CH{channel} 当前配置为 {name or '未知'}；请在 Thorlabs 软件中配置 PD1V/M")
+        if not self.supported(name):
+            raise RuntimeError(f"CH{channel} 识别为 {name or '未知'}，不支持当前开环台控制")
         target.set_position_control_mode(TLMC_PZ_PositionControlMode.TLMC_PZ_PositionControlMode_OpenLoop,
                                          self.TIMEOUT_MS)
+        # PDXC3 0.51 rejects Relative (FunctionNotSupported). Its finite jog uses
+        # programmed step size; the Move param is UNUSED, not the pulse count.
+        if not 1 <= steps <= 20000:
+            raise RuntimeError("PDXC3 单次点动步数必须为 1–20000")
+        single = int(TLMC_JogMode.TLMC_JogMode_SingleStep)
+        self._set_setting(channel, "jog.mode", single)
+        self._set_setting(channel, "jog.openLoopStepSize", steps)
+        for key, expected in (("jog.mode", single), ("jog.openLoopStepSize", steps)):
+            actual = target.get_setting(key, self.TIMEOUT_MS)
+            if not actual.is_value_set or actual.value != expected:
+                raise RuntimeError("单步模式或点动步数读回不一致；本次移动未下发")
+        rate = target.get_setting("jog.openLoopMaxVelocity", self.TIMEOUT_MS)
+        acceleration = target.get_setting("jog.openLoopAcceleration", self.TIMEOUT_MS)
+        if not rate.is_value_set or not acceleration.is_value_set or rate.value <= 0 or acceleration.value <= 0:
+            raise RuntimeError("步频或加速度读回无效；本次移动未下发")
+        self.move_budget_s = max(3, 4 * math.sqrt(steps / acceleration.value) + steps / rate.value + 2)
         target.set_enable_state(TLMC_EnableState.TLMC_Enabled)
-        # Relative in open loop is a signed pulse count. NoWait avoids holding
-        # the command lock for the duration of a move; stop remains responsive.
-        target.move(TLMC_MoveMode.TLMC_MoveMode_Relative, direction * steps, 0)
+        target.move(TLMC_MoveMode.TLMC_MoveMode_JogForward if direction > 0 else TLMC_MoveMode.TLMC_MoveMode_JogReverse, 0, 0)
+
+    def _set_setting(self, channel, key, value):
+        from thorlabs_xa.shared.c_params import C_TLMC_Value
+        data = C_TLMC_Value()
+        data.int64Value = value
+        fn = self.manager.native_functions.xa_lib.TLMC_SetSetting
+        fn.argtypes = [ctypes.c_uint32, ctypes.c_char_p, ctypes.POINTER(C_TLMC_Value)]
+        fn.restype = ctypes.c_uint16
+        self.manager.native_functions.wrap_error_code(fn(self.channels[channel].subchannel_handle, key.encode(), ctypes.byref(data)))
+
+    def enable(self, channel, enabled):
+        from thorlabs_xa.shared.enums import TLMC_EnableState
+        self.channels[channel].set_enable_state(TLMC_EnableState.TLMC_Enabled if enabled else TLMC_EnableState.TLMC_Disabled)
+
+    def zero(self, channel):
+        from thorlabs_xa.shared.enums import TLMC_PZ_PositionControlMode
+        target = self.channels[channel]
+        if target.get_position_control_mode(self.TIMEOUT_MS) != TLMC_PZ_PositionControlMode.TLMC_PZ_PositionControlMode_OpenLoop:
+            raise RuntimeError("只有开环模式允许计数清零；不会执行寻找机械原点")
+        target.home(0)
+
+    def optimize(self, channel):
+        # The Python wrapper omits this documented PDXC3-channel native function.
+        fn = self.manager.native_functions.xa_lib.TLMC_PZIM_PulseParaAcquire
+        fn.argtypes = [ctypes.c_uint32, ctypes.c_int64]
+        fn.restype = ctypes.c_uint16
+        self.manager.native_functions.wrap_error_code(fn(self.channels[channel].subchannel_handle, 0))
+
+    def parameters(self, channel):
+        values, limits = {}, {}
+        for name, key in self.PARAMETERS.items():
+            setting = self.channels[channel].get_setting(key, self.TIMEOUT_MS)
+            if not setting.is_value_set:
+                raise RuntimeError(f"参数 {key} 未返回有效值")
+            values[name] = setting.value
+            limits[name] = {"min": setting.min_value if setting.has_min else None,
+                            "max": setting.max_value if setting.has_max else None}
+        return {"values": values, "limits": limits}
+
+    def set_parameters(self, channel, values):
+        current = self.parameters(channel)
+        for name, value in values.items():
+            bounds = current["limits"][name]
+            if bounds["min"] is not None and value < bounds["min"] or bounds["max"] is not None and value > bounds["max"]:
+                raise RuntimeError(f"{name} 超出控制器报告范围 {bounds['min']}–{bounds['max']}")
+        # Use named scalar settings with integer device values. Bulk JSON settings
+        # need a connected-product conversion profile that PDXC2AD does not supply.
+        for name, value in values.items():
+            self._set_setting(channel, self.PARAMETERS[name], value)
+        actual = self.parameters(channel)
+        if any(actual["values"][k] != v for k, v in values.items()):
+            raise RuntimeError("驱动参数写入后的读回不一致，请重新读取并核对")
+        return actual
 
     def stop(self):
         from thorlabs_xa.shared.enums import TLMC_StopMode
@@ -170,13 +286,33 @@ class Pdxc3Driver:
             raise RuntimeError("；".join(errors))
 
     def close(self):
-        try:
-            if self.device:
-                self.device.disconnect()
-                self.device.close()
+        errors = []
+        if self.device:
+            try:
+                try:
+                    self.device.disconnect()
+                except Exception as exc:
+                    errors.append(str(exc))
+                try:
+                    self.device.close()
+                except Exception as exc:
+                    errors.append(str(exc))
+            finally:
                 self.device = None
                 self.channels = {}
-        finally:
+        try:
             if self.manager:
-                self.manager.shutdown()
-                self.manager = None
+                try:
+                    self.manager.shutdown()
+                except Exception as exc:
+                    errors.append(str(exc))
+                finally:
+                    self.manager = None
+        finally:
+            if self._lease is not None:
+                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+                kernel.CloseHandle(self._lease)
+                self._lease = None
+        if errors:
+            raise RuntimeError("已释放本机连接；设备断开应答未确认：" + "；".join(errors))

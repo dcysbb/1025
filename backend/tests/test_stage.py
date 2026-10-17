@@ -4,6 +4,7 @@ import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 from pydantic import ValidationError
 
@@ -254,15 +255,19 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DriverTests(unittest.TestCase):
-    def test_move_uses_signed_finite_relative_pulses_with_no_wait(self):
+    def test_move_uses_verified_single_step_jog_with_no_wait(self):
         from app.drivers.thorlabs_pdxc3 import Pdxc3Driver
         from thorlabs_xa.shared.enums import TLMC_MoveMode
         driver = Pdxc3Driver("129123456")
         channel = Mock()
         channel.get_stage_axis_params.return_value.part_number = "PD1V/M"
         driver.channels = {3: channel}
+        driver._set_setting = Mock()
+        channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value={'jog.mode':2,'jog.openLoopStepSize':23,'jog.openLoopMaxVelocity':5000,'jog.openLoopAcceleration':1000}[key])
         driver.move(3, -1, 23)
-        channel.move.assert_called_once_with(TLMC_MoveMode.TLMC_MoveMode_Relative, -23, 0)
+        channel.move.assert_called_once_with(TLMC_MoveMode.TLMC_MoveMode_JogReverse, 0, 0)
+        self.assertEqual(driver._set_setting.call_args_list[1].args, (3, 'jog.openLoopStepSize', 23))
+        self.assertEqual(driver._set_setting.call_args_list[0].args, (3, 'jog.mode', 2))
         channel.home.assert_not_called()
 
     def test_stop_attempts_all_channels_even_when_one_fails(self):

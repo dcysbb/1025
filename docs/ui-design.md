@@ -101,6 +101,7 @@
 - 侧栏改变网格轨道宽度，主区同步伸缩；图标与切换按钮保留稳定锚点。不能仅给没有实际变化的 `width` 添加过渡。
 - 折叠内容复用 `Disclosure` / `Reveal`，通过 `0fr ↔ 1fr` 实现自然高度变化；快速反向切换应从当前进度平滑返回，并保留已有输入。
 - 弹窗与 Toast 复用 `Presence`，退出时保留短暂视觉内容，立即通过 `inert` / `aria-hidden` 禁止交互与辅助技术访问，随后清理节点。
+- 硬件确认弹窗通过 Portal 放到页面顶层，避免玻璃滤镜建立的包含块裁切浮层；显式设置 `--pane-glass: var(--surface-strong)`，保证两套主题中的文字对比度，并约束键盘焦点与 Esc 取消。
 - 动画不能延迟禁用、停止、权限撤销或错误显示。页面切换不能为了退出动画而让旧硬件控制页继续接受操作。
 - 必须响应 `prefers-reduced-motion: reduce`：取消过渡和装饰动画，关闭流程直接完成；支持偏好在运行中变化。
 - 避免 `transition: all`、过度弹簧和无意义的持续闪动。数据更新不应重复播放整页进入动画。
@@ -127,6 +128,7 @@
 | `frontend/src/HardwarePanel.css` | 硬件连接、端子与阀门映射布局 |
 | `frontend/src/TerminalWorkbench.tsx` | DAM 端子功能分配、输入反馈及输出控制；复用现有配置和控制接口 |
 | `frontend/src/StagePanel.css` / `StageWorkbench.css` | 位移台工作区、方向操作和运动记录 |
+| `frontend/src/StageAdvanced.tsx` / `StageAdvanced.css` | 输出、开环 Home/Zero、自动优化、驱动参数与连接诊断；操作确认与停止状态独立 |
 
 扩展时先复用共享类名、令牌与组件，再添加局部样式；局部覆盖应限定到相应业务容器，避免影响其他页面。主题和动效规则调整后同步更新本规范。
 

@@ -48,7 +48,7 @@ async function render(auth = true, configuration = false) {
   await act(async () => { root.render(<StagePanel auth={auth} connected configuration={configuration} />); await new Promise(r => setTimeout(r, 10)) })
 }
 function button(label: string) {
-  const found = [...container.querySelectorAll<HTMLButtonElement>('button')].find(x => x.textContent?.trim() === label || x.getAttribute('aria-label') === label)
+  const found = [...document.querySelectorAll<HTMLButtonElement>('button')].find(x => x.textContent?.trim() === label || x.getAttribute('aria-label') === label)
   assert.ok(found, label)
   return found
 }
@@ -112,6 +112,83 @@ function deferred<T>() {
   const promise = new Promise<T>(done => { resolve = done })
   return { promise, resolve }
 }
+
+test('open-loop Home only sends a confirmed zero action on the selected logical axis', async () => {
+  state.connected = true
+  await render()
+  await act(async () => { button('Home / Zero · 计数清零').click() })
+  assert.deepEqual(writes, [])
+  assert.ok(document.querySelector('[role="dialog"]')?.textContent?.includes('不会寻找机械原点'))
+  await act(async () => { button('确认清零').click(); button('确认清零').click(); await new Promise(r => setTimeout(r, 0)) })
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'x',operation:'zero',confirmed:true}}])
+})
+
+test('optimization needs enabled output and a separate automatic-motion confirmation', async () => {
+  state.connected = true
+  await render()
+  assert.equal(button('Optimize · 性能优化').disabled, true)
+  await act(async () => { root.unmount() })
+  root = createRoot(container)
+  state.channels[2].enabled = true
+  await render()
+  await act(async () => { button('Optimize · 性能优化').click() })
+  assert.ok(document.querySelector('[role="dialog"]')?.textContent?.includes('不受点动步数上限限制'))
+  assert.deepEqual(writes, [])
+  await act(async () => { button('确认开始优化').click(); await new Promise(r => setTimeout(r, 0)) })
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'x',operation:'optimize',confirmed:true}}])
+})
+
+test('drive parameters require explicit reads, validate limits and apply only selected fields', async () => {
+  state.connected = true
+  const original = globalThis.fetch
+  const parameters = {values:{forward_amplitude:100,reverse_amplitude:90,step_rate:5000,acceleration:1000},limits:{forward_amplitude:{min:10,max:100},reverse_amplitude:{min:10,max:100},step_rate:{min:800,max:20000},acceleration:{min:1,max:20000}}}
+  globalThis.fetch = async (url, options) => {
+    if (String(url).includes('/parameters/')) {
+      if (options?.method === 'PUT') {
+        writes.push({path:String(url),body:JSON.parse(String(options.body))})
+        parameters.values = JSON.parse(String(options.body))
+      }
+      return new Response(JSON.stringify(parameters))
+    }
+    return original(url, options)
+  }
+  await render()
+  await act(async () => { button('驱动参数 · 幅值、步频与加速度').click(); button('读取当前参数').click(); await new Promise(r => setTimeout(r, 5)) })
+  assert.deepEqual(writes, [])
+  const input = container.querySelector<HTMLInputElement>('[aria-label="正向驱动幅值"]')!
+  async function fill(value: string) {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(input,value)
+      input.dispatchEvent(new dom.window.Event('input',{bubbles:true}))
+    })
+  }
+  await fill('101')
+  assert.equal(button('应用驱动参数').disabled,true)
+  await fill('80')
+  await act(async () => { button('应用驱动参数').click(); button('应用驱动参数').click(); await new Promise(r => setTimeout(r,5)) })
+  assert.deepEqual(writes,[{path:'/api/stage/parameters/x',body:{forward_amplitude:80,reverse_amplitude:90,step_rate:5000,acceleration:1000}}])
+})
+
+test('session recovery requires the stationary acknowledgement and never enables output', async () => {
+  state.connected = false
+  state.error = '通信超时，停止未确认'
+  await render()
+  await act(async () => { button('连接诊断与恢复').click(); button('恢复失效连接').click() })
+  assert.equal(button('确认恢复连接').disabled,true)
+  await act(async () => { (document.querySelector('[role="dialog"] input[type="checkbox"]') as HTMLInputElement).click() })
+  await act(async () => { button('确认恢复连接').click(); await new Promise(r => setTimeout(r,0)) })
+  assert.deepEqual(writes,[{path:'/api/stage/recover',body:{confirmed_stationary:true}}])
+})
+
+test('read-only users cannot enable, zero, optimize or change drive parameters', async () => {
+  state.connected = true
+  state.channels[2].enabled = true
+  await render(false)
+  for (const label of ['X 轴启用输出','X 轴禁用输出','Home / Zero · 计数清零','Optimize · 性能优化']) assert.equal(button(label).disabled,true)
+  await act(async () => { button('驱动参数 · 幅值、步频与加速度').click() })
+  assert.equal(button('读取当前参数').disabled,true)
+  assert.deepEqual(writes,[])
+})
 
 test('axis steps are independent, persisted, bounded and scoped to the device mapping', async () => {
   state.connected = true

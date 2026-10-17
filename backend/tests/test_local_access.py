@@ -79,3 +79,22 @@ class LocalAccess(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as error: self.main.verify_origin(self.request(origin=origin))
             self.assertEqual(error.exception.status_code,403)
         self.main.verify_origin(self.request(origin='http://127.0.0.1:8770'))
+
+    async def test_new_stage_tools_keep_operator_and_origin_guards(self):
+        from app.stage import StageAction, StageRecovery, StageParameters
+        routes = {(route.path, method): route for route in self.main.app.routes if hasattr(route, 'dependant') for method in getattr(route, 'methods', set())}
+        for path, method in (('/api/stage/action','POST'),('/api/stage/recover','POST'),('/api/stage/parameters/{axis}','GET'),('/api/stage/parameters/{axis}','PUT')):
+            self.assertIn(self.main.require_operator, [dep.call for dep in routes[path,method].dependant.dependencies])
+        request = self.request(origin='http://example.com')
+        with patch.object(self.main.STAGE, 'control', new=AsyncMock()) as control:
+            with self.assertRaises(HTTPException):
+                await routes['/api/stage/action','POST'].endpoint(StageAction(axis='x', operation='enable'), request, 'test')
+            control.assert_not_called()
+        with patch.object(self.main.STAGE, 'recover', new=AsyncMock()) as recover:
+            with self.assertRaises(HTTPException):
+                await routes['/api/stage/recover','POST'].endpoint(StageRecovery(confirmed_stationary=True), request, 'test')
+            recover.assert_not_called()
+        with patch.object(self.main.STAGE, 'parameters', new=AsyncMock()) as parameters:
+            with self.assertRaises(HTTPException):
+                await routes['/api/stage/parameters/{axis}','PUT'].endpoint('x', StageParameters(forward_amplitude=100,reverse_amplitude=100,step_rate=5000,acceleration=1000), request, 'test')
+            parameters.assert_not_called()

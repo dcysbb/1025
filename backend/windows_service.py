@@ -48,6 +48,8 @@ class VacuumService(win32serviceutil.ServiceFramework):
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     if "--help" in sys.argv:
         print("VacuumInterlockService.exe [--startup auto] install | start | stop | remove | debug")
     elif getattr(sys, "frozen", False) and len(sys.argv) == 1:

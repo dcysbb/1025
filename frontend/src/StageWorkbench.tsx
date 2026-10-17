@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { ArrowLeftRight, Keyboard, RefreshCw } from 'lucide-react'
 import { AXES, stageApi, type Axis, type StageState } from './stageClient'
 import { errorMessage } from './apiClient'
@@ -8,6 +8,7 @@ type Props = {
   uncertain: boolean; awaitingRefresh: boolean; historyVersion: number
   onMove: (axis: Axis, direction: -1 | 1, steps: number) => void
   onStop: () => void
+  advanced?: ReactNode
 }
 type Movement = { id: number; timestamp: string; message: string; details: { axis?: Axis; channel?: number; direction?: number; hardware_direction?: number; steps?: number; mode?: string; result?: string; reason?: string } }
 const clock = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
@@ -16,7 +17,7 @@ const KEYS: Record<string, [Axis, -1 | 1]> = { ArrowLeft: ['x', -1], ArrowRight:
 const editable = (target: EventTarget | null) => target instanceof window.Element && !!target.closest('input, select, textarea, [contenteditable]:not([contenteditable="false"])')
 const hasDialog = () => !!document.querySelector('[role="dialog"], [aria-modal="true"]')
 
-export default function StageWorkbench({ state, auth, connected, online, busy, stopping, uncertain, awaitingRefresh, historyVersion, onMove, onStop }: Props) {
+export default function StageWorkbench({ state, auth, connected, online, busy, stopping, uncertain, awaitingRefresh, historyVersion, onMove, onStop, advanced }: Props) {
   const { config } = state
   const identity = JSON.stringify([config.serial_number, config.mode, ...AXES.map(axis => [config.axes[axis], config.inverted[axis]])])
   const key = `vacuum-stage-steps:v1:${identity}`
@@ -139,6 +140,7 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
       </div>
       <p className="stage-note stage-workbench-note"><ArrowLeftRight size={15}/>PD1V/M 无位置反馈；实际位移随负载和驱动设置变化。“已下发”不代表实测到位。</p>
     </section>
+    {advanced}
     <section className="content-panel glass-panel stage-movement-history">
       <div className="panel-heading"><h2>运动记录</h2><div><span className="subtle-note">最近 20 条移动请求</span><button className="icon-button" aria-label="刷新运动记录" onClick={() => setReload(value => value + 1)}><RefreshCw size={15}/></button></div></div>
       {historyError && <p className="inline-error" role="alert">{historyError}</p>}

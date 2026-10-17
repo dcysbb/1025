@@ -1,0 +1,20 @@
+.stage-advanced h2 { display: flex; align-items: center; gap: 8px; }
+.stage-panel > .stage-header { position: sticky; top: 8px; z-index: 6; background-color: var(--surface-strong); }
+.stage-diagnostic-grid span { overflow-wrap: anywhere; }
+.stage-tool-axis { width: 160px; flex: 0 0 160px; }
+.stage-tool-status, .stage-diagnostic-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; padding: 14px; background: var(--field-bg); border: 1px solid var(--line); border-radius: 12px; font-size: 12px; color: var(--muted); }
+.stage-tool-status b { color: var(--text); font-variant-numeric: tabular-nums; }
+.stage-tool-actions, .stage-parameter-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; }
+.stage-tool-explanation { font-size: 12px; line-height: 1.7; color: var(--muted); margin: 14px 0; }
+.stage-parameter-disclosure, .stage-diagnostics { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 8px; }
+.stage-parameter-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 16px 0; }
+.stage-parameter-grid small { color: var(--muted); font-size: 11px; }
+.stage-tool-modal { --pane-glass: var(--surface-strong); }
+.stage-tool-modal .login-card { max-height: calc(100dvh - 40px); overflow-y: auto; }
+.stage-tool-modal .login-card p { font-size: 13px; line-height: 1.7; }
+@media (max-width: 760px) {
+  .stage-advanced .panel-heading { flex-wrap: wrap; }
+  .stage-tool-axis { width: 100%; flex-basis: 100%; }
+  .stage-tool-status, .stage-diagnostic-grid, .stage-parameter-grid { grid-template-columns: minmax(0, 1fr); }
+  .stage-tool-actions .button { flex: 1 1 155px; }
+}

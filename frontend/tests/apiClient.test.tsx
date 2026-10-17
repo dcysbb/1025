@@ -82,3 +82,13 @@ test('stage transport and server failures preserve uncertain delivery while a re
   globalThis.fetch = async () => new Response(JSON.stringify({ detail: '通道未就绪' }), { status: 409 })
   await assert.rejects(stageApi('/api/stage/move', 'POST', body), error => error instanceof StageRequestError && /通道未就绪/.test(error.message))
 })
+
+test('stage tool failures identify the selected axis and operation without replaying it', async () => {
+  let calls = 0
+  globalThis.fetch = async () => { calls++; throw new TypeError('Failed to fetch') }
+  await assert.rejects(stageApi('/api/stage/action', 'POST', {axis:'z', operation:'optimize', confirmed:true}), /Z 轴性能优化结果未确认/)
+  await assert.rejects(stageApi('/api/stage/parameters/y', 'GET'), /Y 轴读取驱动参数失败/)
+  await assert.rejects(stageApi('/api/stage/parameters/x', 'PUT', {step_rate:1600}), /X 轴应用驱动参数结果未确认/)
+  await assert.rejects(stageApi('/api/stage/recover', 'POST', {confirmed_stationary:true}), /恢复 PDXC3 失效连接结果未确认/)
+  assert.equal(calls, 4)
+})

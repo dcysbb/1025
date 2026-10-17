@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plug, Square, Unplug } from 'lucide-react'
 import StageWorkbench from './StageWorkbench'
-import { AXES, StageRequestError, stageApi, type Axis, type StageConfig, type StageState } from './stageClient'
+import StageAdvanced from './StageAdvanced'
+import { AXES, StageRequestError, stageApi, type Axis, type StageConfig, type StageState, type DriveParameters, type ParameterState } from './stageClient'
 import { errorMessage } from './apiClient'
 
 function request<T>(path = '', method = 'GET', body?: unknown) {
-  return stageApi<T>(`/api/stage${path}`, method, body, path === '/connect' ? 30000 : method === 'GET' ? 5000 : 10000)
+  return stageApi<T>(`/api/stage${path}`, method, body, path === '/connect' || path === '/recover' ? 45000 : method === 'GET' ? 5000 : 20000)
 }
 
 export default function StagePanel({ auth, connected, configuration = false, onDirtyChange }: { auth: boolean; connected: boolean; configuration?: boolean; onDirtyChange?: (dirty: boolean) => void }) {
@@ -74,12 +75,12 @@ export default function StagePanel({ auth, connected, configuration = false, onD
       if (mounted.current && mine === actionId.current) {
         accept(next)
         if (path === '/config') setDraft(structuredClone(next.config))
-        if (path === '/connect' || path === '/disconnect' || isStop && !next.motion_pending) setUncertain(false)
+        if (path === '/connect' || path === '/recover' || path === '/disconnect' || isStop && !next.motion_pending) setUncertain(false)
         setMessage(isStop ? next.motion_pending ? '已发送停止，等待空闲确认' : '控制器已报告全部通道空闲' : success)
       }
     } catch (e) {
       if (mounted.current && mine === actionId.current) {
-        const ambiguous = (path === '/move' || isStop) && !(e instanceof StageRequestError)
+        const ambiguous = (path === '/move' || path === '/action' || isStop) && !(e instanceof StageRequestError)
         if (ambiguous) setUncertain(true)
         setAwaitingRefresh(true)
         const reason = errorMessage(e, '位移台操作失败')
@@ -94,6 +95,20 @@ export default function StagePanel({ auth, connected, configuration = false, onD
         else setBusy(false)
         setHistoryVersion(version => version + 1)
       }
+    }
+  }
+  async function parameters(axis: Axis, values?: DriveParameters) {
+    if (commandRef.current || stopRef.current || !auth || !connected || !online || !state?.connected) throw new Error('当前不能读取或应用驱动参数')
+    commandRef.current = true
+    const mine = ++actionId.current
+    generation.current++; setBusy(true)
+    try {
+      const result = await stageApi<ParameterState>(`/api/stage/parameters/${axis}`, values ? 'PUT' : 'GET', values, 20000)
+      if (!mounted.current || mine !== actionId.current) throw new Error('操作已被停止请求替代，请重新读取参数')
+      return result
+    } finally {
+      generation.current++; commandRef.current = false
+      if (mounted.current) setBusy(false)
     }
   }
   const writable = auth && connected && online
@@ -116,6 +131,8 @@ export default function StagePanel({ auth, connected, configuration = false, onD
         <span className={`stage-state ${state?.connected && online ? 'stage-state--on' : ''}`}>
           {!online ? '状态过期 / 等待更新' : state?.connected ? state.motion_pending ? '等待运动确认' : '已连接' : '未连接'}
         </span>
+        {!configuration && <button className="button button--quiet" disabled={!writable || busy || stopping || !!state?.error || !state || state.connected}
+          onClick={() => void act('/connect', {}, '位移台已连接')}><Plug size={15}/>连接控制器</button>}
         <button className="button stage-stop" disabled={!auth || stopping || !state?.connected && !state?.error && !uncertain}
           onClick={() => void act('/stop')}><Square size={15}/>{stopping ? '正在停止…' : '全部停止'}</button>
       </div>
@@ -168,6 +185,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
 
     {!configuration && (state ? <StageWorkbench key={[state.config.serial_number, state.config.mode, state.config.max_steps, ...AXES.map(axis => `${state.config.axes[axis]}:${state.config.inverted[axis]}`)].join('|')} state={state} auth={auth} connected={connected} online={online}
       busy={busy} stopping={stopping} uncertain={uncertain} awaitingRefresh={awaitingRefresh} historyVersion={historyVersion}
-      onMove={move} onStop={() => { void act('/stop') }}/> : <section className="content-panel glass-panel">正在读取位移台状态…</section>)}
+      onMove={move} onStop={() => { void act('/stop') }} advanced={<StageAdvanced state={state} auth={auth} online={connected && online} busy={busy || stopping} uncertain={uncertain || awaitingRefresh}
+        onAct={act} onParameters={parameters}/>}/> : <section className="content-panel glass-panel">正在读取位移台状态…</section>)}
   </div>
 }

@@ -113,6 +113,11 @@ class HardwareConfigTests(unittest.IsolatedAsyncioTestCase):
 
 
 class UsbRoutingTests(unittest.TestCase):
+    def setUp(self):
+        lease = patch.object(Pdxc3Driver, '_acquire_lease')
+        lease.start()
+        self.addCleanup(lease.stop)
+
     def test_usb_uses_exact_native_usb_transport_and_no_com_or_tcp_discovery(self):
         from thorlabs_xa.shared.system_manager import SystemManager
         manager = Mock()
@@ -148,6 +153,8 @@ class UsbRoutingTests(unittest.TestCase):
         self.assertEqual(manager.open_device_as.call_args.args[1], '101.6.241.172:40303')
         channel = driver.channels[1]
         channel.get_stage_axis_params.return_value.part_number = 'PD1V/M'
+        driver._set_setting = Mock()
+        channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value=2 if key == 'jog.mode' else 1)
         driver.move(1, 1, 1)
         channel.set_connected_product.assert_not_called()
         channel.move.assert_called_once()
