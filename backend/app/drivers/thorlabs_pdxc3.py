@@ -188,7 +188,7 @@ class Pdxc3Driver:
             name = self.stage_names.get(n, "")
             if name and not self.supported(name):
                 faults.append(f"当前控制台仅支持 PD1/PD1V 开环台，识别为 {name}")
-            # PDXC3 firmware 0.51 returns PowerOk=False even while XA successfully
+            # This PDXC3 returns PowerOk=False even while XA successfully
             # drives PDXC2AD. It is diagnostic data, not an independent fault.
             result.append({"channel": n, "moving": moving,
                            "enabled": bool(states.get("Enabled", False)), "stage": name,
@@ -210,7 +210,7 @@ class Pdxc3Driver:
         name = str(target.get_stage_axis_params(self.TIMEOUT_MS).part_number).upper()
         if not self.supported(name):
             raise RuntimeError(f"CH{channel} 识别为 {name or '未知'}，不支持当前开环台控制")
-        # PDXC3 0.51 rejects Relative (FunctionNotSupported). Its finite jog uses
+        # This PDXC3 rejected Relative (FunctionNotSupported). Its finite jog uses
         # programmed step size; the Move param is UNUSED, not the pulse count.
         if not 1 <= steps <= 20000:
             raise RuntimeError("PDXC3 单次点动步数必须为 1–20000")
