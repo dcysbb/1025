@@ -69,8 +69,8 @@ class Pdxc3Driver:
         except ImportError as exc:
             raise RuntimeError("缺少 Thorlabs XA SDK，请安装后台 requirements.txt 中的 thorlabs-xa") from exc
         self.manager = SystemManager.instance()
-        # 0 disables background USB discovery. Every open below supplies an
-        # explicit Ethernet transport, so the vacuum gauge is never probed.
+        # Keep extra discovery connections empty to avoid COM probing. XA can
+        # still consult implicit USB discovery during Open; verify its result.
         self.manager.startup("deviceDiscovery.connections=\ndeviceDiscovery.interval=" +
                              ("250" if self.connection == "usb" else "0"))
         if self.connection == "usb":
@@ -83,12 +83,19 @@ class Pdxc3Driver:
             if len(found) != 1:
                 raise RuntimeError("未在本机网段找到指定序列号的 PDXC3；请填写控制器 IPv4 地址并检查其网络设置")
             transport = found[0].transport
+        if self.connection == "tcp" and not transport:
+            raise RuntimeError("网口发现结果缺少传输标识，已拒绝自动选择其他连接；请填写控制器 IPv4 地址")
         mode = (TLMC_OperatingMode.TLMC_OperatingMode_ManualStatusPolling |
                 TLMC_OperatingMode.TLMC_OperatingMode_SendEndOfMoveMessages |
                 TLMC_OperatingMode.TLMC_OperatingMode_DoNotLoadParamsOnConnect |
                 TLMC_OperatingMode.TLMC_OperatingMode_DoNotAutoCalibrate)
         self.device = self.manager.open_device_as(self.serial_number, transport, mode, Pdxc3)
-        self.transport = transport
+        actual_transport = self.device.transport
+        if actual_transport != transport:
+            actual = actual_transport or "原生 USB"
+            expected = transport or "原生 USB"
+            raise RuntimeError(f"XA 实际连接通道 {actual} 与所选 {expected} 不一致，已拒绝继续使用；请明确选择连接方式，不会通过此会话发送控制命令")
+        self.transport = transport if transport else f"USB / {self.serial_number}"
         self.channels = {n: self.device.get_subchannel(n) for n in (1, 2, 3)}
         self.stage_names = {n: c.get_stage_axis_params(self.TIMEOUT_MS).part_number for n, c in self.channels.items()}
         # Connecting reads state only: no enable, home, position-zero or movement.
@@ -122,11 +129,14 @@ class Pdxc3Driver:
 
     def find_usb_transport(self):
         # Windows XA enumerates its native USB devices without probing COM ports.
+        # Its real USB DeviceInfo uses an EMPTY string transport (not None).
+        # Pass that exact member to Open as documented, after exact serial/type
+        # matching. Discovery connections are empty: no COM or Ethernet fallback.
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             found = [d for d in self.manager.get_device_list()
                      if d.part_number == "PDXC3" and d.device == self.serial_number
-                     and d.transport and not re.fullmatch(r"\d+(?:\.\d+){3}:\d+", d.transport)
+                     and isinstance(d.transport, str) and not re.fullmatch(r"\d+(?:\.\d+){3}:\d+", d.transport)
                      and not d.transport.upper().startswith(("COM", "\\\\.\\COM", "TCP", "ETHERNET"))]
             if len(found) == 1:
                 return found[0].transport
@@ -200,12 +210,18 @@ class Pdxc3Driver:
         name = str(target.get_stage_axis_params(self.TIMEOUT_MS).part_number).upper()
         if not self.supported(name):
             raise RuntimeError(f"CH{channel} 识别为 {name or '未知'}，不支持当前开环台控制")
-        target.set_position_control_mode(TLMC_PZ_PositionControlMode.TLMC_PZ_PositionControlMode_OpenLoop,
-                                         self.TIMEOUT_MS)
         # PDXC3 0.51 rejects Relative (FunctionNotSupported). Its finite jog uses
         # programmed step size; the Move param is UNUSED, not the pulse count.
         if not 1 <= steps <= 20000:
             raise RuntimeError("PDXC3 单次点动步数必须为 1–20000")
+        # Reject invalid drive parameters before changing ANY controller setting.
+        rate = target.get_setting("jog.openLoopMaxVelocity", self.TIMEOUT_MS)
+        acceleration = target.get_setting("jog.openLoopAcceleration", self.TIMEOUT_MS)
+        if not rate.is_value_set or not acceleration.is_value_set or not 800 <= rate.value <= 20000 or not 1 <= acceleration.value <= 20000:
+            raise RuntimeError("步频或加速度读回无效；请先读取并设置有效驱动参数，本次移动未下发")
+        self.move_budget_s = max(3, 4 * math.sqrt(steps / acceleration.value) + steps / rate.value + 2)
+        target.set_position_control_mode(TLMC_PZ_PositionControlMode.TLMC_PZ_PositionControlMode_OpenLoop,
+                                         self.TIMEOUT_MS)
         single = int(TLMC_JogMode.TLMC_JogMode_SingleStep)
         self._set_setting(channel, "jog.mode", single)
         self._set_setting(channel, "jog.openLoopStepSize", steps)
@@ -213,11 +229,6 @@ class Pdxc3Driver:
             actual = target.get_setting(key, self.TIMEOUT_MS)
             if not actual.is_value_set or actual.value != expected:
                 raise RuntimeError("单步模式或点动步数读回不一致；本次移动未下发")
-        rate = target.get_setting("jog.openLoopMaxVelocity", self.TIMEOUT_MS)
-        acceleration = target.get_setting("jog.openLoopAcceleration", self.TIMEOUT_MS)
-        if not rate.is_value_set or not acceleration.is_value_set or rate.value <= 0 or acceleration.value <= 0:
-            raise RuntimeError("步频或加速度读回无效；本次移动未下发")
-        self.move_budget_s = max(3, 4 * math.sqrt(steps / acceleration.value) + steps / rate.value + 2)
         target.set_enable_state(TLMC_EnableState.TLMC_Enabled)
         target.move(TLMC_MoveMode.TLMC_MoveMode_JogForward if direction > 0 else TLMC_MoveMode.TLMC_MoveMode_JogReverse, 0, 0)
 

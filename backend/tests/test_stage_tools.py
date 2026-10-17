@@ -234,7 +234,7 @@ class DriverContractTests(unittest.TestCase):
         driver = Pdxc3Driver('129123456')
         channel = Mock()
         channel.get_stage_axis_params.return_value.part_number = 'PDXC2AD'
-        channel.get_setting.return_value = SimpleNamespace(is_value_set=True, value=1)  # Continuous is 1, NOT SingleStep.
+        channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value={'jog.mode':1,'jog.openLoopStepSize':1,'jog.openLoopMaxVelocity':5000,'jog.openLoopAcceleration':1000}[key])
         driver.channels = {1: channel}
         driver._set_setting = Mock()
         with self.assertRaisesRegex(RuntimeError, '读回不一致'):
@@ -242,6 +242,20 @@ class DriverContractTests(unittest.TestCase):
         driver._set_setting.assert_any_call(1, 'jog.mode', 2)
         channel.move.assert_not_called()
         channel.set_enable_state.assert_not_called()
+
+    def test_invalid_drive_parameters_never_change_settings_or_enable_output(self):
+        driver = Pdxc3Driver('129123456')
+        channel = Mock()
+        channel.get_stage_axis_params.return_value.part_number = 'PDXC2AD'
+        channel.get_setting.return_value = SimpleNamespace(is_value_set=True, value=0)
+        driver.channels = {1: channel}
+        driver._set_setting = Mock()
+        with self.assertRaisesRegex(RuntimeError, '本次移动未下发'):
+            driver.move(1, 1, 1)
+        driver._set_setting.assert_not_called()
+        channel.set_position_control_mode.assert_not_called()
+        channel.set_enable_state.assert_not_called()
+        channel.move.assert_not_called()
 
     def test_close_always_releases_local_device_after_lost_disconnect(self):
         driver = Pdxc3Driver('129123456')

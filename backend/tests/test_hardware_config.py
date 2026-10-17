@@ -121,6 +121,7 @@ class UsbRoutingTests(unittest.TestCase):
     def test_usb_uses_exact_native_usb_transport_and_no_com_or_tcp_discovery(self):
         from thorlabs_xa.shared.system_manager import SystemManager
         manager = Mock()
+        manager.open_device_as.return_value.transport = 'USB129123456'
         manager.get_device_list.return_value = [
             SimpleNamespace(part_number='PDXC3', device='129123456', transport='101.6.241.172:40303'),
             SimpleNamespace(part_number='PDXC3', device='129123456', transport='USB129123456'),
@@ -145,16 +146,80 @@ class UsbRoutingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'USB'): driver.find_usb_transport()
         driver.manager.open_device_as.assert_not_called()
 
+    def test_windows_usb_empty_transport_is_valid_only_after_exact_device_match(self):
+        from thorlabs_xa.shared.system_manager import SystemManager
+        from thorlabs_xa.shared.map_python_to_native import MapPythonToNative
+        manager = Mock()
+        manager.open_device_as.return_value.transport = ''
+        manager.get_device_list.return_value = [
+            SimpleNamespace(part_number='PDXC3', device='129999999', transport=''),
+            SimpleNamespace(part_number='PDXC3', device='129123456', transport=''),
+            SimpleNamespace(part_number='TPG366', device='129123456', transport='COM3')]
+        driver = Pdxc3Driver('129123456', '101.6.241.172', connection='usb')
+        with patch.object(SystemManager, 'instance', return_value=manager), patch.object(driver, 'discover') as discover:
+            driver.connect()
+        self.assertEqual(manager.open_device_as.call_args.args[:2], ('129123456', ''))
+        self.assertEqual(MapPythonToNative.string(''), b'')  # Empty, non-NULL SDK transport.
+        self.assertEqual(driver.transport, 'USB / 129123456')
+        discover.assert_not_called()
+        for channel in driver.channels.values():
+            channel.set_enable_state.assert_not_called()
+            channel.move.assert_not_called()
+            channel.home.assert_not_called()
+
+    def test_tcp_discovery_cannot_use_the_usb_empty_transport(self):
+        from thorlabs_xa.shared.system_manager import SystemManager
+        manager = Mock()
+        driver = Pdxc3Driver('129123456', connection='tcp')
+        with patch.object(SystemManager, 'instance', return_value=manager), patch.object(driver, 'discover', return_value=[SimpleNamespace(part_number='PDXC3', device='129123456', transport='')]):
+            with self.assertRaisesRegex(RuntimeError, '缺少传输标识'):
+                driver.connect()
+        manager.open_device_as.assert_not_called()
+
+    def test_usb_never_accepts_a_null_transport_or_ambiguous_serial(self):
+        driver = Pdxc3Driver('129123456', connection='usb')
+        driver.manager = Mock()
+        driver.manager.get_device_list.return_value = [SimpleNamespace(part_number='PDXC3', device='129123456', transport=None)]
+        with patch('app.drivers.thorlabs_pdxc3.time.monotonic', side_effect=[0, 0, 6]), patch('app.drivers.thorlabs_pdxc3.time.sleep'):
+            with self.assertRaisesRegex(RuntimeError, '未找到'):
+                driver.find_usb_transport()
+        driver.manager.get_device_list.return_value = [SimpleNamespace(part_number='PDXC3', device='129123456', transport='')] * 2
+        with self.assertRaisesRegex(RuntimeError, '多个匹配'):
+            driver.find_usb_transport()
+
     def test_tcp_remains_explicit_and_move_skips_unsupported_model_setter(self):
         from thorlabs_xa.shared.system_manager import SystemManager
         manager = Mock()
+        manager.open_device_as.return_value.transport = '101.6.241.172:40303'
         driver = Pdxc3Driver('129123456', '101.6.241.172')
         with patch.object(SystemManager, 'instance', return_value=manager): driver.connect()
         self.assertEqual(manager.open_device_as.call_args.args[1], '101.6.241.172:40303')
         channel = driver.channels[1]
         channel.get_stage_axis_params.return_value.part_number = 'PD1V/M'
         driver._set_setting = Mock()
-        channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value=2 if key == 'jog.mode' else 1)
+        channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value={'jog.mode':2,'jog.openLoopStepSize':1,'jog.openLoopMaxVelocity':5000,'jog.openLoopAcceleration':1000}[key])
         driver.move(1, 1, 1)
         channel.set_connected_product.assert_not_called()
         channel.move.assert_called_once()
+
+    def test_native_tcp_fallback_to_usb_is_rejected_before_any_control(self):
+        from thorlabs_xa.shared.system_manager import SystemManager
+        manager = Mock()
+        manager.open_device_as.return_value.transport = ''
+        driver = Pdxc3Driver('129123456', '192.0.2.17', connection='tcp')
+        with patch.object(SystemManager, 'instance', return_value=manager):
+            with self.assertRaisesRegex(RuntimeError, '原生 USB.*192.0.2.17:40303.*不一致'):
+                driver.connect()
+        self.assertEqual(driver.channels, {})
+        manager.open_device_as.return_value.get_subchannel.assert_not_called()
+
+    def test_native_usb_fallback_to_another_transport_is_rejected(self):
+        from thorlabs_xa.shared.system_manager import SystemManager
+        manager = Mock()
+        manager.open_device_as.return_value.transport = '192.0.2.17:40303'
+        manager.get_device_list.return_value = [SimpleNamespace(part_number='PDXC3', device='129123456', transport='')]
+        driver = Pdxc3Driver('129123456', connection='usb')
+        with patch.object(SystemManager, 'instance', return_value=manager):
+            with self.assertRaisesRegex(RuntimeError, '不一致'):
+                driver.connect()
+        manager.open_device_as.return_value.get_subchannel.assert_not_called()
