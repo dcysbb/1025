@@ -53,6 +53,73 @@ class StageToolsTests(unittest.IsolatedAsyncioTestCase):
         driver.move.assert_not_called()
         driver.zero.assert_not_called()
 
+    async def test_zero_requires_readback_zero_and_latches_a_mismatch(self):
+        self.stage.driver.counts[1] = 17
+        self.stage.driver.zero = Mock()  # SDK accepted the request but did not apply it.
+        with self.assertRaisesRegex(StageError, '未读回零'):
+            await self.stage.control(StageAction(axis='x', operation='zero', confirmed=True), 'test')
+        self.assertFalse(self.stage.connected)
+        self.assertTrue(self.stage.motion_pending)
+        self.assertEqual(self.events.call_args.args[-1]['result'], 'unconfirmed')
+
+    async def test_unconfirmed_action_remains_locked_across_restart_and_cannot_be_configured_away(self):
+        self.stage.driver.counts[1] = 17
+        self.stage.driver.zero = Mock()
+        with self.assertRaises(StageError):
+            await self.stage.control(StageAction(axis='x', operation='zero', confirmed=True), 'test')
+        restarted = StageController(Path(self.temp.name), Mock())
+        self.assertTrue(restarted.motion_pending)
+        self.assertTrue(restarted.snapshot()['diagnostics']['recovery_required'])
+        for action in (restarted.connect('test'), restarted.configure(StageConfig(mode='simulation'), 'test'), restarted.disconnect('test'), restarted.recover(False, 'test')):
+            with self.assertRaises(StageError):
+                await action
+        await restarted.recover(True, 'test')
+        self.assertFalse(restarted.recovery_path.exists())
+        self.assertFalse(restarted.motion_pending)
+        await restarted.disconnect('test')
+
+    async def test_motion_is_journaled_before_submission_and_cleared_only_after_idle_sample(self):
+        await self.stage.move(StageMove(axis='x', direction=1, steps=1), 'test')
+        self.assertTrue(self.stage.recovery_path.exists())
+        restarted = StageController(Path(self.temp.name), Mock())
+        self.assertTrue(restarted.motion_pending)
+        await self.stage._poll_once()
+        self.assertFalse(self.stage.recovery_path.exists())
+        self.assertFalse(self.stage.motion_pending)
+
+    async def test_unwritable_motion_journal_prevents_hardware_submission(self):
+        self.stage.driver.move = Mock()
+        self.stage._save_recovery = Mock(side_effect=OSError('disk full'))
+        with self.assertRaisesRegex(StageError, '本次移动未下发'):
+            await self.stage.move(StageMove(axis='x', direction=1, steps=1), 'test')
+        self.stage.driver.move.assert_not_called()
+        self.assertFalse(self.stage.motion_pending)
+
+    async def test_output_change_requires_matching_readback(self):
+        self.stage.driver.enable = Mock()
+        with self.assertRaisesRegex(StageError, '使能状态'):
+            await self.stage.control(StageAction(axis='x', operation='disable'), 'test')
+        self.assertEqual(self.events.call_args.args[-1]['result'], 'unconfirmed')
+
+    async def test_optimize_progress_and_completion_are_distinct_from_submission(self):
+        result = await self.stage.control(StageAction(axis='x', operation='optimize', confirmed=True), 'test')
+        self.assertEqual(result['operation']['phase'], 'running')
+        self.assertGreaterEqual(result['operation']['elapsed_s'], 0)
+        self.assertEqual(self.events.call_args.args[-1]['result'], 'submitted')
+        self.stage._operation_at -= 3
+        self.stage.driver.optimizing[1] = 0
+        await self.stage._poll_once()
+        self.assertFalse(self.stage.motion_pending)
+        self.assertEqual(self.events.call_args.args[-1]['result'], 'completed')
+        self.assertEqual(self.events.call_args.args[-1]['mode'], 'simulation')
+
+    async def test_stop_during_optimize_records_stopped_without_completion(self):
+        await self.stage.control(StageAction(axis='x', operation='optimize', confirmed=True), 'test')
+        await self.stage.stop('test')
+        results = [item.args[-1].get('result') for item in self.events.call_args_list if item.args[0] == 'stage_action']
+        self.assertIn('stopped', results)
+        self.assertNotIn('completed', results)
+
     async def test_optimize_requires_confirmation_and_enable_then_stop_cancels_it(self):
         with self.assertRaises(StageError):
             await self.stage.control(StageAction(axis='x', operation='optimize'), 'test')

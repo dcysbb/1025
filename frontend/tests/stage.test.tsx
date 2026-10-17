@@ -4,6 +4,7 @@ import { JSDOM } from 'jsdom'
 import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import StagePanel from '../src/StagePanel'
+import { makeStageProfile } from '../src/stageProfiles'
 
 const initialDom = new JSDOM('<!doctype html><div/>', { url: 'http://localhost' })
 Object.assign(globalThis, { window: initialDom.window, document: initialDom.window.document })
@@ -14,6 +15,7 @@ let state: {
   config: { mode: string; serial_number: string; host: string; port: number; axes: Record<string, number>; inverted: Record<string, boolean>; max_steps: number }
   connected: boolean; error: string | null
   motion_pending?: boolean
+  operation?: {kind: string; axis: 'x'; channel: number; elapsed_s: number; phase: 'waiting' | 'running'}
   channels: { channel: number; moving: boolean; ready: boolean; enabled: boolean; stage: string; error: string | null }[]
 }
 let writes: { path: string; body: unknown }[]
@@ -112,6 +114,63 @@ function deferred<T>() {
   const promise = new Promise<T>(done => { resolve = done })
   return { promise, resolve }
 }
+
+test('tools navigation reveals the correct section and sends no controller action', async () => {
+  await render()
+  let destination = ''
+  const tools = document.getElementById('stage-controller-tools')!
+  tools.scrollIntoView = () => { destination = tools.id }
+  await act(async () => button('Home / Optimize / 参数').click())
+  assert.equal(destination, 'stage-controller-tools')
+  assert.equal(document.activeElement, tools)
+  assert.deepEqual(writes, [])
+})
+
+test('lost communication during optimization never presents a running or waiting progress claim', async () => {
+  state.motion_pending = true
+  state.operation = {kind:'optimize', axis:'x', channel:3, elapsed_s:150, phase:'waiting'}
+  state.error = '停止未确认'
+  state.channels = []
+  await render()
+  assert.ok(container.querySelector('.stage-optimization-progress')?.textContent?.includes('性能优化结果未确认'))
+  assert.ok(!container.querySelector('.stage-optimization-progress')?.textContent?.includes('等待控制器开始'))
+  assert.ok(container.querySelector('.stage-header-warning')?.textContent?.includes('停止尚未确认'))
+  assert.equal(button('全部停止').disabled, false)
+  assert.equal(button('Optimize · 性能优化').disabled, true)
+  assert.deepEqual(writes, [])
+})
+
+test('imported drive profile is a local preview and never applies without an explicit click', async () => {
+  state.connected = true
+  const parameters = {values:{forward_amplitude:100,reverse_amplitude:90,step_rate:5000,acceleration:1000},limits:{forward_amplitude:{min:10,max:100},reverse_amplitude:{min:10,max:100},step_rate:{min:800,max:20000},acceleration:{min:1,max:20000}}}
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options) => String(url).includes('/parameters/') ? new Response(JSON.stringify(parameters)) : original(url, options)
+  await render()
+  await act(async () => { button('驱动参数 · 幅值、步频与加速度').click(); button('读取当前参数').click(); await new Promise(r => setTimeout(r, 5)) })
+  const input = container.querySelector<HTMLInputElement>('[aria-label="导入 PDXC3 驱动参数文件"]')!
+  const text = makeStageProfile({...parameters.values, step_rate:800}, {serial_number:'129576359',channel:1,stage:'PDXC2AD'})
+  Object.defineProperty(input, 'files', {value:[{size:text.length, text:async () => text}]})
+  await act(async () => { input.dispatchEvent(new dom.window.Event('change', {bubbles:true})); await new Promise(r => setTimeout(r, 5)) })
+  assert.equal(container.querySelector<HTMLInputElement>('[aria-label="步频"]')?.value, '800')
+  assert.ok(container.textContent?.includes('尚未发送给控制器'))
+  assert.equal(button('应用驱动参数').disabled, false)
+  assert.deepEqual(writes, [])
+})
+
+test('controller history distinguishes verified zero from submitted optimization', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options) => String(url).includes('kind=stage_action') ? new Response(JSON.stringify({events:[
+    {id:1,timestamp:'2026-10-17T12:00:00Z',message:'计数读回零',details:{axis:'x',channel:3,operation:'zero',mode:'real',result:'verified'}},
+    {id:2,timestamp:'2026-10-17T12:00:01Z',message:'等待控制器进度',details:{axis:'x',channel:3,operation:'optimize',mode:'real',result:'submitted'}},
+  ]})) : original(url, options)
+  await render()
+  await act(async () => button('控制器操作记录 · Home / Optimize / 输出').click())
+  const history = container.querySelector('.stage-tool-history')!
+  assert.ok(history.textContent?.includes('读回已确认'))
+  assert.ok(history.textContent?.includes('请求已下发'))
+  assert.ok(!history.textContent?.includes('控制器报告优化完成'))
+  assert.deepEqual(writes, [])
+})
 
 test('open-loop Home only sends a confirmed zero action on the selected logical axis', async () => {
   state.connected = true

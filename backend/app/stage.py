@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import time
 from pathlib import Path
 from typing import Literal
@@ -96,12 +97,39 @@ class StageController:
         self._motion_deadline = 0
         self._optimization_seen_busy = False
         self._recovering = False
+        self.recovery_path = root / "stage-recovery.json"
+        if self.recovery_path.exists():
+            try:
+                reason = json.loads(self.recovery_path.read_text(encoding="utf-8")).get("reason", "之前的运动或停止未确认")
+            except (ValueError, OSError, AttributeError):
+                reason = "恢复记录无法读取，不能确认上次动作结果"
+            self._uncertain = self.motion_pending = self._must_stop = True
+            self.error = f"上次操作未确认，重启后仍保持移动锁定：{reason}。请现场确认静止后恢复连接"
+
+    def _save_recovery(self, reason):
+        self.recovery_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.recovery_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps({"serial_number": self.config.serial_number,
+            "mode": self.config.mode, "reason": reason, "operation": self.operation}, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(self.recovery_path)
+
+    def _remember_fault(self):
+        try:
+            self._save_recovery(self.error or "动作结果或停止未确认")
+        except OSError as exc:
+            self.error = f"{self.error}；恢复记录保存失败：{exc}"
+
+    def _clear_recovery(self):
+        self.recovery_path.unlink(missing_ok=True)
 
     def snapshot(self):
         return {"config": self.config.model_dump(), "connected": self.connected,
                 "error": self.error, "channels": self.channels, "model": "PDXC3",
                 "stage": "PD1V/M", "position_feedback": False,
-                "motion_pending": self.motion_pending, "operation": self.operation,
+                "motion_pending": self.motion_pending,
+                "operation": None if not self.operation else {**self.operation,
+                    "elapsed_s": round(max(0, time.monotonic() - self._operation_at), 1),
+                    "phase": "running" if self._optimization_seen_busy else "waiting"},
                 "diagnostics": {"transport": getattr(self.driver, "transport", ""),
                     "latency_ms": getattr(self.driver, "last_latency_ms", None),
                     "sample_age_s": None if self._last_sample is None else round(time.monotonic() - self._last_sample, 2),
@@ -136,6 +164,8 @@ class StageController:
             raise
 
     async def configure(self, config: StageConfig, actor):
+        if self._uncertain:
+            raise StageError("上次操作或停止未确认，不能通过修改配置解除移动锁定；请现场确认静止后恢复连接")
         if self._recovering:
             raise StageError("连接恢复正在进行，请等待后再修改配置")
         async with self._lock:
@@ -159,6 +189,8 @@ class StageController:
             return self.snapshot()
 
     async def connect(self, actor, *, _recovery=False):
+        if self._uncertain and not _recovery:
+            raise StageError("上次操作或停止未确认，请现场确认静止后使用恢复连接")
         if self._recovering and not _recovery:
             raise StageError("连接恢复正在进行，请勿重复连接")
         async with self._lock:
@@ -230,9 +262,20 @@ class StageController:
                     self.connected = False
                     self._uncertain = True
                     self.error = "运动超过预期时间，已请求全部停止；请检查实际行程并确认静止后恢复连接"
+                    self._remember_fault()
                     self.event("stage_fault", "error", self.error, "system")
                     return False
                 if self._idle(self.channels) and not self._uncertain and (not self.operation or self._optimization_seen_busy and time.monotonic() - self._operation_at >= 2):
+                    if self.motion_pending:
+                        self._clear_recovery()
+                    if self.operation:
+                        target = next(row for row in self.channels if row["channel"] == self.operation["channel"])
+                        success = target.get("optimized") is True
+                        self.event("stage_action", "info" if success else "warning",
+                            "控制器报告优化完成；不代表实测位移或到位" if success else "优化运动结束，但控制器未返回优化成功标志，请检查负载与控制器状态",
+                            "system", {"axis": self.operation["axis"], "channel": self.operation["channel"],
+                            "operation": "optimize", "mode": self.config.mode,
+                            "result": "completed" if success else "not_optimized"})
                     self.motion_pending = False
                     self._must_stop = False
                     self.operation = None
@@ -252,6 +295,8 @@ class StageController:
                 self.error = f"位移台通信中断，运动状态未知：{exc}"
                 self.channels = []
                 self._uncertain = self.motion_pending or self._must_stop
+                if self._uncertain:
+                    self._remember_fault()
                 self.event("stage_fault", "error", self.error, "system")
                 return False
             return True
@@ -287,6 +332,10 @@ class StageController:
                         raise StageError(f"CH{channel} 未就绪：{(target or {}).get('error') or '请核对位移台配置'}")
                     if epoch != self._stop_epoch or self._stopping_count or self._disconnecting_count:
                         raise StageError("停止或断开已请求，本次移动未下发")
+                    try:
+                        self._save_recovery("移动请求已准备下发，尚未确认停止或完成")
+                    except OSError as exc:
+                        raise StageError(f"无法保存动作恢复记录，本次移动未下发：{exc}") from exc
                     self._must_stop = True
                     self.motion_pending = True
                     invoked = True
@@ -309,6 +358,8 @@ class StageController:
                     self.channels = []
                     self.error = (f"移动未确认，勿重复发送，请先停止并重新连接：{exc}" if invoked else
                                   f"移动未下发，状态读取失败，请检查连接：{exc}")
+                    if invoked:
+                        self._remember_fault()
                     self._move_event(command, actor, "unconfirmed" if invoked else "rejected", self.error)
                     self.event("stage_fault", "error", self.error, actor)
                     if isinstance(exc, asyncio.CancelledError):
@@ -335,14 +386,20 @@ class StageController:
                 self._must_stop = not self._idle(self.channels)
                 self.motion_pending = self._must_stop
                 if not self._must_stop:
+                    self._clear_recovery()
                     self._uncertain = False
+                    if self.operation:
+                        self.event("stage_action", "warning", "优化已被全部停止；未判定为优化完成", actor,
+                            {"axis": self.operation["axis"], "channel": self.operation["channel"],
+                             "operation": "optimize", "mode": self.config.mode, "result": "stopped"})
                     self.operation = None
                     self._motion_deadline = 0
             except Exception as exc:
                 self.connected = False
                 self.channels = []
-                self.motion_pending = True
+                self._uncertain = self.motion_pending = self._must_stop = True
                 self.error = f"无法确认停止：{exc}"
+                self._remember_fault()
                 raise StageError(self.error) from exc
             self.event("stage_stop", "warning", "已发送位移台全部通道停止指令", actor,
                        {"mode": self.config.mode})
@@ -359,6 +416,8 @@ class StageController:
             self._disconnecting_count -= 1
 
     async def _disconnect_locked(self, actor):
+        if self.driver is None and self._uncertain:
+            raise StageError("停止未确认，断开不能解除移动锁定；请现场确认静止后恢复连接")
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -374,12 +433,15 @@ class StageController:
                         self.channels = await self._call(self.driver.status)
                         if not self._idle(self.channels):
                             raise StageError("停止后的运动状态尚未确认")
+                    self._clear_recovery()
                     await self._call(self.driver.close)
                 except Exception as exc:
                     self.connected = False
                     self.channels = []
                     self.motion_pending = True
                     self.error = f"断开前停止未确认，请检查控制器：{exc}"
+                    self._uncertain = True
+                    self._remember_fault()
                     raise StageError(self.error) from exc
                 self.driver = None
                 self._must_stop = False
@@ -432,10 +494,13 @@ class StageController:
                 await self.stop(actor)
                 raise StageError("重连后发现运动或状态未知，已请求停止，请再次检查")
             self.event("stage_recovery", "warning", "现场确认静止后重新连接；未启用输出或重发动作", actor)
+            self._clear_recovery()
             return result
         except Exception:
+            self.connected = False
             self._uncertain = True
             self.motion_pending = True
+            self._remember_fault()
             raise
 
     def _require_axis(self, axis):
@@ -512,6 +577,11 @@ class StageController:
                     raise StageError("当前不是开环模式，禁止执行本控制台的清零或优化")
                 if command.operation == "optimize" and not target.get("enabled"):
                     raise StageError("请先启用此轴输出，再开始性能优化")
+                if command.operation == "optimize":
+                    try:
+                        self._save_recovery("性能优化请求已准备下发，尚未确认停止或完成")
+                    except OSError as exc:
+                        raise StageError(f"无法保存动作恢复记录，本次优化未下发：{exc}") from exc
                 invoked = True
                 if command.operation in ("enable", "disable"):
                     await self._call(self.driver.enable, channel, command.operation == "enable")
@@ -527,10 +597,20 @@ class StageController:
                 if command.operation == "optimize":
                     self._optimization_seen_busy = any(row.get("channel") == channel and
                         (row.get("optimizing") or row.get("moving") is True) for row in self.channels)
-                self.event("stage_action", "info", "位移台操作请求已下发", actor, {**command.model_dump(), "channel": channel, "result": "submitted"})
+                else:
+                    actual = next(row for row in self.channels if row["channel"] == channel)
+                    if not self._idle(self.channels):
+                        raise RuntimeError("操作后控制器未报告空闲")
+                    if command.operation == "zero" and actual.get("command_count") != 0:
+                        raise RuntimeError("清零后的命令计数未读回零")
+                    if command.operation in ("enable", "disable") and actual.get("enabled") is not (command.operation == "enable"):
+                        raise RuntimeError("输出使能状态与请求不一致")
+                self.event("stage_action", "info", "性能优化请求已下发，等待控制器进度" if command.operation == "optimize" else "控制器操作读回已确认", actor,
+                    {**command.model_dump(), "channel": channel, "mode": self.config.mode,
+                     "result": "submitted" if command.operation == "optimize" else "verified"})
                 return self.snapshot()
         except StageError as exc:
-            self.event("stage_action", "warning", str(exc), actor, {**command.model_dump(), "result": "rejected"})
+            self.event("stage_action", "warning", str(exc), actor, {**command.model_dump(), "mode": self.config.mode, "channel": self.config.axes[command.axis], "result": "rejected"})
             raise
         except (Exception, asyncio.CancelledError) as exc:
             if invoked:
@@ -541,7 +621,9 @@ class StageController:
                     pass
             self.connected = False
             self.error = f"操作{'结果未确认，勿重复发送' if invoked else '未下发'}：{exc}"
-            self.event("stage_action", "error", self.error, actor, {**command.model_dump(), "result": "unconfirmed" if invoked else "rejected"})
+            if invoked:
+                self._remember_fault()
+            self.event("stage_action", "error", self.error, actor, {**command.model_dump(), "mode": self.config.mode, "channel": self.config.axes[command.axis], "result": "unconfirmed" if invoked else "rejected"})
             if isinstance(exc, asyncio.CancelledError):
                 raise
             raise StageError(self.error) from exc

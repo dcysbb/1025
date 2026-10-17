@@ -1,5 +1,19 @@
 .stage-advanced h2 { display: flex; align-items: center; gap: 8px; }
 .stage-panel > .stage-header { position: sticky; top: 8px; z-index: 6; background-color: var(--surface-strong); }
+.stage-panel > .stage-header { flex-wrap: wrap; }
+.stage-panel #stage-manual, .stage-panel #stage-controller-tools, .stage-panel #stage-movement-history { scroll-margin-top: calc(var(--stage-header-height, 230px) + 20px); }
+.stage-section-nav { display: flex; flex-wrap: wrap; gap: 8px; flex-basis: 100%; padding-top: 14px; border-top: 1px solid var(--line); }
+.stage-section-nav .button { font-size: 12px; }
+.stage-header .stage-header-warning { flex-basis: 100%; margin: 0; padding: 10px 12px; border: 1px solid var(--red); border-radius: 10px; color: var(--red); opacity: 1; font-size: 13px; line-height: 1.6; }
+.stage-optimization-progress { flex-basis: 100%; display: flex; gap: 12px; padding: 16px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--field-bg); color: var(--amber); }
+.stage-optimization-progress > svg { flex-shrink: 0; margin-top: 2px; }
+.stage-optimization-progress p { font-size: 13px; margin: 6px 0; color: var(--text); }
+.stage-optimization-progress small { color: var(--muted); }
+.stage-tool-history { margin-top: 16px; padding-top: 8px; border-top: 1px solid var(--line); }
+.stage-tool-history ol { list-style: none; padding: 0; margin: 10px 0 0; max-height: 320px; overflow-y: auto; }
+.stage-tool-history li { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 6px 12px; padding: 14px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.stage-tool-history time, .stage-tool-history span { color: var(--muted); }
+.stage-tool-history li p { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
 .stage-diagnostic-grid span { overflow-wrap: anywhere; }
 .stage-tool-axis { width: 160px; flex: 0 0 160px; }
 .stage-tool-status, .stage-diagnostic-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; padding: 14px; background: var(--field-bg); border: 1px solid var(--line); border-radius: 12px; font-size: 12px; color: var(--muted); }
@@ -12,7 +26,15 @@
 .stage-tool-modal { --pane-glass: var(--surface-strong); }
 .stage-tool-modal .login-card { max-height: calc(100dvh - 40px); overflow-y: auto; }
 .stage-tool-modal .login-card p { font-size: 13px; line-height: 1.7; }
+@media (max-width: 850px) {
+  .stage-panel > .stage-header { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .stage-header > *, .stage-section-nav { min-width: 0; max-width: 100%; }
+  .stage-section-nav { flex-basis: auto; width: 100%; }
+  .stage-section-nav .button { flex: 1 1 100px; min-width: 0; min-height: 36px; white-space: normal; }
+  .stage-header .stage-header-warning { flex-basis: auto; box-sizing: border-box; }
+}
 @media (max-width: 760px) {
+  .stage-tool-history li { grid-template-columns: minmax(0, 1fr); }
   .stage-advanced .panel-heading { flex-wrap: wrap; }
   .stage-tool-axis { width: 100%; flex-basis: 100%; }
   .stage-tool-status, .stage-diagnostic-grid, .stage-parameter-grid { grid-template-columns: minmax(0, 1fr); }

@@ -16,7 +16,7 @@ export type StageState = {
   connected: boolean
   error: string | null
   motion_pending: boolean
-  operation?: {kind: string; axis: Axis; channel: number} | null
+  operation?: {kind: string; axis: Axis; channel: number; phase?: 'waiting' | 'running'; elapsed_s?: number} | null
   diagnostics?: {transport: string; latency_ms: number | null; sample_age_s: number | null; read_failures: number; sample_count: number; recovery_required: boolean}
   channels: { channel: number; moving: boolean | null; enabled: boolean; stage: string; ready: boolean; error: string | null; optimizing?: boolean; optimized?: boolean; open_loop?: boolean; command_count?: number | null; power_ok_raw?: boolean | null }[]
 }

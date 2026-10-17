@@ -106,7 +106,7 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
   }, [identity, historyVersion, reload])
 
   return <>
-    <section className="content-panel glass-panel stage-workbench">
+    <section id="stage-manual" tabIndex={-1} className="content-panel glass-panel stage-workbench">
       <div className="panel-heading"><div><h2>精细手动调节</h2><p className="stage-note">每轴独立步长 · 单次点动 · 上限 {config.max_steps} 步</p></div><span className="stage-open-loop">OPEN LOOP</span></div>
       <div ref={area} tabIndex={0} className={`stage-keyboard-area ${keyboard ? 'stage-keyboard-area--armed' : ''}`} aria-label="键盘点动控制区域"
         onKeyDown={handleKey} onFocusCapture={event => { if (editable(event.target)) disableKeys() }}
@@ -141,7 +141,7 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
       <p className="stage-note stage-workbench-note"><ArrowLeftRight size={15}/>PD1V/M 无位置反馈；实际位移随负载和驱动设置变化。“已下发”不代表实测到位。</p>
     </section>
     {advanced}
-    <section className="content-panel glass-panel stage-movement-history">
+    <section id="stage-movement-history" tabIndex={-1} className="content-panel glass-panel stage-movement-history">
       <div className="panel-heading"><h2>运动记录</h2><div><span className="subtle-note">最近 20 条移动请求</span><button className="icon-button" aria-label="刷新运动记录" onClick={() => setReload(value => value + 1)}><RefreshCw size={15}/></button></div></div>
       {historyError && <p className="inline-error" role="alert">{historyError}</p>}
       {!events.length ? <div className="stage-history-empty">暂无移动请求记录</div> : <div className="stage-history-scroll"><table><thead><tr><th>北京时间</th><th>轴 / 通道</th><th>方向 / 硬件</th><th>步数</th><th>模式</th><th>请求结果</th><th>说明</th></tr></thead><tbody>{events.map(event => {

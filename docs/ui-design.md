@@ -129,6 +129,9 @@
 | `frontend/src/TerminalWorkbench.tsx` | DAM 端子功能分配、输入反馈及输出控制；复用现有配置和控制接口 |
 | `frontend/src/StagePanel.css` / `StageWorkbench.css` | 位移台工作区、方向操作和运动记录 |
 | `frontend/src/StageAdvanced.tsx` / `StageAdvanced.css` | 输出、开环 Home/Zero、自动优化、驱动参数与连接诊断；操作确认与停止状态独立 |
+| `frontend/src/StageToolHistory.tsx` / `stageProfiles.ts` | 控制器工具记录、驱动参数导入预览与导出；载入文件不触发硬件操作 |
+
+位移台顶部提供功能直达导航。锚点定位预留固定控制栏的实际高度，不能让工具标题或错误被遮住。自动优化只展示实际阶段及等待时间；通信失效时改为“结果未确认”，不能继续显示进行中的进度，也不能用等待时间推算成功。
 
 扩展时先复用共享类名、令牌与组件，再添加局部样式；局部覆盖应限定到相应业务容器，避免影响其他页面。主题和动效规则调整后同步更新本规范。
 
