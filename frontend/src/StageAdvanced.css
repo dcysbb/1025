@@ -1,4 +1,17 @@
 .stage-advanced h2 { display: flex; align-items: center; gap: 8px; }
+.stage-channel-tools { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.stage-channel-tool { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--field-bg); }
+.stage-channel-tool .stage-axis-title { margin-bottom: 14px; }
+.stage-channel-tool--y .stage-axis-title strong { color: var(--green); }
+.stage-channel-tool--z .stage-axis-title strong { color: var(--accent); }
+.stage-channel-tool .stage-tool-status { grid-template-columns: minmax(0, 1fr); padding: 0; border: 0; background: transparent; overflow-wrap: anywhere; }
+.stage-channel-tool .stage-tool-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.stage-channel-tool .stage-tool-actions .button { min-width: 0; justify-content: center; white-space: normal; min-height: 38px; }
+.stage-channel-tool .stage-tool-actions .button:nth-child(n + 3) { grid-column: 1 / -1; }
+.stage-channel-tool .stage-note { color: var(--muted); opacity: 1; overflow-wrap: anywhere; }
+.stage-channel-tool .stage-optimization-progress { margin-top: 14px; padding: 12px; }
+.stage-channel-tool .stage-optimization-progress > div { min-width: 0; overflow-wrap: anywhere; }
+.stage-parameter-disclosure .stage-tool-axis { margin-top: 14px; }
 .stage-panel > .stage-header { position: sticky; top: 8px; z-index: 6; background-color: var(--surface-strong); }
 .stage-panel > .stage-header { flex-wrap: wrap; }
 .stage-panel #stage-manual, .stage-panel #stage-controller-tools, .stage-panel #stage-movement-history { scroll-margin-top: calc(var(--stage-header-height, 230px) + 20px); }
@@ -27,6 +40,7 @@
 .stage-tool-modal .login-card { max-height: calc(100dvh - 40px); overflow-y: auto; }
 .stage-tool-modal .login-card p { font-size: 13px; line-height: 1.7; }
 @media (max-width: 850px) {
+  .stage-channel-tools { grid-template-columns: minmax(0, 1fr); }
   .stage-panel > .stage-header { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
   .stage-header > *, .stage-section-nav { min-width: 0; max-width: 100%; }
   .stage-section-nav { flex-basis: auto; width: 100%; }

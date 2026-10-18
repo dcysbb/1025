@@ -15,8 +15,8 @@ let state: {
   config: { mode: string; serial_number: string; host: string; port: number; axes: Record<string, number>; inverted: Record<string, boolean>; max_steps: number }
   connected: boolean; error: string | null
   motion_pending?: boolean
-  operation?: {kind: string; axis: 'x'; channel: number; elapsed_s: number; phase: 'waiting' | 'running'}
-  channels: { channel: number; moving: boolean; ready: boolean; enabled: boolean; stage: string; error: string | null }[]
+  operation?: {kind: string; axis: 'x' | 'y' | 'z'; channel: number; elapsed_s: number; phase: 'waiting' | 'running'}
+  channels: { channel: number; moving: boolean; ready: boolean; enabled: boolean; stage: string; error: string | null; open_loop?: boolean }[]
 }
 let writes: { path: string; body: unknown }[]
 let rejectConnection: boolean
@@ -136,7 +136,7 @@ test('lost communication during optimization never presents a running or waiting
   assert.ok(!container.querySelector('.stage-optimization-progress')?.textContent?.includes('等待控制器开始'))
   assert.ok(container.querySelector('.stage-header-warning')?.textContent?.includes('停止尚未确认'))
   assert.equal(button('全部停止').disabled, false)
-  assert.equal(button('Optimize · 性能优化').disabled, true)
+  for (const axis of ['X', 'Y', 'Z']) assert.equal(button(`${axis} 轴 Optimize · 性能优化`).disabled, true)
   assert.deepEqual(writes, [])
 })
 
@@ -172,29 +172,98 @@ test('controller history distinguishes verified zero from submitted optimization
   assert.deepEqual(writes, [])
 })
 
-test('open-loop Home only sends a confirmed zero action on the selected logical axis', async () => {
+for (const axis of ['x', 'y', 'z']) test(`${axis} Home confirms and zeros only its own mapped channel`, async () => {
   state.connected = true
   await render()
-  await act(async () => { button('Home / Zero · 计数清零').click() })
+  assert.equal(container.querySelector('[aria-label="控制器工具操作轴"]'), null)
+  await act(async () => { button(`${axis.toUpperCase()} 轴 Home / Zero · 计数清零`).click() })
   assert.deepEqual(writes, [])
   assert.ok(document.querySelector('[role="dialog"]')?.textContent?.includes('不会寻找机械原点'))
+  assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes(`${axis.toUpperCase()} / CH${state.config.axes[axis]}`))
   await act(async () => { button('确认清零').click(); button('确认清零').click(); await new Promise(r => setTimeout(r, 0)) })
-  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'x',operation:'zero',confirmed:true}}])
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis,operation:'zero',confirmed:true}}])
 })
 
-test('optimization needs enabled output and a separate automatic-motion confirmation', async () => {
+for (const axis of ['x', 'y', 'z']) test(`${axis} optimization needs its own output enabled and confirms its mapped channel`, async () => {
   state.connected = true
   await render()
-  assert.equal(button('Optimize · 性能优化').disabled, true)
+  assert.equal(button(`${axis.toUpperCase()} 轴 Optimize · 性能优化`).disabled, true)
   await act(async () => { root.unmount() })
   root = createRoot(container)
-  state.channels[2].enabled = true
+  state.channels.find(row => row.channel === state.config.axes[axis])!.enabled = true
   await render()
-  await act(async () => { button('Optimize · 性能优化').click() })
+  for (const other of ['x', 'y', 'z'].filter(value => value !== axis)) assert.equal(button(`${other.toUpperCase()} 轴 Optimize · 性能优化`).disabled, true)
+  await act(async () => { button(`${axis.toUpperCase()} 轴 Optimize · 性能优化`).click() })
+  assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes(`${axis.toUpperCase()} / CH${state.config.axes[axis]}`))
   assert.ok(document.querySelector('[role="dialog"]')?.textContent?.includes('不受点动步数上限限制'))
   assert.deepEqual(writes, [])
   await act(async () => { button('确认开始优化').click(); await new Promise(r => setTimeout(r, 0)) })
-  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'x',operation:'optimize',confirmed:true}}])
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis,operation:'optimize',confirmed:true}}])
+})
+
+test('parameter selection cannot retarget a channel Home confirmation', async () => {
+  state.connected = true
+  await render()
+  await act(async () => { button('驱动参数 · 幅值、步频与加速度').click(); button('Y 轴 Home / Zero · 计数清零').click() })
+  const select = container.querySelector<HTMLSelectElement>('[aria-label="驱动参数通道"]')!
+  await act(async () => { select.value = 'z'; select.dispatchEvent(new dom.window.Event('change', {bubbles: true})) })
+  assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes('Y / CH1'))
+  await act(async () => { button('确认清零').click() })
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'y',operation:'zero',confirmed:true}}])
+})
+
+test('changing the channel mapping revokes an open Home confirmation without sending it', async () => {
+  state.connected = true
+  await render()
+  await act(async () => button('X 轴 Home / Zero · 计数清零').click())
+  assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes('X / CH3'))
+  state.config.axes = {x: 1, y: 3, z: 2}
+  await act(async () => { await new Promise(r => setTimeout(r, 1100)) })
+  assert.equal(document.querySelector('.motion-presence[data-open="true"] [role="dialog"]'), null)
+  assert.ok(container.querySelector('.stage-channel-tool--x')?.textContent?.includes('CH1'))
+  assert.deepEqual(writes, [])
+  await act(async () => button('X 轴 Home / Zero · 计数清零').click())
+  assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes('X / CH1'))
+  await act(async () => button('确认清零').click())
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'x',operation:'zero',confirmed:true}}])
+})
+
+for (const axis of ['x', 'y', 'z']) test(`${axis} output controls send only their own axis`, async () => {
+  state.connected = true
+  await render()
+  await act(async () => button(`${axis.toUpperCase()} 轴启用输出`).click())
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis,operation:'enable'}}])
+})
+
+test('channel readiness and open-loop eligibility do not follow another card', async () => {
+  state.connected = true
+  state.channels.forEach(row => {row.enabled = true})
+  state.channels[0].ready = false
+  state.channels[0].error = 'CH1 未接位移台'
+  state.channels[1].open_loop = false
+  await render()
+  assert.equal(button('X 轴 Home / Zero · 计数清零').disabled, false)
+  assert.equal(button('X 轴 Optimize · 性能优化').disabled, false)
+  for (const axis of ['Y', 'Z']) {
+    assert.equal(button(`${axis} 轴 Home / Zero · 计数清零`).disabled, true)
+    assert.equal(button(`${axis} 轴 Optimize · 性能优化`).disabled, true)
+  }
+  assert.ok(container.querySelector('.stage-channel-tool--y')?.textContent?.includes('CH1 未接位移台'))
+  assert.equal(button('全部停止').disabled, false)
+  assert.deepEqual(writes, [])
+})
+
+test('optimization progress is scoped to its channel while all new actions stay blocked', async () => {
+  state.connected = true
+  state.channels.forEach(row => {row.enabled = true})
+  state.operation = {kind:'optimize',axis:'z',channel:2,elapsed_s:12,phase:'running'}
+  state.motion_pending = true
+  await render()
+  assert.equal(container.querySelectorAll('.stage-optimization-progress').length, 1)
+  assert.ok(container.querySelector('.stage-channel-tool--z .stage-optimization-progress')?.textContent?.includes('Z / CH2'))
+  for (const axis of ['X','Y','Z']) for (const operation of ['Home / Zero · 计数清零','Optimize · 性能优化']) assert.equal(button(`${axis} 轴 ${operation}`).disabled, true)
+  assert.equal(button('全部停止').disabled, false)
+  assert.deepEqual(writes, [])
 })
 
 test('drive parameters require explicit reads, validate limits and apply only selected fields', async () => {
@@ -243,7 +312,7 @@ test('read-only users cannot enable, zero, optimize or change drive parameters',
   state.connected = true
   state.channels[2].enabled = true
   await render(false)
-  for (const label of ['X 轴启用输出','X 轴禁用输出','Home / Zero · 计数清零','Optimize · 性能优化']) assert.equal(button(label).disabled,true)
+  for (const axis of ['X','Y','Z']) for (const label of ['启用输出','禁用输出','Home / Zero · 计数清零','Optimize · 性能优化']) assert.equal(button(`${axis} 轴${label.includes(' · ') ? ' ' : ''}${label}`).disabled,true)
   await act(async () => { button('驱动参数 · 幅值、步频与加速度').click() })
   assert.equal(button('读取当前参数').disabled,true)
   assert.deepEqual(writes,[])
