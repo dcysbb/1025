@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, Gauge, Home, Power, RefreshCw, SlidersHorizontal, Upload, WandSparkles, X } from 'lucide-react'
 import { Disclosure, Presence } from './Motion'
@@ -12,6 +12,8 @@ type Props = {
   onAct: (path: string, body?: unknown, message?: string) => Promise<void>
   onParameters: (axis: Axis, values?: DriveParameters) => Promise<ParameterState>
   historyVersion: number
+  // Share confirmations while placing channel actions inside the workbench cards.
+  children: (axisTools: (axis: Axis) => ReactNode, utilities: ReactNode) => ReactNode
 }
 const FIELDS: {key: keyof DriveParameters; label: string; unit: string}[] = [
   {key: 'forward_amplitude', label: '正向驱动幅值', unit: '%'},
@@ -21,7 +23,7 @@ const FIELDS: {key: keyof DriveParameters; label: string; unit: string}[] = [
 ]
 type Confirmation = {operation: 'zero' | 'optimize'; axis: Axis; channel: number; identity: string} | {operation: 'recover'; identity: string}
 
-export default function StageAdvanced({state, auth, online, busy, uncertain, onAct, onParameters, historyVersion}: Props) {
+export default function StageAdvanced({state, auth, online, busy, uncertain, onAct, onParameters, historyVersion, children}: Props) {
   const [axis, setAxis] = useState<Axis>('x')
   const [parameters, setParameters] = useState<ParameterState | null>(null)
   const [draft, setDraft] = useState<Record<keyof DriveParameters, string> | null>(null)
@@ -116,17 +118,11 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
     setTimeout(() => URL.revokeObjectURL(url), 1000)
     setFeedback('已导出最近读回的控制器参数；未导出未应用的修改。')
   }
-  return <section id="stage-controller-tools" tabIndex={-1} className="content-panel glass-panel stage-advanced">
-    <div className="panel-heading"><div><h2><SlidersHorizontal size={17}/>控制器工具</h2><p className="stage-note">每个通道独立操作 · 输出使能 · Home / Zero · Optimize</p></div></div>
-    <div className="stage-channel-tools">{AXES.map(targetAxis => {
-      const channel = state.config.axes[targetAxis], target = state.channels.find(item => item.channel === channel)
-      const blocked = blockedFor(targetAxis), channelAvailable = !blocked
-      const operation = state.operation?.kind === 'optimize' && state.operation.axis === targetAxis ? state.operation : null
-      return <article key={targetAxis} className={`stage-channel-tool stage-channel-tool--${targetAxis}`} aria-label={`${targetAxis.toUpperCase()} 轴 CH${channel} 控制器工具`}>
-        <div className="stage-axis-title"><strong>{targetAxis.toUpperCase()}</strong><span>CH{channel}</span></div>
-        <div className="stage-tool-status"><span>{target?.stage || '未识别'}</span><span>输出：{state.connected && online ? target?.enabled ? '已使能' : '未使能' : '未知'}</span><span>优化：{!state.connected || !online ? '状态未知' : target?.optimizing || operation ? '进行中 / 等待确认' : target?.optimized ? '控制器已返回优化标志' : '未返回优化标志'}</span>
-          <span>开环命令计数：<b>{state.connected && online && target?.command_count != null ? target.command_count : '—'}</b>（非实测位置）</span>
-        </div>
+  function renderAxisTools(targetAxis: Axis) {
+    const channel = state.config.axes[targetAxis], target = state.channels.find(item => item.channel === channel)
+    const blocked = blockedFor(targetAxis), channelAvailable = !blocked
+    const operation = state.operation?.kind === 'optimize' && state.operation.axis === targetAxis ? state.operation : null
+    return <>
         {operation && <div className="stage-optimization-progress" role="status"><WandSparkles size={19}/><div><strong>{targetAxis.toUpperCase()} / CH{operation.channel} · 性能优化{!online || !state.connected || state.error ? '结果未确认' : operation.phase === 'running' ? '进行中' : '等待控制器开始'}</strong><p>{!online || !state.connected || state.error ? '通信或状态读取异常，不能确认优化进度或停止结果。禁止继续移动或重复优化，请检查控制器状态。' : <>已等待 {Math.floor(operation.elapsed_s ?? 0)} 秒 · 通常约 1–2 分钟。请保持连接，可随时使用顶部“全部停止”。</>}</p><small>仅显示控制器状态与等待时间，不推算完成百分比。</small></div></div>}
         <div className="stage-tool-actions">
           <button className="button button--quiet" aria-label={`${targetAxis.toUpperCase()} 轴启用输出`} disabled={!channelAvailable || target?.enabled} onClick={() => void onAct('/action', {axis: targetAxis, operation:'enable'}, `${targetAxis.toUpperCase()} / CH${channel} 输出启用请求已下发。`)}><Power size={15}/>启用输出</button>
@@ -134,12 +130,12 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
           <button className="button button--quiet" aria-label={`${targetAxis.toUpperCase()} 轴 Home / Zero · 计数清零`} disabled={!channelAvailable || target?.open_loop === false} onClick={() => setConfirm({operation: 'zero', axis: targetAxis, channel, identity: deviceIdentity})}><Home size={15}/>Home / Zero · 计数清零</button>
           <button className="button button--quiet" aria-label={`${targetAxis.toUpperCase()} 轴 Optimize · 性能优化`} disabled={!channelAvailable || !target?.enabled || target?.open_loop === false} onClick={() => setConfirm({operation: 'optimize', axis: targetAxis, channel, identity: deviceIdentity})}><WandSparkles size={15}/>Optimize · 性能优化</button>
         </div>
-        {blocked && <p className="stage-note">{blocked}</p>}
         {!blocked && !target?.enabled && <p className="stage-note">性能优化不可用：请先启用此通道输出。</p>}
         {!blocked && target?.open_loop === false && <p className="stage-note">Home / Zero 和 Optimize 不可用：此通道不是开环模式。</p>}
-      </article>
-    })}</div>
-    <p className="stage-tool-explanation">PD1V/M 使用开环控制：Home / Zero 只清零计数。性能优化会驱动位移台自动运动，不受单次点动步数上限限制。</p>
+    </>
+  }
+  return <>{children(renderAxisTools, <div id="stage-controller-tools" tabIndex={-1} className="stage-advanced">
+    <h3 className="stage-utilities-heading"><SlidersHorizontal size={16}/>参数与诊断</h3>
     <Disclosure title="驱动参数 · 幅值、步频与加速度" className="stage-parameter-disclosure">
       <label className="field stage-tool-axis">参数通道<select aria-label="驱动参数通道" value={axis} disabled={busy} onChange={event => setAxis(event.target.value as Axis)}>{AXES.map(value => <option key={value} value={value}>{value.toUpperCase()} / CH{state.config.axes[value]}</option>)}</select></label>
       <div className="stage-parameter-actions"><button className="button button--quiet" disabled={!canReadParameters} onClick={() => void readOrApply()}><RefreshCw size={14}/>读取当前参数</button>{dirty && <span className="subtle-note">有未应用的参数</span>}</div>
@@ -156,6 +152,7 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
       <button className="button button--quiet" disabled={!auth || !online || busy || state.connected || !state.error && !state.diagnostics?.recovery_required} onClick={() => {setStationary(false);setConfirm({operation: 'recover', identity: deviceIdentity})}}>恢复失效连接</button></div>
     </Disclosure>
     <StageToolHistory version={historyVersion}/>
+    </div>)}
     {createPortal(<Presence show={!!confirm}>{confirm && <div className="modal-backdrop stage-tool-modal"><section ref={dialogRef} className="login-card glass-panel" role="dialog" aria-modal="true" aria-label={confirm.operation === 'zero' ? '确认开环计数清零' : confirm.operation === 'optimize' ? '确认性能优化' : '确认恢复连接'}>
       <button className="icon-button modal-close" aria-label="取消控制器操作" onClick={() => setConfirm(null)}><X size={17}/></button>
       <h2>{confirm.operation === 'recover' ? '恢复失效连接' : `${confirm.axis.toUpperCase()} / CH${confirm.channel} ${confirm.operation === 'zero' ? '开环计数清零' : '性能优化'}`}</h2>
@@ -163,5 +160,5 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
       {confirm.operation === 'recover' && <label className="check-row"><input type="checkbox" checked={stationary} onChange={event => setStationary(event.target.checked)}/>我已现场确认位移台静止</label>}
       <div className="stage-tool-actions"><button className="button button--quiet" onClick={() => setConfirm(null)}>取消</button><button className="button button--primary" disabled={!canConfirm} onClick={() => void confirmedAction()}>{confirm.operation === 'zero' ? '确认清零' : confirm.operation === 'optimize' ? '确认开始优化' : '确认恢复连接'}</button></div>
     </section></div>}</Presence>, document.body)}
-  </section>
+  </>
 }

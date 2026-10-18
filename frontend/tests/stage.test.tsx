@@ -16,7 +16,7 @@ let state: {
   connected: boolean; error: string | null
   motion_pending?: boolean
   operation?: {kind: string; axis: 'x' | 'y' | 'z'; channel: number; elapsed_s: number; phase: 'waiting' | 'running'}
-  channels: { channel: number; moving: boolean; ready: boolean; enabled: boolean; stage: string; error: string | null; open_loop?: boolean }[]
+  channels: { channel: number; moving: boolean; ready: boolean; enabled: boolean; stage: string; error: string | null; open_loop?: boolean; command_count?: number }[]
 }
 let writes: { path: string; body: unknown }[]
 let rejectConnection: boolean
@@ -60,6 +60,36 @@ test('opening stage panel is read-only and shows configured channel permutation'
   assert.deepEqual(writes, [])
   assert.ok(container.querySelector('.stage-axis--x')?.textContent?.includes('CH3'))
   assert.equal(button('X 轴正向移动').disabled, true)
+})
+
+test('each axis has one combined card for jog, output, Home, Optimize and its own count', async () => {
+  state.connected = true
+  state.channels.forEach(row => { row.command_count = row.channel * 100 })
+  await render()
+  const workbench = container.querySelector('.stage-workbench')!
+  assert.equal(container.querySelectorAll('.stage-axis').length, 3)
+  assert.equal(container.querySelector('.stage-channel-tools'), null)
+  assert.equal(container.querySelector('.stage-advanced')?.closest('.content-panel'), workbench)
+  for (const axis of ['X', 'Y', 'Z']) {
+    const channel = state.config.axes[axis.toLowerCase()]
+    const card = workbench.querySelector(`[aria-label="${axis} 轴 CH${channel} 控制卡片"]`)!
+    for (const label of [`${axis} 轴正向移动`, `${axis} 轴反向移动`, `${axis} 轴启用输出`, `${axis} 轴禁用输出`, `${axis} 轴 Home / Zero · 计数清零`, `${axis} 轴 Optimize · 性能优化`]) assert.ok(card.querySelector(`[aria-label="${label}"]`), label)
+    assert.equal(card.querySelectorAll('.stage-axis-details').length, 1)
+    assert.ok(card.querySelector('.stage-axis-details')?.textContent?.includes(`${channel * 100}非实测位置`))
+  }
+  assert.deepEqual(writes, [])
+})
+
+test('entering the channel tool controls revokes keyboard jogging without sending an action', async () => {
+  state.connected = true
+  await render()
+  await act(async () => button('启用键盘').click())
+  assert.equal(button('停用键盘').getAttribute('aria-pressed'), 'true')
+  await act(async () => button('X 轴 Home / Zero · 计数清零').focus())
+  assert.equal(button('启用键盘').getAttribute('aria-pressed'), 'false')
+  await act(async () => keys('ArrowRight'))
+  assert.equal(document.querySelector('[role="dialog"]'), null)
+  assert.deepEqual(writes, [])
 })
 
 test('a hardware fault blocks movement while keeping stop available', async () => {
@@ -120,7 +150,7 @@ test('tools navigation reveals the correct section and sends no controller actio
   let destination = ''
   const tools = document.getElementById('stage-controller-tools')!
   tools.scrollIntoView = () => { destination = tools.id }
-  await act(async () => button('Home / Optimize / 参数').click())
+  await act(async () => button('参数与诊断').click())
   assert.equal(destination, 'stage-controller-tools')
   assert.equal(document.activeElement, tools)
   assert.deepEqual(writes, [])
@@ -220,7 +250,7 @@ test('changing the channel mapping revokes an open Home confirmation without sen
   state.config.axes = {x: 1, y: 3, z: 2}
   await act(async () => { await new Promise(r => setTimeout(r, 1100)) })
   assert.equal(document.querySelector('.motion-presence[data-open="true"] [role="dialog"]'), null)
-  assert.ok(container.querySelector('.stage-channel-tool--x')?.textContent?.includes('CH1'))
+  assert.ok(container.querySelector('.stage-axis--x')?.textContent?.includes('CH1'))
   assert.deepEqual(writes, [])
   await act(async () => button('X 轴 Home / Zero · 计数清零').click())
   assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes('X / CH1'))
@@ -248,7 +278,7 @@ test('channel readiness and open-loop eligibility do not follow another card', a
     assert.equal(button(`${axis} 轴 Home / Zero · 计数清零`).disabled, true)
     assert.equal(button(`${axis} 轴 Optimize · 性能优化`).disabled, true)
   }
-  assert.ok(container.querySelector('.stage-channel-tool--y')?.textContent?.includes('CH1 未接位移台'))
+  assert.ok(container.querySelector('.stage-axis--y')?.textContent?.includes('CH1 未接位移台'))
   assert.equal(button('全部停止').disabled, false)
   assert.deepEqual(writes, [])
 })
@@ -260,7 +290,7 @@ test('optimization progress is scoped to its channel while all new actions stay 
   state.motion_pending = true
   await render()
   assert.equal(container.querySelectorAll('.stage-optimization-progress').length, 1)
-  assert.ok(container.querySelector('.stage-channel-tool--z .stage-optimization-progress')?.textContent?.includes('Z / CH2'))
+  assert.ok(container.querySelector('.stage-axis--z .stage-optimization-progress')?.textContent?.includes('Z / CH2'))
   for (const axis of ['X','Y','Z']) for (const operation of ['Home / Zero · 计数清零','Optimize · 性能优化']) assert.equal(button(`${axis} 轴 ${operation}`).disabled, true)
   assert.equal(button('全部停止').disabled, false)
   assert.deepEqual(writes, [])

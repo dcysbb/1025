@@ -148,7 +148,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
         <button className="button stage-stop" disabled={!auth || stopping || !state?.connected && !state?.error && !uncertain}
           onClick={() => void act('/stop')}><Square size={15}/>{stopping ? '正在停止…' : '全部停止'}</button>
       </div>
-      {!configuration && <nav className="stage-section-nav" aria-label="位移台功能导航"><button className="button button--quiet" onClick={() => jumpTo('stage-manual')}>手动点动</button><button className="button button--quiet" onClick={() => jumpTo('stage-controller-tools')}>Home / Optimize / 参数</button><button className="button button--quiet" onClick={() => jumpTo('stage-movement-history')}>运动记录</button></nav>}
+      {!configuration && <nav className="stage-section-nav" aria-label="位移台功能导航"><button className="button button--quiet" onClick={() => jumpTo('stage-manual')}>精细控制</button><button className="button button--quiet" onClick={() => jumpTo('stage-controller-tools')}>参数与诊断</button><button className="button button--quiet" onClick={() => jumpTo('stage-movement-history')}>运动记录</button></nav>}
       {state?.error && state.motion_pending && <p className="stage-header-warning" role="alert">停止尚未确认，移动已锁定。请现场确认静止后恢复连接。</p>}
     </section>
     {readError && <div className="inline-error" role="alert">{readError} 当前位移台状态已过期，点动暂停；正在自动重试读取，停止入口保留。</div>}
@@ -197,9 +197,9 @@ export default function StagePanel({ auth, connected, configuration = false, onD
       </>}
     </section>}
 
-    {!configuration && (state ? <StageWorkbench key={[state.config.serial_number, state.config.mode, state.config.max_steps, ...AXES.map(axis => `${state.config.axes[axis]}:${state.config.inverted[axis]}`)].join('|')} state={state} auth={auth} connected={connected} online={online}
+    {!configuration && (state ? <StageAdvanced state={state} auth={auth} online={connected && online} busy={busy || stopping} uncertain={uncertain || awaitingRefresh}
+      onAct={act} onParameters={parameters} historyVersion={historyVersion}>{(axisTools, utilities) => <StageWorkbench key={[state.config.serial_number, state.config.mode, state.config.max_steps, ...AXES.map(axis => `${state.config.axes[axis]}:${state.config.inverted[axis]}`)].join('|')} state={state} auth={auth} connected={connected} online={online}
       busy={busy} stopping={stopping} uncertain={uncertain} awaitingRefresh={awaitingRefresh} historyVersion={historyVersion}
-      onMove={move} onStop={() => { void act('/stop') }} advanced={<StageAdvanced state={state} auth={auth} online={connected && online} busy={busy || stopping} uncertain={uncertain || awaitingRefresh}
-        onAct={act} onParameters={parameters} historyVersion={historyVersion}/>}/> : <section className="content-panel glass-panel">正在读取位移台状态…</section>)}
+      onMove={move} onStop={() => { void act('/stop') }} axisTools={axisTools} advanced={utilities}/>}</StageAdvanced> : <section className="content-panel glass-panel">正在读取位移台状态…</section>)}
   </div>
 }

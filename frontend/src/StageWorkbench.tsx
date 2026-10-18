@@ -8,6 +8,7 @@ type Props = {
   uncertain: boolean; awaitingRefresh: boolean; historyVersion: number
   onMove: (axis: Axis, direction: -1 | 1, steps: number) => void
   onStop: () => void
+  axisTools: (axis: Axis) => ReactNode
   advanced?: ReactNode
 }
 type Movement = { id: number; timestamp: string; message: string; details: { axis?: Axis; channel?: number; direction?: number; hardware_direction?: number; steps?: number; mode?: string; result?: string; reason?: string } }
@@ -17,7 +18,7 @@ const KEYS: Record<string, [Axis, -1 | 1]> = { ArrowLeft: ['x', -1], ArrowRight:
 const editable = (target: EventTarget | null) => target instanceof window.Element && !!target.closest('input, select, textarea, [contenteditable]:not([contenteditable="false"])')
 const hasDialog = () => !!document.querySelector('[role="dialog"], [aria-modal="true"]')
 
-export default function StageWorkbench({ state, auth, connected, online, busy, stopping, uncertain, awaitingRefresh, historyVersion, onMove, onStop, advanced }: Props) {
+export default function StageWorkbench({ state, auth, connected, online, busy, stopping, uncertain, awaitingRefresh, historyVersion, onMove, onStop, axisTools, advanced }: Props) {
   const { config } = state
   const identity = JSON.stringify([config.serial_number, config.mode, ...AXES.map(axis => [config.axes[axis], config.inverted[axis]])])
   const key = `vacuum-stage-steps:v1:${identity}`
@@ -72,7 +73,7 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
     if (busy) return '请求发送中，请勿重复操作'
     if (state.motion_pending) return '等待后续状态采样确认空闲'
     if (state.channels.length !== 3 || state.channels.some(channel => channel.moving === null || channel.moving === undefined)) return '通道运动状态未知'
-    if (state.channels.some(channel => channel.moving)) return '有通道正在运动，请等待空闲'
+    if (state.channels.some(channel => channel.moving || channel.optimizing)) return '有通道正在运动或优化，请等待空闲'
     if (!row?.ready) return row?.error || '通道未就绪，请核对识别型号及连接'
     if (!Number.isSafeInteger(count) || count < 1 || count > config.max_steps) return `步数必须为 1–${config.max_steps} 的整数`
     return ''
@@ -107,7 +108,7 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
 
   return <>
     <section id="stage-manual" tabIndex={-1} className="content-panel glass-panel stage-workbench">
-      <div className="panel-heading"><div><h2>精细手动调节</h2><p className="stage-note">每轴独立步长 · 单次点动 · 上限 {config.max_steps} 步</p></div><span className="stage-open-loop">OPEN LOOP</span></div>
+      <div className="panel-heading"><div><h2>位移台精细控制</h2><p className="stage-note">点动 · 输出使能 · Home / Zero · Optimize · 单次点动上限 {config.max_steps} 步</p></div><span className="stage-open-loop">OPEN LOOP</span></div>
       <div ref={area} tabIndex={0} className={`stage-keyboard-area ${keyboard ? 'stage-keyboard-area--armed' : ''}`} aria-label="键盘点动控制区域"
         onKeyDown={handleKey} onFocusCapture={event => { if (editable(event.target)) disableKeys() }}
         onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) disableKeys() }}>
@@ -122,10 +123,12 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
           const row = state.channels.find(channel => channel.channel === config.axes[axis])
           const blocked = reason(axis)
           const known = state.connected && online && connected
-          const status = !known ? '状态未知' : row?.moving ? '运动中' : state.motion_pending ? '等待确认' : row?.moving !== false ? '状态未知' : !row.ready ? '未就绪' : '空闲'
-          return <article className={`stage-axis stage-axis--${axis}`} key={axis}>
-            <div className="stage-axis-title"><strong>{axis.toUpperCase()}</strong><span className="stage-axis-channel">CH{config.axes[axis]} · {config.inverted[axis] ? '方向反转' : '标准方向'}</span><span className={`stage-axis-status ${known && row?.ready && !row.moving && !state.motion_pending ? 'stage-axis-status--ready' : ''}`}>{status}</span></div>
-            <dl className="stage-axis-details"><div><dt>识别型号</dt><dd>{row?.stage || '未识别'}</dd></div><div><dt>输出使能</dt><dd>{!known || !row ? '未知' : row.enabled ? '已使能' : '未使能'}</dd></div></dl>
+          const operation = state.operation?.kind === 'optimize' && state.operation.axis === axis ? state.operation : null
+          const optimizing = !!row?.optimizing || !!operation
+          const status = !known ? '状态未知' : state.error || uncertain ? '状态未确认' : optimizing ? '优化中' : row?.moving ? '运动中' : state.motion_pending ? '等待确认' : row?.moving !== false ? '状态未知' : !row.ready ? '未就绪' : '空闲'
+          return <article className={`stage-axis stage-axis--${axis}`} aria-label={`${axis.toUpperCase()} 轴 CH${config.axes[axis]} 控制卡片`} key={axis}>
+            <div className="stage-axis-title"><strong>{axis.toUpperCase()}</strong><span className="stage-axis-channel">CH{config.axes[axis]} · {config.inverted[axis] ? '方向反转' : '标准方向'}</span><span className={`stage-axis-status ${status === '空闲' ? 'stage-axis-status--ready' : ''}`}>{status}</span></div>
+            <dl className="stage-axis-details"><div><dt>识别型号</dt><dd>{row?.stage || '未识别'}</dd></div><div><dt>输出使能</dt><dd>{!known || !row ? '未知' : row.enabled ? '已使能' : '未使能'}</dd></div><div><dt>开环命令计数</dt><dd><b>{known && row?.command_count != null ? row.command_count : '—'}</b><small>非实测位置</small></dd></div><div><dt>优化状态</dt><dd>{!known || state.error || uncertain ? '状态未知' : optimizing ? '进行中 / 等待确认' : row?.optimized ? '控制器已返回优化标志' : '未返回优化标志'}</dd></div></dl>
             <label className="field stage-step-field">单次步数<input aria-label={`${axis.toUpperCase()} 轴点动步数`} type="number" inputMode="numeric" min={1} max={config.max_steps} step={1} value={step(axis)} onChange={event => setStep(axis, event.target.value)}/></label>
             <div className="stage-step-presets" aria-label={`${axis.toUpperCase()} 轴快捷步长`}>{PRESETS.map(value => <button key={value} type="button" aria-label={`${axis.toUpperCase()} 轴 ${value} 步`} aria-pressed={step(axis) === String(value)} disabled={value > config.max_steps} onClick={() => setStep(axis, String(value))}>{value}</button>)}</div>
             <div className="stage-axis-buttons">{([-1, 1] as const).map(direction => <button key={direction} className="button button--quiet" aria-describedby={`stage-reason-${axis}`}
@@ -135,12 +138,13 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
               <span>{direction === -1 ? '−' : '+'}</span>{axis.toUpperCase()}
             </button>)}</div>
             <p className={`stage-axis-reason ${blocked ? '' : 'stage-axis-reason--ready'}`} id={`stage-reason-${axis}`}>{blocked || `点击一次下发 ${step(axis)} 步`}</p>
+            <div className="stage-axis-tools" role="group" aria-label={`${axis.toUpperCase()} 轴通道操作`} aria-describedby={`stage-reason-${axis}`} onFocusCapture={disableKeys}>{axisTools(axis)}</div>
           </article>
         })}</div>
       </div>
-      <p className="stage-note stage-workbench-note"><ArrowLeftRight size={15}/>PD1V/M 无位置反馈；实际位移随负载和驱动设置变化。“已下发”不代表实测到位。</p>
+      <p className="stage-note stage-workbench-note"><ArrowLeftRight size={15}/>PD1V/M 无位置反馈；实际位移随负载和驱动设置变化。“已下发”不代表实测到位。Home / Zero 只清零计数；Optimize 会自动运动，不受单次点动步数上限限制。</p>
+      {advanced}
     </section>
-    {advanced}
     <section id="stage-movement-history" tabIndex={-1} className="content-panel glass-panel stage-movement-history">
       <div className="panel-heading"><h2>运动记录</h2><div><span className="subtle-note">最近 20 条移动请求</span><button className="icon-button" aria-label="刷新运动记录" onClick={() => setReload(value => value + 1)}><RefreshCw size={15}/></button></div></div>
       {historyError && <p className="inline-error" role="alert">{historyError}</p>}

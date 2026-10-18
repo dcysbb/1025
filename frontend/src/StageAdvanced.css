@@ -1,16 +1,13 @@
-.stage-advanced h2 { display: flex; align-items: center; gap: 8px; }
-.stage-channel-tools { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-.stage-channel-tool { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--field-bg); }
-.stage-channel-tool .stage-axis-title { margin-bottom: 14px; }
-.stage-channel-tool--y .stage-axis-title strong { color: var(--green); }
-.stage-channel-tool--z .stage-axis-title strong { color: var(--accent); }
-.stage-channel-tool .stage-tool-status { grid-template-columns: minmax(0, 1fr); padding: 0; border: 0; background: transparent; overflow-wrap: anywhere; }
-.stage-channel-tool .stage-tool-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.stage-channel-tool .stage-tool-actions .button { min-width: 0; justify-content: center; white-space: normal; min-height: 38px; }
-.stage-channel-tool .stage-tool-actions .button:nth-child(n + 3) { grid-column: 1 / -1; }
-.stage-channel-tool .stage-note { color: var(--muted); opacity: 1; overflow-wrap: anywhere; }
-.stage-channel-tool .stage-optimization-progress { margin-top: 14px; padding: 12px; }
-.stage-channel-tool .stage-optimization-progress > div { min-width: 0; overflow-wrap: anywhere; }
+.stage-advanced { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.stage-utilities-heading { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; }
+.stage-axis-tools { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.stage-axis-tools .stage-tool-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 0; }
+.stage-axis-tools .stage-tool-actions .button { min-width: 0; justify-content: center; white-space: normal; min-height: 38px; font-size: 12px; }
+.stage-axis-tools .stage-tool-actions .button:nth-child(n + 3) { grid-column: 1 / -1; }
+.stage-axis-tools .stage-note { color: var(--muted); opacity: 1; overflow-wrap: anywhere; }
+.stage-axis-tools .stage-optimization-progress { margin: 0 0 14px; padding: 12px; }
+.stage-axis-tools .stage-optimization-progress > div { min-width: 0; overflow-wrap: anywhere; }
+.stage-advanced .stage-parameter-disclosure { border-top: 0; margin-top: 8px; padding-top: 0; }
 .stage-parameter-disclosure .stage-tool-axis { margin-top: 14px; }
 .stage-panel > .stage-header { position: sticky; top: 8px; z-index: 6; background-color: var(--surface-strong); }
 .stage-panel > .stage-header { flex-wrap: wrap; }
@@ -29,10 +26,8 @@
 .stage-tool-history li p { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
 .stage-diagnostic-grid span { overflow-wrap: anywhere; }
 .stage-tool-axis { width: 160px; flex: 0 0 160px; }
-.stage-tool-status, .stage-diagnostic-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; padding: 14px; background: var(--field-bg); border: 1px solid var(--line); border-radius: 12px; font-size: 12px; color: var(--muted); }
-.stage-tool-status b { color: var(--text); font-variant-numeric: tabular-nums; }
+.stage-diagnostic-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; padding: 14px; background: var(--field-bg); border: 1px solid var(--line); border-radius: 12px; font-size: 12px; color: var(--muted); }
 .stage-tool-actions, .stage-parameter-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; }
-.stage-tool-explanation { font-size: 12px; line-height: 1.7; color: var(--muted); margin: 14px 0; }
 .stage-parameter-disclosure, .stage-diagnostics { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 8px; }
 .stage-parameter-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 16px 0; }
 .stage-parameter-grid small { color: var(--muted); font-size: 11px; }
@@ -40,7 +35,6 @@
 .stage-tool-modal .login-card { max-height: calc(100dvh - 40px); overflow-y: auto; }
 .stage-tool-modal .login-card p { font-size: 13px; line-height: 1.7; }
 @media (max-width: 850px) {
-  .stage-channel-tools { grid-template-columns: minmax(0, 1fr); }
   .stage-panel > .stage-header { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
   .stage-header > *, .stage-section-nav { min-width: 0; max-width: 100%; }
   .stage-section-nav { flex-basis: auto; width: 100%; }
@@ -49,8 +43,7 @@
 }
 @media (max-width: 760px) {
   .stage-tool-history li { grid-template-columns: minmax(0, 1fr); }
-  .stage-advanced .panel-heading { flex-wrap: wrap; }
   .stage-tool-axis { width: 100%; flex-basis: 100%; }
-  .stage-tool-status, .stage-diagnostic-grid, .stage-parameter-grid { grid-template-columns: minmax(0, 1fr); }
+  .stage-diagnostic-grid, .stage-parameter-grid { grid-template-columns: minmax(0, 1fr); }
   .stage-tool-actions .button { flex: 1 1 155px; }
 }
