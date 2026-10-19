@@ -60,6 +60,12 @@ class DebugRelayRequest(BaseModel):
     duration_s: float = Field(default=0, ge=0, le=60)
 
 
+class DamReplacementRequest(BaseModel):
+    serial_port: str = Field(pattern=r"^COM[1-9][0-9]*$")
+    old_device_removed: bool = False
+    same_wiring_confirmed: bool = False
+
+
 def is_local(request: Request) -> bool:
     if request.client is None:
         return False
@@ -304,6 +310,17 @@ async def connect_io(request: Request, actor: str = Depends(require_operator)):
     ENGINE._event("io_connect", "info" if result["ok"] else "error", "连接 I/O 控制器", actor, result)
     if not result["ok"]:
         raise HTTPException(409, result.get("error", "I/O 连接失败"))
+    return ENGINE.snapshot()
+
+
+@app.post("/api/devices/replace-dam")
+async def replace_dam(body: DamReplacementRequest, request: Request, actor: str = Depends(require_operator)):
+    verify_origin(request)
+    try:
+        await ENGINE.replace_dam(body.serial_port, body.old_device_removed,
+                                 body.same_wiring_confirmed, actor)
+    except (ValueError, InterlockError, ModbusError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
     return ENGINE.snapshot()
 
 

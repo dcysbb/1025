@@ -48,7 +48,7 @@ class LocalAccess(unittest.IsolatedAsyncioTestCase):
 
     async def test_hardware_routes_keep_permission_guards_and_origin_checks(self):
         routes = {route.path: route for route in self.main.app.routes if hasattr(route, 'dependant')}
-        for path in ('/api/devices/connect-io',):
+        for path in ('/api/devices/connect-io', '/api/devices/replace-dam'):
             self.assertIn(self.main.require_operator, [dep.call for dep in routes[path].dependant.dependencies])
         patch_route = next(route for route in self.main.app.routes if getattr(route, 'path', None) == '/api/config' and 'PATCH' in getattr(route, 'methods', set()))
         self.assertIn(self.main.require_operator, [dep.call for dep in patch_route.dependant.dependencies])
@@ -59,6 +59,12 @@ class LocalAccess(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException):
                 await self.main.patch_config(ConfigUpdate(config={}), self.request(), 'test')
             update.assert_not_called()
+        for origin in (None, 'http://example.com'):
+            with patch.object(self.main.ENGINE, 'replace_dam', new=AsyncMock()) as replace:
+                with self.assertRaises(HTTPException):
+                    await self.main.replace_dam(self.main.DamReplacementRequest(serial_port='COM9'),
+                                                self.request(origin=origin), 'test')
+                replace.assert_not_called()
 
     async def test_port_listing_only_enumerates_and_does_not_open_serial_ports(self):
         from types import SimpleNamespace

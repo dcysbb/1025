@@ -823,6 +823,70 @@ class InterlockEngine:
         self._publish()
         return result
 
+    @serialized
+    async def replace_dam(self, serial_port: str, old_device_removed: bool,
+                          same_wiring_confirmed: bool, actor: str = "operator") -> None:
+        """Commission a replacement without treating old cached state as proof of OFF.
+
+        This explicit operator acknowledgement is separate from ordinary routing
+        edits: the removed module's output cannot be verified over its dead port.
+        No writes are sent here; fault acknowledgement remains a separate step.
+        """
+        if not old_device_removed or not same_wiring_confirmed:
+            raise InterlockError("更换 DAM 前须确认旧模块已移除，且新模块按原端子号接线")
+        if self.mode != "real" or self.config.io_device != "dam0808d":
+            raise InterlockError("仅支持真实 DAM0808D 模块更换")
+        if self._stopping or self.interlock != "fault" or not self._io_manual_reset_required:
+            raise InterlockError("仅可在 DAM 通信故障已锁存并等待人工复位时更换模块")
+        candidate = AppConfig.model_validate({**self.config.model_dump(),
+            "dam_serial_port": serial_port, "fail_closed_confirmed": False})
+        old_port = self.config.dam_serial_port
+        normalize = lambda value: value.strip().upper().removeprefix('\\\\.\\')
+        if normalize(old_port) == normalize(serial_port):
+            raise InterlockError("串口未改变，请使用现有故障清除流程")
+        from serial.tools import list_ports
+        ports = {normalize(port.device) for port in await asyncio.to_thread(list_ports.comports)}
+        if normalize(old_port) in ports:
+            raise InterlockError("旧 DAM 串口仍在线，拒绝更换；请先核实旧模块已断开")
+        if normalize(serial_port) not in ports:
+            raise InterlockError("新 DAM 串口未被系统识别")
+        device = Dam0808DClient(serial_port, candidate.dam_baudrate, candidate.dam_unit_id)
+        adopted = False
+        try:
+            async with self._io_lock:
+                await device.connect()
+                inputs = await device.read_inputs()
+                outputs = await device.read_outputs()
+                if len(inputs) != 8 or len(outputs) != 8 or any(outputs):
+                    raise InterlockError("新 DAM 必须返回八路输入及八路已关闭输出；保留原配置和故障锁定")
+                # The absent old module is acknowledged as removed, never OFF.
+                # Keep the fault/manual-reset latch until clear_fault verifies OFF
+                # again through the newly installed module.
+                if self.adam:
+                    await self.adam.close()
+                self.config_store.update(candidate)
+                self.config = candidate
+                self.adam = device
+                adopted = True
+                self._io_inputs, self._io_outputs = inputs, outputs
+                self._last_io_read = time.monotonic()
+                self._adam_connected = True
+                self._io_error = None
+                self._open_output = False
+                self._off_retry_pending = False
+                self._debug_deadlines.clear()
+                self._io_config_pending = False
+                self._rearm_required = True
+            self._event("dam_replaced", "warning", "操作员确认更换 DAM；新模块输出均关闭，仍需清除故障且重新验证失电关闭", actor,
+                        {"old_port": old_port, "new_port": serial_port,
+                         "old_device_removed": True, "same_wiring_confirmed": True,
+                         "old_output_off_verified": False, "new_outputs": outputs})
+            self._refresh_status()
+            self._publish()
+        finally:
+            if not adopted:
+                await device.close()
+
     async def _ensure_io_driver(self) -> None:
         if self.adam is not None:
             return
