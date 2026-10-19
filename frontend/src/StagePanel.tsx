@@ -159,6 +159,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
     {state?.config.mode === 'simulation' && <div className="stage-simulation">模拟模式：按钮只改变模拟数据。</div>}
     {configuration && <section className="content-panel glass-panel">
       <div className="panel-heading"><h2>连接与轴映射</h2></div>
+      <p className="subtle-note">连接参数可直接修改，保存后再连接控制器。控制器已连接或仍保留通道时，请先断开再修改。</p>
       {!draft ? <p>{online ? '正在读取配置…' : '等待后台连接…'}</p> : <>
         <fieldset disabled={!writable || busy || !!state?.connected || !!state?.channels.length} className="stage-config">
           <label className="field">连接模式<select value={draft.mode} onChange={e => setDraft({ ...draft, mode: e.target.value as StageConfig['mode'] })}>

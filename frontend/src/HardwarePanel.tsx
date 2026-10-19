@@ -39,6 +39,7 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
   const [state, setState] = useState<HardwareStatus | null>(null)
   const [online, setOnline] = useState(false)
   const [ports, setPorts] = useState<{ device: string; description: string }[]>([])
+  const [portsLoading, setPortsLoading] = useState(false)
   const [busy, setBusy] = useState('')
   const [terminalBusy, setTerminalBusy] = useState(false), [lastRead, setLastRead] = useState(0)
   const [messages, setMessages] = useState<Record<string, string>>({})
@@ -46,6 +47,11 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [stageDirty, setStageDirty] = useState(false)
   const writable = auth && connected && online && !busy && !terminalBusy && !errors.load
+  const editable = auth && !busy && !terminalBusy && !errors.load
+  const editReason = !auth ? '需要操作员权限才能修改；本机访问会自动取得本机操作权限。'
+    : errors.load ? '硬件配置尚未读取成功，请先重新读取配置。'
+    : busy ? '正在保存或连接设备，请等待本次请求结束。'
+    : terminalBusy ? '正在操作 DAM 端子，请等待本次请求结束。' : ''
   const dirty = (keys: (keyof HardwareConfig)[]) => !!draft && !!saved && keys.some(key => JSON.stringify(draft[key]) !== JSON.stringify(saved[key]))
   const anyDirty = dirty([...TPG, ...IO, ...MAPPING, ...TEXT]) || stageDirty
   useEffect(() => { onDirtyChange?.(anyDirty) }, [anyDirty, onDirtyChange])
@@ -71,11 +77,18 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
       finally { if (!cancelled) timer = setTimeout(poll, 2000) }
     }
     void poll()
+    void refreshPorts()
     return () => { cancelled = true; clearTimeout(timer) }
   }, [loadVersion])
   async function refreshPorts() {
-    try { const next = await request<{ ports: typeof ports }>('/hardware/ports'); setPorts(next.ports); setErrors(prior => ({ ...prior, ports: '' })) }
+    setPortsLoading(true)
+    try {
+      const next = await request<{ ports: typeof ports }>('/hardware/ports')
+      if (!Array.isArray(next.ports) || next.ports.some(port => typeof port.device !== 'string' || typeof port.description !== 'string')) throw new Error('读取串口列表失败：后台返回的列表格式异常，请刷新列表并检查后台版本。')
+      setPorts(next.ports); setErrors(prior => ({ ...prior, ports: '' }))
+    }
     catch (error) { setErrors(prior => ({ ...prior, ports: error instanceof Error ? error.message : '串口列表读取失败' })) }
+    finally { setPortsLoading(false) }
   }
   const patch = <K extends keyof HardwareConfig>(key: K, value: HardwareConfig[K]) => setDraft(prior => prior && ({ ...prior, [key]: value }))
   async function run(section: string, action: () => Promise<void>, message: string) {
@@ -102,7 +115,7 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
     {path && <button className="button" disabled={!writable || dirty(keys) || (id === 'io' && state?.io.manual_reset_required)} onClick={() => void run(id, async () => { await request(path, 'POST', {}); setState(await request('/hardware/status')) }, '设备连接成功')}><Plug size={15} />连接{id === 'tpg' ? '真空规' : 'I/O'}</button>}
   </div>
   const status = (id: 'tpg' | 'io') => <><span className={`status-chip ${online && state?.[id].connected ? 'status-chip--ok' : 'status-chip--muted'}`}>{online ? state?.[id].connected ? '在线' : '未连接' : '状态未知'}</span>{state?.[id].error && <p className="inline-error">{state[id].error}</p>}</>
-  const serialField = (key: 'tpg_serial_port' | 'dam_serial_port', label: string) => <label className="field">{label}<input list="hardware-com-ports" value={draft?.[key] ?? ''} placeholder="例如 COM4" onChange={event => patch(key, event.target.value.trim())} /></label>
+  const serialField = (key: 'tpg_serial_port' | 'dam_serial_port', label: string) => <label className="field">{label}<input list="hardware-com-ports" value={draft?.[key] ?? ''} placeholder="输入 COM 口，或从列表选择" onChange={event => patch(key, event.target.value.trim().toUpperCase())} /><small className="hardware-field-help">可直接输入端口名称，也可展开输入框的串口建议；列表不限制手动填写。</small></label>
   const numberField = (key: 'tpg_port' | 'tpg_baudrate' | 'dam_baudrate' | 'dam_unit_id' | 'adam_port' | 'adam_unit_id', label: string, max = 65535) => <label className="field">{label}<input type="number" min={key === 'adam_unit_id' ? 0 : 1} max={max} value={draft?.[key] ?? 0} onChange={event => patch(key, Number(event.target.value))} /></label>
 
 
@@ -110,20 +123,21 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
     <div className="hardware-tabs" role="tablist" aria-label="硬件配置">
       {([['devices', '设备连接'], ['terminals', 'DAM 端子'], ['valve', '插板阀映射']] as const).map(([id, title]) => <button role="tab" aria-selected={tab === id} aria-controls={`hardware-${id}`} id={`hardware-tab-${id}`} key={id} className={`button ${tab === id ? 'button--primary' : 'button--quiet'}`} onClick={() => setTab(id)}>{title}</button>)}
     </div>
-    {notice('load')}{errors.load && <button className="button button--quiet" onClick={() => setLoadVersion(value => value + 1)}>重新读取硬件配置</button>}{!online && <p className="inline-error" role="alert">{errors.status || '正在读取硬件状态…'} 保存和连接已暂停；设备是否在线尚未确认，正在自动重试读取。</p>}
+    {notice('load')}{errors.load && <button className="button button--quiet" onClick={() => setLoadVersion(value => value + 1)}>重新读取硬件配置</button>}{(!connected || !online) && <p className="inline-error" role="alert">{errors.status || '正在读取后台与硬件状态…'} 保存和连接已暂停；设备是否在线尚未确认，正在自动重试读取。已加载的连接参数仍可编辑，恢复后再保存。</p>}
     {!draft ? <p>正在读取硬件配置…</p> : <>
       <datalist id="hardware-com-ports">{ports.map(port => <option key={port.device} value={port.device}>{port.description}</option>)}</datalist>
       <div role="tabpanel" aria-labelledby="hardware-tab-devices" id="hardware-devices" hidden={tab !== 'devices'}>
-        <div className="hardware-tools"><span>仅显示各设备支持的接口</span><button className="button button--quiet" onClick={() => void refreshPorts()} disabled={!auth || !connected}><RefreshCw size={15} />刷新串口列表</button></div>{notice('ports')}
+        <div className="hardware-edit-guide"><b>直接修改参数 → 保存 → 连接对应设备</b><p>串口、IP、网络端口、波特率和设备地址均可在字段内输入。保存后才应用；修改连接参数会撤销现场验证，并按现有保护流程撤销开阀输出。</p>{editReason && <p className="inline-error" role="status">{editReason}</p>}</div>
+        <div className="hardware-tools"><span>{portsLoading ? '正在枚举系统串口…' : ports.length ? `系统识别到：${ports.map(port => `${port.device} · ${port.description}`).join('；')}` : '系统当前未识别到串口；可手动填写端口名称，连接前需确认设备已被系统识别。'}</span><button className="button button--quiet" onClick={() => void refreshPorts()} disabled={!auth || !connected || portsLoading}><RefreshCw size={15} />{portsLoading ? '正在刷新…' : '刷新串口列表'}</button></div>{notice('ports')}
         <section className="content-panel glass-panel hardware-card"><div className="panel-heading"><h2>TPG366 真空规</h2>{status('tpg')}</div>
-          <fieldset disabled={!writable}><div className="settings-grid">
+          <fieldset disabled={!editable}><div className="settings-grid">
             <label className="field">真空规连接方式<select value={draft.tpg_connection} onChange={event => patch('tpg_connection', event.target.value as 'usb' | 'tcp')}><option value="usb">USB 串口</option><option value="tcp">以太网 TCP</option></select></label>
             {draft.tpg_connection === 'usb' ? <>{serialField('tpg_serial_port', '真空规串口')}{numberField('tpg_baudrate', '真空规波特率', 115200)}</> : <><label className="field">真空规 IP 地址<input value={draft.tpg_host} onChange={event => patch('tpg_host', event.target.value.trim())} /></label>{numberField('tpg_port', '真空规 TCP 端口')}</>}
           </div></fieldset>{actions('tpg', TPG, '/devices/connect-gauge')}{notice('tpg')}
         </section>
         <section className="content-panel glass-panel hardware-card"><div className="panel-heading"><h2>I/O 控制器</h2>{status('io')}</div>
-          <fieldset disabled={!writable}><div className="settings-grid"><label className="field">I/O 型号<select value={draft.io_device} onChange={event => patch('io_device', event.target.value as HardwareConfig['io_device'])}><option value="dam0808d">DAM0808D</option><option value="adam6050">ADAM6050</option></select></label>
-            {draft.io_device === 'dam0808d' ? <><label className="field">连接方式<input readOnly value="USB 转 RS485 · Modbus RTU" /></label>{serialField('dam_serial_port', 'DAM 串口')}{numberField('dam_baudrate', 'DAM 波特率', 38400)}{numberField('dam_unit_id', 'DAM 设备地址', 255)}</> : <><label className="field">连接方式<input readOnly value="以太网 TCP · Modbus TCP" /></label><label className="field">ADAM IP 地址<input value={draft.adam_host} onChange={event => patch('adam_host', event.target.value.trim())} /></label>{numberField('adam_port', 'ADAM TCP 端口')}{numberField('adam_unit_id', 'ADAM 设备地址', 255)}</>}
+          <fieldset disabled={!editable}><div className="settings-grid"><label className="field">I/O 型号<select value={draft.io_device} onChange={event => patch('io_device', event.target.value as HardwareConfig['io_device'])}><option value="dam0808d">DAM0808D</option><option value="adam6050">ADAM6050</option></select></label>
+            {draft.io_device === 'dam0808d' ? <><div className="field">支持的接口<span className="hardware-interface">USB 转 RS485 · Modbus RTU</span><small className="hardware-field-help">这是当前 DAM 驱动支持的接口；串口、波特率与地址可在旁边修改。</small></div>{serialField('dam_serial_port', 'DAM 串口')}{numberField('dam_baudrate', 'DAM 波特率', 38400)}{numberField('dam_unit_id', 'DAM 设备地址', 255)}</> : <><div className="field">支持的接口<span className="hardware-interface">以太网 TCP · Modbus TCP</span><small className="hardware-field-help">这是当前 ADAM 驱动支持的接口；IP、端口与地址可在旁边修改。</small></div><label className="field">ADAM IP 地址<input value={draft.adam_host} onChange={event => patch('adam_host', event.target.value.trim())} /></label>{numberField('adam_port', 'ADAM TCP 端口')}{numberField('adam_unit_id', 'ADAM 设备地址', 255)}</>}
           </div></fieldset>{actions('io', IO, '/devices/connect-io')}{notice('io')}
           {state?.io.manual_reset_required && <p className="inline-error">I/O 重连已锁存，请在联锁控制中人工复位。</p>}
         </section>

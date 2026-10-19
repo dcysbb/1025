@@ -12,12 +12,13 @@ let dom: JSDOM, root: Root, container: HTMLElement
 let writes: { path: string; body: Record<string, unknown> }[]
 let config: Record<string, unknown>
 let failure: boolean
+let detectedPorts: {device:string;description:string}[]
 let outputs: boolean[], system: TerminalSystemState
 const stage = { config: { mode: 'real', connection: 'tcp', serial_number: '129123456', host: '101.6.241.172', port: 40303, axes: { x: 1, y: 2, z: 3 }, inverted: { x: false, y: false, z: false }, max_steps: 1000 }, connected: false, error: null, channels: [] }
 beforeEach(() => {
   dom = new JSDOM('<div id="root"/>', { url: 'http://localhost' })
   Object.assign(globalThis, { window: dom.window, document: dom.window.document, Event: dom.window.Event, IS_REACT_ACT_ENVIRONMENT: true })
-  writes = []; failure = false; outputs = Array(8).fill(false)
+  writes = []; failure = false; outputs = Array(8).fill(false); detectedPorts = []
   system = {mode:'simulation',interlock:'disarmed',valve:'closed',pressure_ok:true,adam_connected:true,history_recording:true}
   config = { mode: 'simulation', tpg_connection: 'tcp', tpg_host: '192.168.1.2', tpg_port: 8000, tpg_serial_port: 'COM3', tpg_baudrate: 9600, io_device: 'dam0808d', dam_serial_port: 'COM4', dam_baudrate: 9600, dam_unit_id: 1, adam_host: '', adam_port: 502, adam_unit_id: 1, valve_closed_di: 0, valve_open_di: null, valve_closed_active_high: true, valve_open_active_high: true, open_output: 0 }
   globalThis.fetch = async (url, options) => {
@@ -28,7 +29,7 @@ beforeEach(() => {
       if (path === '/api/config') config = { ...config, ...body.config }
       if (path.startsWith('/api/debug/relays/')) outputs[Number(path.split('/').at(-1))] = body.enabled
     }
-    const data = path.includes('/debug/relays') ? {mode:system.mode,interlock:system.interlock,outputs,valve_output:config.open_output,remaining_s:{}} : path.includes('/stage') ? stage : path.includes('/ports') ? { ports: [] } : path.includes('/hardware/status') ? { tpg: { connected: true, error: null }, io: { connected: true, error: null, inputs: Array(8).fill(false), outputs } } : { config }
+    const data = path.includes('/debug/relays') ? {mode:system.mode,interlock:system.interlock,outputs,valve_output:config.open_output,remaining_s:{}} : path.includes('/stage') ? stage : path.includes('/ports') ? { ports: detectedPorts } : path.includes('/hardware/status') ? { tpg: { connected: true, error: null }, io: { connected: true, error: null, inputs: Array(8).fill(false), outputs } } : { config }
     return new Response(JSON.stringify(data))
   }
   container = document.getElementById('root')!; root = createRoot(container)
@@ -96,6 +97,54 @@ test('terminal caption edits survive tab switches and save no valve or pressure 
 test('independent IO connection never connects gauge or moves stage', async () => {
   await render(); await click('连接I/O')
   assert.deepEqual(writes.map(x => x.path), ['/api/devices/connect-io'])
+})
+
+test('serial suggestions load automatically and do not restrict manual connection parameters', async () => {
+  detectedPorts = [{device:'COM9',description:'CP210x USB bridge'}]
+  await render()
+  assert.ok(container.textContent?.includes('系统识别到：COM9'))
+  assert.equal(container.querySelector('datalist option')?.getAttribute('value'),'COM9')
+  assert.equal(container.querySelector('input[readonly]'),null)
+  await change(field('DAM 串口'),'com12')
+  await change(field('DAM 波特率'),'19200')
+  await change(field('DAM 设备地址'),'7')
+  assert.equal(field('DAM 串口').value,'COM12')
+  assert.deepEqual(writes,[])
+  await click('保存I/O')
+  const values=writes[0].body.config as Record<string,unknown>
+  assert.equal(values.dam_serial_port,'COM12')
+  assert.equal(values.dam_baudrate,19200)
+  assert.equal(values.dam_unit_id,7)
+  assert.deepEqual(writes.map(row=>row.path),['/api/config'])
+})
+
+test('loaded connection drafts remain editable during a status outage while writes stay disabled', async () => {
+  const original=globalThis.fetch
+  globalThis.fetch=async(url,options)=>{
+    if(String(url)==='/api/hardware/status') throw new TypeError('Failed to fetch')
+    return original(url,options)
+  }
+  await render()
+  assert.equal(field('DAM 串口').matches(':disabled'),false)
+  await change(field('DAM 串口'),'COM12')
+  assert.equal(field('DAM 串口').value,'COM12')
+  assert.equal(button('保存I/O').disabled,true)
+  assert.equal(button('连接I/O').disabled,true)
+  assert.ok(container.textContent?.includes('已加载的连接参数仍可编辑'))
+  assert.deepEqual(writes,[])
+  await act(async()=>root.render(<HardwarePanel auth={false} connected/>))
+  assert.equal(field('DAM 串口').matches(':disabled'),true)
+  assert.ok(container.textContent?.includes('需要操作员权限才能修改'))
+})
+
+test('an invalid serial list reports its own error without crashing or blocking manual drafts', async () => {
+  const original=globalThis.fetch
+  globalThis.fetch=async(url,options)=>String(url)==='/api/hardware/ports' ? new Response(JSON.stringify({unexpected:true})) : original(url,options)
+  await render()
+  assert.ok(container.textContent?.includes('后台返回的列表格式异常'))
+  await change(field('DAM 串口'),'COM12')
+  assert.equal(button('保存I/O').disabled,false)
+  assert.deepEqual(writes,[])
 })
 test('errors retain unsaved draft and unauthenticated controls cannot write', async () => {
   await render(); await change(field('DAM 串口'), 'COM3'); failure = true; await click('保存I/O')

@@ -57,6 +57,7 @@ beforeEach(async()=>{
       return new Response(JSON.stringify(resetFailure?{detail:'历史重置失败'}:{ok:true,deleted:6}),{status:resetFailure?503:200,headers:{'Content-Type':'application/json'}})
     }
     if(path.includes('/hardware/status'))return new Response(JSON.stringify({tpg:{connected:true,error:null},io:{connected:true,error:null,inputs:null,outputs:null}}),{headers:{'Content-Type':'application/json'}})
+    if(path.includes('/hardware/ports'))return new Response(JSON.stringify({ports:[]}),{headers:{'Content-Type':'application/json'}})
     if(path.includes('/stage'))return new Response(JSON.stringify({config:{mode:'real',connection:'tcp',serial_number:'129123456',host:'',port:40303,axes:{x:1,y:2,z:3},inverted:{x:false,y:false,z:false},max_steps:1000},connected:false,error:null,channels:[]}),{headers:{'Content-Type':'application/json'}})
     const data=path.includes('/auth/status')?{configured:true,authenticated:true,local:true}:path.includes('/config')?{config}:path.includes('/events')?{events:[],has_more:false}:path.includes('/history')?{rows:historyHasData?[{timestamp:status.timestamp,channel:1,pressure_pa:.001,valid:true,mode:'simulation'}]:[],count:historyHasData?1:0,truncated:false}:status
     return new Response(JSON.stringify(data),{headers:{'Content-Type':'application/json'}})
