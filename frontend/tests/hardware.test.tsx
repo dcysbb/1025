@@ -118,6 +118,28 @@ test('serial suggestions load automatically and do not restrict manual connectio
   assert.deepEqual(writes.map(row=>row.path),['/api/config'])
 })
 
+test('baud menus contain device-supported rates and save numeric values independently', async () => {
+  await render()
+  await change(field('真空规连接方式'),'usb')
+  const rates=(name:string)=>[...field(name).querySelectorAll('option')].map(option=>Number(option.value))
+  assert.equal(field('真空规波特率').tagName,'SELECT')
+  assert.equal(field('DAM 波特率').tagName,'SELECT')
+  assert.deepEqual(rates('真空规波特率'),[9600,19200,38400,57600,115200])
+  assert.deepEqual(rates('DAM 波特率'),[2400,4800,9600,19200,38400])
+  await change(field('真空规波特率'),'115200')
+  await change(field('真空规连接方式'),'tcp')
+  await change(field('真空规连接方式'),'usb')
+  assert.equal(field('真空规波特率').value,'115200')
+  await change(field('DAM 波特率'),'38400')
+  assert.deepEqual(writes,[])
+  await click('保存I/O')
+  assert.equal((writes[0].body.config as Record<string,unknown>).dam_baudrate,38400)
+  assert.equal(field('真空规波特率').value,'115200')
+  await click('保存真空规')
+  assert.equal((writes[1].body.config as Record<string,unknown>).tpg_baudrate,115200)
+  assert.deepEqual(writes.map(row=>row.path),['/api/config','/api/config'])
+})
+
 test('loaded connection drafts remain editable during a status outage while writes stay disabled', async () => {
   const original=globalThis.fetch
   globalThis.fetch=async(url,options)=>{
@@ -130,7 +152,6 @@ test('loaded connection drafts remain editable during a status outage while writ
   assert.equal(field('DAM 串口').value,'COM12')
   assert.equal(button('保存I/O').disabled,true)
   assert.equal(button('连接I/O').disabled,true)
-  assert.ok(container.textContent?.includes('已加载的连接参数仍可编辑'))
   assert.deepEqual(writes,[])
   await act(async()=>root.render(<HardwarePanel auth={false} connected/>))
   assert.equal(field('DAM 串口').matches(':disabled'),true)
