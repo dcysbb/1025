@@ -87,8 +87,9 @@ export default function StagePanel({ auth, connected, configuration = false, onD
       if (mounted.current && mine === actionId.current) {
         accept(next)
         if (path === '/config') setDraft(structuredClone(next.config))
-        if (path === '/connect' || path === '/recover' || path === '/disconnect' || isStop && !next.motion_pending) setUncertain(false)
-        setMessage(isStop ? next.motion_pending ? '已发送停止，等待空闲确认' : '控制器已报告全部通道空闲' : success)
+        if (path === '/connect') setUncertain(!!next.diagnostics?.motion_locked)
+        else if (path === '/recover' || path === '/disconnect' || isStop && !next.motion_pending) setUncertain(false)
+        setMessage(isStop ? next.motion_pending ? '已发送停止，等待空闲确认' : '控制器已报告全部通道空闲' : path === '/connect' && next.motion_pending ? '控制器已连接，运动锁定仍保留' : success)
       }
     } catch (e) {
       if (mounted.current && mine === actionId.current) {
@@ -141,15 +142,15 @@ export default function StagePanel({ auth, connected, configuration = false, onD
       <div className="stage-actions">
         <span className="mode-badge" data-mode={state?.config.mode}>{state?.config.mode === 'simulation' ? '模拟设备' : '真实设备'}</span>
         <span className={`stage-state ${state?.connected && online ? 'stage-state--on' : ''}`}>
-          {!online ? '状态过期 / 等待更新' : state?.connected ? state.motion_pending ? '等待运动确认' : '已连接' : '未连接'}
+          {!online ? '状态过期 / 等待更新' : state?.connected ? state.diagnostics?.motion_locked ? '已连接 · 移动锁定' : state.motion_pending ? '已连接 · 等待运动确认' : '已连接' : '未连接'}
         </span>
-        {!configuration && <button className="button button--quiet" disabled={!writable || busy || stopping || !!state?.error || !state || state.connected}
+        {!configuration && <button className="button button--quiet" disabled={!writable || busy || stopping || !state || state.connected}
           onClick={() => void act('/connect', {}, '位移台已连接')}><Plug size={15}/>连接控制器</button>}
         <button className="button stage-stop" disabled={!auth || stopping || !state?.connected && !state?.error && !uncertain}
           onClick={() => void act('/stop')}><Square size={15}/>{stopping ? '正在停止…' : '全部停止'}</button>
       </div>
       {!configuration && <nav className="stage-section-nav" aria-label="位移台功能导航"><button className="button button--quiet" onClick={() => jumpTo('stage-manual')}>精细控制</button><button className="button button--quiet" onClick={() => jumpTo('stage-controller-tools')}>参数与诊断</button><button className="button button--quiet" onClick={() => jumpTo('stage-movement-history')}>运动记录</button></nav>}
-      {state?.error && state.motion_pending && <p className="stage-header-warning" role="alert">停止尚未确认，移动已锁定。请现场确认静止后恢复连接。</p>}
+      {state?.error && state.motion_pending && <p className="stage-header-warning" role="alert">运动状态未确认，移动已锁定；连接与状态读取不受影响。</p>}
     </section>
     {readError && <div className="inline-error" role="alert">{readError} 当前位移台状态已过期，点动暂停；正在自动重试读取，停止入口保留。</div>}
     {error && <div className="inline-error" role="alert">{error}</div>}

@@ -70,7 +70,7 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
   const available = auth && online && state.connected && !busy && !uncertain && !state.error && idle && !state.motion_pending && !!row?.ready
   const canReadParameters = auth && online && state.connected && !busy && !uncertain && idle && !state.motion_pending && !!row?.ready
   const confirmRow = confirm && confirm.operation !== 'recover' ? state.channels.find(item => item.channel === confirm.channel) : null
-  const canConfirm = confirm?.identity === deviceIdentity && (confirm.operation === 'recover' ? auth && online && !busy && !state.connected && stationary :
+  const canConfirm = confirm?.identity === deviceIdentity && (confirm.operation === 'recover' ? auth && online && !busy && stationary && (state.motion_pending || state.diagnostics?.motion_locked) :
     !blockedFor(confirm.axis) && confirm.channel === state.config.axes[confirm.axis] && confirmRow?.open_loop !== false && (confirm.operation !== 'optimize' || !!confirmRow?.enabled))
   const dirty = draft && parameters && FIELDS.some(({key}) => draft[key] !== String(parameters.values[key]))
   const invalid = !draft || !parameters || FIELDS.some(({key}) => {
@@ -97,7 +97,7 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
     const channelLabel = confirm.operation === 'recover' ? '' : `${confirm.axis.toUpperCase()} / CH${confirm.channel} `
     setConfirm(null)
     await onAct(operation === 'recover' ? '/recover' : '/action', confirm.operation === 'recover' ? {confirmed_stationary: true} : {axis: confirm.axis, operation, confirmed: true},
-      operation === 'zero' ? `${channelLabel}开环命令计数已读回零；未寻找机械原点。` : operation === 'optimize' ? `${channelLabel}性能优化请求已下发，等待控制器状态；可随时全部停止。` : '连接已恢复，请核对通道状态。')
+      operation === 'zero' ? `${channelLabel}开环命令计数已读回零；未寻找机械原点。` : operation === 'optimize' ? `${channelLabel}性能优化请求已下发，等待控制器状态；可随时全部停止。` : '运动锁定已解除。')
   }
   async function importProfile(file?: File) {
     if (!file || !parameters || !available) return
@@ -149,16 +149,16 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
       <div className="stage-diagnostic-grid"><span>通道：{state.diagnostics?.transport || state.config.connection?.toUpperCase() || 'TCP'}</span><span>采样耗时：{state.diagnostics?.latency_ms ?? '—'} ms</span><span>连续读取失败：{state.diagnostics?.read_failures ?? 0}</span><span>有效采样：{state.diagnostics?.sample_count ?? 0}</span></div>
       <p className="stage-note">XA 与控制台应轮流连接。关闭 XA 窗口后若仍有残留进程，也可能占用连接。读取异常暂停操作；控制动作不会自动重发。</p>
       <div className="stage-tool-actions"><button className="button button--quiet" disabled={!auth || !online || busy || !state.connected} onClick={() => void onAct('/disconnect', {}, '位移台已断开。')}><Gauge size={14}/>断开控制器</button>
-      <button className="button button--quiet" disabled={!auth || !online || busy || state.connected || !state.error && !state.diagnostics?.recovery_required} onClick={() => {setStationary(false);setConfirm({operation: 'recover', identity: deviceIdentity})}}>恢复失效连接</button></div>
+      <button className="button button--quiet" disabled={!auth || !online || busy || !state.motion_pending && !state.diagnostics?.motion_locked} onClick={() => {setStationary(false);setConfirm({operation: 'recover', identity: deviceIdentity})}}>解除运动锁定</button></div>
     </Disclosure>
     <StageToolHistory version={historyVersion}/>
     </div>)}
-    {createPortal(<Presence show={!!confirm}>{confirm && <div className="modal-backdrop stage-tool-modal"><section ref={dialogRef} className="login-card glass-panel" role="dialog" aria-modal="true" aria-label={confirm.operation === 'zero' ? '确认开环计数清零' : confirm.operation === 'optimize' ? '确认性能优化' : '确认恢复连接'}>
+    {createPortal(<Presence show={!!confirm}>{confirm && <div className="modal-backdrop stage-tool-modal"><section ref={dialogRef} className="login-card glass-panel" role="dialog" aria-modal="true" aria-label={confirm.operation === 'zero' ? '确认开环计数清零' : confirm.operation === 'optimize' ? '确认性能优化' : '确认解除运动锁定'}>
       <button className="icon-button modal-close" aria-label="取消控制器操作" onClick={() => setConfirm(null)}><X size={17}/></button>
-      <h2>{confirm.operation === 'recover' ? '恢复失效连接' : `${confirm.axis.toUpperCase()} / CH${confirm.channel} ${confirm.operation === 'zero' ? '开环计数清零' : '性能优化'}`}</h2>
-      <p>{confirm.operation === 'zero' ? '这只会把此通道的开环命令计数设为零，不会寻找机械原点，也不会测量当前位置。' : confirm.operation === 'optimize' ? '控制器会自动驱动此通道，通常约 1–2 分钟；实际行程由控制器算法决定，不受点动步数上限限制。请确认负载、行程空间和接线，可随时使用全部停止。' : '仅在现场确认位移台已经静止后释放失效会话并重新连接。必要时先断电重启控制器；恢复不会启用输出或重发之前的动作。'}</p>
+      <h2>{confirm.operation === 'recover' ? '解除运动锁定' : `${confirm.axis.toUpperCase()} / CH${confirm.channel} ${confirm.operation === 'zero' ? '开环计数清零' : '性能优化'}`}</h2>
+      <p>{confirm.operation === 'zero' ? '这只会把此通道的开环命令计数设为零，不会寻找机械原点，也不会测量当前位置。' : confirm.operation === 'optimize' ? '控制器会自动驱动此通道，通常约 1–2 分钟；实际行程由控制器算法决定，不受点动步数上限限制。请确认负载、行程空间和接线，可随时使用全部停止。' : '确认位移台静止后，后台读取全部通道并确认空闲，再解除历史运动锁定；不会启用输出或重发动作。'}</p>
       {confirm.operation === 'recover' && <label className="check-row"><input type="checkbox" checked={stationary} onChange={event => setStationary(event.target.checked)}/>我已现场确认位移台静止</label>}
-      <div className="stage-tool-actions"><button className="button button--quiet" onClick={() => setConfirm(null)}>取消</button><button className="button button--primary" disabled={!canConfirm} onClick={() => void confirmedAction()}>{confirm.operation === 'zero' ? '确认清零' : confirm.operation === 'optimize' ? '确认开始优化' : '确认恢复连接'}</button></div>
+      <div className="stage-tool-actions"><button className="button button--quiet" onClick={() => setConfirm(null)}>取消</button><button className="button button--primary" disabled={!canConfirm} onClick={() => void confirmedAction()}>{confirm.operation === 'zero' ? '确认清零' : confirm.operation === 'optimize' ? '确认开始优化' : '确认解除运动锁定'}</button></div>
     </section></div>}</Presence>, document.body)}
   </>
 }

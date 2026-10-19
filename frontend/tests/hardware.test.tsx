@@ -99,6 +99,26 @@ test('independent IO connection never connects gauge or moves stage', async () =
   assert.deepEqual(writes.map(x => x.path), ['/api/devices/connect-io'])
 })
 
+test('stage connects directly regardless of vacuum interlock or previous motion uncertainty', async () => {
+  system.interlock = 'fault'
+  system.pressure_ok = false
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    const path = String(url)
+    if (path.startsWith('/api/stage')) {
+      if (options?.method === 'POST') writes.push({path,body:JSON.parse(String(options.body))})
+      return new Response(JSON.stringify({...stage,connected:options?.method === 'POST',motion_pending:true,error:'上次停止未确认'}))
+    }
+    return original(url, options)
+  }
+  await render()
+  assert.equal(button('连接控制器').disabled, false)
+  await click('连接控制器')
+  assert.deepEqual(writes, [{path:'/api/stage/connect',body:{}}])
+  assert.equal(document.querySelector('[role="dialog"]'), null)
+  assert.ok(container.textContent?.includes('控制器已连接，运动锁定仍保留'))
+})
+
 test('serial suggestions load automatically and do not restrict manual connection parameters', async () => {
   detectedPorts = [{device:'COM9',description:'CP210x USB bridge'}]
   await render()

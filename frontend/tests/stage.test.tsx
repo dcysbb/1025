@@ -164,7 +164,7 @@ test('lost communication during optimization never presents a running or waiting
   await render()
   assert.ok(container.querySelector('.stage-optimization-progress')?.textContent?.includes('性能优化结果未确认'))
   assert.ok(!container.querySelector('.stage-optimization-progress')?.textContent?.includes('等待控制器开始'))
-  assert.ok(container.querySelector('.stage-header-warning')?.textContent?.includes('停止尚未确认'))
+  assert.ok(container.querySelector('.stage-header-warning')?.textContent?.includes('运动状态未确认'))
   assert.equal(button('全部停止').disabled, false)
   for (const axis of ['X', 'Y', 'Z']) assert.equal(button(`${axis} 轴 Optimize · 性能优化`).disabled, true)
   assert.deepEqual(writes, [])
@@ -327,15 +327,40 @@ test('drive parameters require explicit reads, validate limits and apply only se
   assert.deepEqual(writes,[{path:'/api/stage/parameters/x',body:{forward_amplitude:80,reverse_amplitude:90,step_rate:5000,acceleration:1000}}])
 })
 
-test('session recovery requires the stationary acknowledgement and never enables output', async () => {
+test('motion unlock requires the stationary acknowledgement and never enables output', async () => {
   state.connected = false
   state.error = '通信超时，停止未确认'
+  state.motion_pending = true
   await render()
-  await act(async () => { button('连接诊断与恢复').click(); button('恢复失效连接').click() })
-  assert.equal(button('确认恢复连接').disabled,true)
+  await act(async () => { button('连接诊断与恢复').click(); button('解除运动锁定').click() })
+  assert.equal(button('确认解除运动锁定').disabled,true)
   await act(async () => { (document.querySelector('[role="dialog"] input[type="checkbox"]') as HTMLInputElement).click() })
-  await act(async () => { button('确认恢复连接').click(); await new Promise(r => setTimeout(r,0)) })
+  await act(async () => { button('确认解除运动锁定').click(); await new Promise(r => setTimeout(r,0)) })
   assert.deepEqual(writes,[{path:'/api/stage/recover',body:{confirmed_stationary:true}}])
+})
+
+test('hardware connection directly connects with a previous motion lock and no confirmation dialog', async () => {
+  state.error = '上次停止未确认'
+  state.motion_pending = true
+  state.channels = []
+  await render(true, true)
+  assert.equal(button('连接控制器').disabled, false)
+  await act(async () => { button('连接控制器').click(); button('连接控制器').click(); await new Promise(r => setTimeout(r,0)) })
+  assert.deepEqual(writes, [{path:'/api/stage/connect',body:{}}])
+  assert.equal(document.querySelector('[role="dialog"]'), null)
+})
+
+test('stage page also allows direct connection despite a previous error without unlocking motion', async () => {
+  state.error = '停止未确认'
+  state.motion_pending = true
+  await render()
+  assert.equal(button('连接控制器').disabled, false)
+  await act(async () => { state.connected = true; button('连接控制器').click(); await new Promise(r => setTimeout(r,0)) })
+  assert.deepEqual(writes, [{path:'/api/stage/connect',body:{}}])
+  assert.equal(button('X 轴正向移动').disabled, true)
+  assert.equal(document.querySelector('[role="dialog"]'), null)
+  await act(async () => { button('连接诊断与恢复').click(); button('解除运动锁定').click() })
+  assert.equal(button('确认解除运动锁定').disabled, true)
 })
 
 test('read-only users cannot enable, zero, optimize or change drive parameters', async () => {

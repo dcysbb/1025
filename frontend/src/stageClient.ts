@@ -17,7 +17,7 @@ export type StageState = {
   error: string | null
   motion_pending: boolean
   operation?: {kind: string; axis: Axis; channel: number; phase?: 'waiting' | 'running'; elapsed_s?: number} | null
-  diagnostics?: {transport: string; latency_ms: number | null; sample_age_s: number | null; read_failures: number; sample_count: number; recovery_required: boolean}
+  diagnostics?: {transport: string; latency_ms: number | null; sample_age_s: number | null; read_failures: number; sample_count: number; recovery_required: boolean; motion_locked?: boolean}
   channels: { channel: number; moving: boolean | null; enabled: boolean; stage: string; ready: boolean; error: string | null; optimizing?: boolean; optimized?: boolean; open_loop?: boolean; command_count?: number | null; power_ok_raw?: boolean | null }[]
 }
 export type DriveParameters = {forward_amplitude: number; reverse_amplitude: number; step_rate: number; acceleration: number}
@@ -37,7 +37,7 @@ export async function stageApi<T>(path: string, method = 'GET', body?: unknown, 
   const operation = move ? `${move.axis?.toUpperCase()} 轴${move.direction === 1 ? '正向' : '反向'}点动 ${move.steps} 步` :
     action ? `${action.axis?.toUpperCase()} 轴${actionNames[action.operation ?? ''] ?? '控制操作'}` :
     parameters ? `${parameters[1].toUpperCase()} 轴${method === 'GET' ? '读取' : '应用'}驱动参数` :
-    path === '/api/stage/recover' ? '恢复 PDXC3 失效连接' : undefined
+    path === '/api/stage/recover' ? '解除 PDXC3 运动锁定' : undefined
   try {
     return await apiRequest<T>(path, {
       method, timeoutMs: timeout,

@@ -89,6 +89,6 @@ test('stage tool failures identify the selected axis and operation without repla
   await assert.rejects(stageApi('/api/stage/action', 'POST', {axis:'z', operation:'optimize', confirmed:true}), /Z 轴性能优化结果未确认/)
   await assert.rejects(stageApi('/api/stage/parameters/y', 'GET'), /Y 轴读取驱动参数失败/)
   await assert.rejects(stageApi('/api/stage/parameters/x', 'PUT', {step_rate:1600}), /X 轴应用驱动参数结果未确认/)
-  await assert.rejects(stageApi('/api/stage/recover', 'POST', {confirmed_stationary:true}), /恢复 PDXC3 失效连接结果未确认/)
+  await assert.rejects(stageApi('/api/stage/recover', 'POST', {confirmed_stationary:true}), /解除 PDXC3 运动锁定结果未确认/)
   assert.equal(calls, 4)
 })

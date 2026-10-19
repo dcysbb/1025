@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch, call
 
 from pydantic import ValidationError
-from app.stage import StageAction, StageConfig, StageController, StageError, StageMove, StageParameters
+from app.stage import SimulatedStage, StageAction, StageConfig, StageController, StageError, StageMove, StageParameters
 from app.drivers.thorlabs_pdxc3 import Pdxc3Driver
 from app.drivers.isolated_pdxc3 import IsolatedPdxc3Driver, NativeCallError
 
@@ -70,13 +70,133 @@ class StageToolsTests(unittest.IsolatedAsyncioTestCase):
         restarted = StageController(Path(self.temp.name), Mock())
         self.assertTrue(restarted.motion_pending)
         self.assertTrue(restarted.snapshot()['diagnostics']['recovery_required'])
-        for action in (restarted.connect('test'), restarted.configure(StageConfig(mode='simulation'), 'test'), restarted.disconnect('test'), restarted.recover(False, 'test')):
+        for action in (restarted.configure(StageConfig(mode='simulation'), 'test'), restarted.disconnect('test'), restarted.recover(False, 'test')):
             with self.assertRaises(StageError):
                 await action
+        journal = restarted.recovery_path.read_bytes()
+        result = await restarted.connect('test')
+        self.assertTrue(result['connected'])
+        self.assertTrue(result['diagnostics']['motion_locked'])
+        self.assertEqual(restarted.recovery_path.read_bytes(), journal)
+        await restarted._poll_once()
+        with self.assertRaises(StageError):
+            await restarted.move(StageMove(axis='x', direction=1, steps=1), 'test')
         await restarted.recover(True, 'test')
         self.assertFalse(restarted.recovery_path.exists())
         self.assertFalse(restarted.motion_pending)
         await restarted.disconnect('test')
+
+    async def test_direct_reconnect_releases_stale_session_but_preserves_motion_lock(self):
+        old = self.stage.driver
+        old.close = Mock(side_effect=OSError('stale session'))
+        old.stop = Mock()
+        self.stage.connected = False
+        self.stage._uncertain = self.stage.motion_pending = self.stage._must_stop = True
+        self.stage.error = 'previous action unconfirmed'
+        self.stage._remember_fault()
+        journal = self.stage.recovery_path.read_bytes()
+        driver = SimulatedStage()
+        for name in ('connect', 'status', 'stop', 'move', 'enable', 'zero', 'optimize', 'close'):
+            setattr(driver, name, Mock(wraps=getattr(driver, name)))
+        self.stage.driver_factory = lambda _: driver
+        result = await self.stage.connect('test')
+        self.assertTrue(result['connected'])
+        self.assertTrue(result['motion_pending'])
+        self.assertTrue(result['diagnostics']['motion_locked'])
+        self.assertEqual(len(result['channels']), 3)
+        old.close.assert_called_once()
+        old.stop.assert_not_called()
+        driver.connect.assert_called_once()
+        for name in ('stop', 'move', 'enable', 'zero', 'optimize'):
+            getattr(driver, name).assert_not_called()
+        await self.stage._poll_once()
+        self.assertEqual(self.stage.recovery_path.read_bytes(), journal)
+        self.assertTrue(self.stage.motion_pending)
+        for action in (self.stage.move(StageMove(axis='x', direction=1, steps=1), 'test'),
+                       self.stage.control(StageAction(axis='x', operation='enable'), 'test')):
+            with self.assertRaises(StageError):
+                await action
+        await self.stage.recover(True, 'test')
+        self.assertIs(self.stage.driver, driver)
+        driver.close.assert_not_called()
+        driver.stop.assert_not_called()
+        self.assertFalse(self.stage.snapshot()['diagnostics']['motion_locked'])
+
+    async def test_failed_direct_reconnect_keeps_journal_and_releases_failed_driver(self):
+        await self.stage.disconnect('test')
+        self.stage._uncertain = self.stage.motion_pending = True
+        self.stage.error = 'previous stop unconfirmed'
+        self.stage._remember_fault()
+        journal = self.stage.recovery_path.read_bytes()
+        driver = Mock()
+        driver.connect.side_effect = OSError('USB device missing')
+        self.stage.driver_factory = lambda _: driver
+        with self.assertRaisesRegex(StageError, 'USB device missing'):
+            await self.stage.connect('test')
+        self.assertFalse(self.stage.connected)
+        self.assertTrue(self.stage.motion_pending)
+        self.assertEqual(self.stage.recovery_path.read_bytes(), journal)
+        driver.close.assert_called_once()
+        driver.stop.assert_not_called()
+        driver.move.assert_not_called()
+        # Teardown has no live session to stop; preserve the failed state above.
+        self.stage._uncertain = self.stage.motion_pending = False
+
+    async def test_connect_reads_moving_channels_without_requiring_stationary_or_sending_stop(self):
+        await self.stage.disconnect('test')
+        driver = SimulatedStage()
+        rows = driver.status()
+        rows[0]['moving'] = True
+        driver.status = Mock(return_value=rows)
+        driver.stop = Mock()
+        self.stage.driver_factory = lambda _: driver
+        result = await self.stage.connect('test')
+        self.assertTrue(result['connected'])
+        self.assertTrue(result['channels'][0]['moving'])
+        driver.stop.assert_not_called()
+        with self.assertRaises(StageError):
+            await self.stage.move(StageMove(axis='x', direction=1, steps=1), 'test')
+
+    async def test_refused_motion_unlock_keeps_readable_connection_and_existing_lock(self):
+        self.stage._uncertain = self.stage.motion_pending = True
+        self.stage.error = 'previous motion unconfirmed'
+        self.stage._remember_fault()
+        journal = self.stage.recovery_path.read_bytes()
+        rows = self.stage.driver.status()
+        rows[0]['moving'] = True
+        self.stage.driver.status = Mock(return_value=rows)
+        self.stage.driver.stop = Mock()
+        with self.assertRaisesRegex(StageError, '尚未报告全部通道空闲'):
+            await self.stage.recover(True, 'test')
+        self.assertTrue(self.stage.connected)
+        self.assertTrue(self.stage.snapshot()['diagnostics']['motion_locked'])
+        self.assertEqual(self.stage.recovery_path.read_bytes(), journal)
+        self.stage.driver.stop.assert_not_called()
+
+    async def test_parallel_connection_is_rejected_without_queuing_moves_or_configuration(self):
+        await self.stage.disconnect('test')
+        driver = SimulatedStage()
+        entered, release = threading.Event(), threading.Event()
+        def connect():
+            entered.set()
+            if not release.wait(2):
+                raise TimeoutError('test timed out')
+        driver.connect = Mock(side_effect=connect)
+        driver.move = Mock()
+        self.stage.driver_factory = lambda _: driver
+        connecting = asyncio.create_task(self.stage.connect('test'))
+        self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+        try:
+            for action in (self.stage.connect('other'),
+                           self.stage.configure(StageConfig(mode='simulation'), 'other'),
+                           self.stage.move(StageMove(axis='x', direction=1, steps=1), 'other')):
+                with self.assertRaises(StageError):
+                    await action
+        finally:
+            release.set()
+        self.assertTrue((await connecting)['connected'])
+        driver.connect.assert_called_once()
+        driver.move.assert_not_called()
 
     async def test_motion_is_journaled_before_submission_and_cleared_only_after_idle_sample(self):
         await self.stage.move(StageMove(axis='x', direction=1, steps=1), 'test')

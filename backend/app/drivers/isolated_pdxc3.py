@@ -71,7 +71,7 @@ class IsolatedPdxc3Driver:
             self.pipe.send((name, args))
             if not self.pipe.poll(self.DEADLINES.get(name, 8)):
                 self._dispose()
-                raise RuntimeError(f"XA {name} 原生调用超时，已释放失效本机会话；没有自动重发，需确认设备静止后恢复连接")
+                raise RuntimeError(f"XA {name} 原生调用超时，已释放失效本机会话；未自动重发，可直接重新连接读取状态，运动锁定需单独解除")
             ok, result, diagnostic = self.pipe.recv()
             if not ok:
                 raise NativeCallError(result, diagnostic.get("error_code"))
@@ -81,7 +81,7 @@ class IsolatedPdxc3Driver:
             return result
         except (EOFError, BrokenPipeError, OSError) as exc:
             self._dispose()
-            raise RuntimeError("XA 驱动通信中断，未重发指令，请确认设备静止后恢复连接") from exc
+            raise RuntimeError("XA 驱动通信中断，未重发指令；可直接重新连接读取状态，运动锁定需单独解除") from exc
 
     def connect(self):
         for attempt in range(2):

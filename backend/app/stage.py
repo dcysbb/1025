@@ -97,6 +97,8 @@ class StageController:
         self._motion_deadline = 0
         self._optimization_seen_busy = False
         self._recovering = False
+        self._connecting = False
+        self._motion_lock_reason = None
         self.recovery_path = root / "stage-recovery.json"
         if self.recovery_path.exists():
             try:
@@ -104,7 +106,8 @@ class StageController:
             except (ValueError, OSError, AttributeError):
                 reason = "恢复记录无法读取，不能确认上次动作结果"
             self._uncertain = self.motion_pending = self._must_stop = True
-            self.error = f"上次操作未确认，重启后仍保持移动锁定：{reason}。请现场确认静止后恢复连接"
+            self._motion_lock_reason = reason
+            self.error = f"上次操作未确认，移动已锁定：{reason}"
 
     def _save_recovery(self, reason):
         self.recovery_path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,13 +117,15 @@ class StageController:
         temporary.replace(self.recovery_path)
 
     def _remember_fault(self):
+        self._motion_lock_reason = self.error or "动作结果或停止未确认"
         try:
-            self._save_recovery(self.error or "动作结果或停止未确认")
+            self._save_recovery(self._motion_lock_reason)
         except OSError as exc:
             self.error = f"{self.error}；恢复记录保存失败：{exc}"
 
     def _clear_recovery(self):
         self.recovery_path.unlink(missing_ok=True)
+        self._motion_lock_reason = None
 
     def snapshot(self):
         return {"config": self.config.model_dump(), "connected": self.connected,
@@ -134,7 +139,8 @@ class StageController:
                     "latency_ms": getattr(self.driver, "last_latency_ms", None),
                     "sample_age_s": None if self._last_sample is None else round(time.monotonic() - self._last_sample, 2),
                     "read_failures": self._read_failures, "sample_count": self._sample_count,
-                    "recovery_required": self._uncertain or self.driver is not None and not self.connected}}
+                    "recovery_required": self._uncertain or self.driver is not None and not self.connected,
+                    "motion_locked": self._uncertain}}
 
     @staticmethod
     def _idle(channels):
@@ -165,11 +171,11 @@ class StageController:
 
     async def configure(self, config: StageConfig, actor):
         if self._uncertain:
-            raise StageError("上次操作或停止未确认，不能通过修改配置解除移动锁定；请现场确认静止后恢复连接")
-        if self._recovering:
+            raise StageError("上次操作或停止未确认，不能通过修改配置解除移动锁定；可直接连接，确认静止后解除运动锁定")
+        if self._recovering or self._connecting:
             raise StageError("连接恢复正在进行，请等待后再修改配置")
         async with self._lock:
-            if self._recovering:
+            if self._recovering or self._connecting:
                 raise StageError("连接恢复正在进行，请等待后再修改配置")
             if self.driver is not None:
                 raise StageError("请先断开位移台，再修改连接或轴映射")
@@ -189,52 +195,73 @@ class StageController:
             return self.snapshot()
 
     async def connect(self, actor, *, _recovery=False):
-        if self._uncertain and not _recovery:
-            raise StageError("上次操作或停止未确认，请现场确认静止后使用恢复连接")
         if self._recovering and not _recovery:
             raise StageError("连接恢复正在进行，请勿重复连接")
-        async with self._lock:
-            if self._recovering and not _recovery:
-                raise StageError("连接恢复正在进行，请勿重复连接")
-            if self.driver is not None:
-                raise StageError("请先断开现有位移台连接")
-            if self.config.mode == "real" and not self.config.serial_number:
-                raise StageError("请先填写 PDXC3 序列号")
-            if self.driver_factory:
-                driver = self.driver_factory(self.config)
-            elif self.config.mode == "simulation":
-                driver = SimulatedStage()
-            else:
-                from .drivers.isolated_pdxc3 import IsolatedPdxc3Driver
-                driver = IsolatedPdxc3Driver(self.config.serial_number, self.config.host, self.config.port,
-                                     connection=self.config.connection)
-            try:
-                await self._call(driver.connect)
-                channels = await self._call(driver.status)
-            except (Exception, asyncio.CancelledError) as exc:
+        if self._connecting or self._move_admitting or self._stopping_count or self._disconnecting_count:
+            raise StageError("有操作正在处理，请等待后再连接")
+        if self.connected:
+            raise StageError("位移台已连接")
+        self._connecting = True
+        try:
+            if self._poll_task:
+                self._poll_task.cancel()
                 try:
-                    await self._call(driver.close)
-                except Exception:
+                    await self._poll_task
+                except asyncio.CancelledError:
                     pass
-                if isinstance(exc, asyncio.CancelledError):
-                    raise
-                self.error = str(exc)
-                raise StageError(self.error) from exc
-            self.driver = driver
-            self.connected = True
-            self.error = None
-            self.channels = channels
-            self._last_sample = time.monotonic()
-            self._read_failures = 0
-            self._sample_count = 1
-            self.operation = None
-            self.motion_pending = False
-            self._parameter_error = None
-            self._motion_deadline = 0
-            self.event("stage_connect", "info", "位移台已连接", actor,
-                       {"mode": self.config.mode, "serial_number": self.config.serial_number})
-            self._poll_task = asyncio.create_task(self._poll())
-            return self.snapshot()
+                self._poll_task = None
+            async with self._lock:
+                return await self._connect_locked(actor)
+        finally:
+            self._connecting = False
+
+    async def _connect_locked(self, actor):
+        # Reconnecting only replaces a failed communication session. It must
+        # neither clear an uncertain motion journal nor issue a stop/move.
+        old, self.driver = self.driver, None
+        if old:
+            try:
+                await self._call(old.close)
+            except Exception as exc:
+                self.event("stage_connect", "warning", "失效本机会话已释放，设备断开应答未确认", actor, {"reason": str(exc)})
+        if self.config.mode == "real" and not self.config.serial_number:
+            raise StageError("请先填写 PDXC3 序列号")
+        if self.driver_factory:
+            driver = self.driver_factory(self.config)
+        elif self.config.mode == "simulation":
+            driver = SimulatedStage()
+        else:
+            from .drivers.isolated_pdxc3 import IsolatedPdxc3Driver
+            driver = IsolatedPdxc3Driver(self.config.serial_number, self.config.host, self.config.port,
+                                 connection=self.config.connection)
+        try:
+            await self._call(driver.connect)
+            channels = await self._call(driver.status)
+        except (Exception, asyncio.CancelledError) as exc:
+            try:
+                await self._call(driver.close)
+            except Exception:
+                pass
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            self.error = str(exc)
+            raise StageError(self.error) from exc
+        self.driver = driver
+        self.connected = True
+        self.error = f"上次操作未确认，移动已锁定：{self._motion_lock_reason or '动作或停止状态未确认'}" if self._uncertain else None
+        self.channels = channels
+        self._last_sample = time.monotonic()
+        self._read_failures = 0
+        self._sample_count = 1
+        self.operation = None
+        self.motion_pending = self._uncertain
+        self._parameter_error = None
+        self._motion_deadline = 0
+        self.event("stage_connect", "info", "位移台已连接", actor,
+                   {"mode": self.config.mode, "serial_number": self.config.serial_number,
+                    "motion_locked": self._uncertain})
+        self._poll_task = asyncio.create_task(self._poll())
+        return self.snapshot()
 
     async def _poll(self):
         while True:
@@ -261,7 +288,7 @@ class StageController:
                     self.channels = await self._call(self.driver.status)
                     self.connected = False
                     self._uncertain = True
-                    self.error = "运动超过预期时间，已请求全部停止；请检查实际行程并确认静止后恢复连接"
+                    self.error = "运动超过预期时间，已请求全部停止；请检查实际行程并确认静止后解除运动锁定"
                     self._remember_fault()
                     self.event("stage_fault", "error", self.error, "system")
                     return False
@@ -304,7 +331,7 @@ class StageController:
     async def move(self, command: StageMove, actor):
         # Reserve admission before awaiting the SDK lock. A second HTTP request
         # must be rejected, never queued behind a move or stop.
-        if self._recovering or self._move_admitting or self.motion_pending or self._uncertain or self._stopping_count or self._disconnecting_count:
+        if self._recovering or self._connecting or self._move_admitting or self.motion_pending or self._uncertain or self._stopping_count or self._disconnecting_count:
             reason = "请等待当前移动或停止确认后再移动"
             self._move_event(command, actor, "rejected", reason)
             raise StageError(reason)
@@ -388,6 +415,7 @@ class StageController:
                 if not self._must_stop:
                     self._clear_recovery()
                     self._uncertain = False
+                    self.error = self._parameter_error
                     if self.operation:
                         self.event("stage_action", "warning", "优化已被全部停止；未判定为优化完成", actor,
                             {"axis": self.operation["axis"], "channel": self.operation["channel"],
@@ -406,7 +434,7 @@ class StageController:
             return self.snapshot()
 
     async def disconnect(self, actor="system"):
-        if self._recovering:
+        if self._recovering or self._connecting:
             raise StageError("连接恢复正在进行，请等待；全部停止仍可使用")
         self._disconnecting_count += 1
         self._stop_epoch += 1
@@ -417,7 +445,7 @@ class StageController:
 
     async def _disconnect_locked(self, actor):
         if self.driver is None and self._uncertain:
-            raise StageError("停止未确认，断开不能解除移动锁定；请现场确认静止后恢复连接")
+            raise StageError("停止未确认，断开不能解除移动锁定；可直接连接并读取状态")
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -457,10 +485,10 @@ class StageController:
 
     async def recover(self, confirmed_stationary, actor):
         if not confirmed_stationary:
-            raise StageError("请先现场确认位移台已静止；必要时断电重启控制器，再恢复连接")
-        if self.connected:
-            raise StageError("连接仍有效，请先停止并断开，再恢复")
-        if self._recovering or self._move_admitting or self._stopping_count or self._disconnecting_count:
+            raise StageError("请先现场确认位移台已静止，再解除运动锁定；连接和状态读取无需此确认")
+        if self.connected and not self._uncertain:
+            raise StageError("连接仍有效，没有需要解除的运动锁定")
+        if self._recovering or self._connecting or self._move_admitting or self._stopping_count or self._disconnecting_count:
             raise StageError("有操作正在处理，请等待")
         self._recovering = True
         try:
@@ -469,33 +497,25 @@ class StageController:
             self._recovering = False
 
     async def _recover_confirmed(self, actor):
-        if self._poll_task:
-            self._poll_task.cancel()
-            try:
-                await self._poll_task
-            except asyncio.CancelledError:
-                pass
-            self._poll_task = None
-        async with self._lock:
-            old = self.driver
-            self.driver = None
-            if old:
-                try:
-                    await self._call(old.close)
-                except Exception as exc:
-                    self.event("stage_recovery", "warning", "失效本机会话已释放，设备应答未确认", actor, {"reason": str(exc)})
-            self._must_stop = False
-            self.motion_pending = False
-            self._uncertain = False
-            self._parameter_error = None
         try:
-            result = await self.connect(actor, _recovery=True)
-            if not self._idle(self.channels):
-                await self.stop(actor)
-                raise StageError("重连后发现运动或状态未知，已请求停止，请再次检查")
-            self.event("stage_recovery", "warning", "现场确认静止后重新连接；未启用输出或重发动作", actor)
-            self._clear_recovery()
-            return result
+            if not self.connected:
+                await self.connect(actor, _recovery=True)
+            async with self._lock:
+                self.channels = await self._call(self.driver.status)
+                if not self._idle(self.channels):
+                    raise StageError("控制器尚未报告全部通道空闲，请停止后再解除运动锁定")
+                self._clear_recovery()
+                self._uncertain = self.motion_pending = self._must_stop = False
+                self.error = self._parameter_error = None
+                self.operation = None
+                self._motion_deadline = 0
+                self._last_sample = time.monotonic()
+                self.event("stage_recovery", "warning", "现场确认静止且状态读回空闲，运动锁定已解除；未启用输出或重发动作", actor)
+                return self.snapshot()
+        except StageError:
+            # A refused unlock is not a failed connection. Keep the readable
+            # session and existing journal when channels are still moving.
+            raise
         except Exception:
             self.connected = False
             self._uncertain = True
@@ -505,7 +525,7 @@ class StageController:
 
     def _require_axis(self, axis):
         if not self.connected or self.driver is None or self._uncertain:
-            raise StageError("位移台未连接或结果未确认，请先恢复连接")
+            raise StageError("位移台未连接或运动结果未确认，请连接并检查运动锁定")
         channel = self.config.axes[axis]
         target = next((row for row in self.channels if row["channel"] == channel), None)
         if not target or not target.get("ready"):
@@ -513,7 +533,7 @@ class StageController:
         return channel
 
     async def parameters(self, axis, values=None, actor="operator"):
-        if self._recovering or self._move_admitting or self.motion_pending or self._stopping_count or self._disconnecting_count:
+        if self._recovering or self._connecting or self._move_admitting or self.motion_pending or self._stopping_count or self._disconnecting_count:
             raise StageError("请等待运动、优化或停止结束后再读取或应用参数")
         self._move_admitting = True
         try:
@@ -557,7 +577,7 @@ class StageController:
             return result
 
     async def control(self, command: StageAction, actor):
-        if self._recovering or self._move_admitting or self.motion_pending or self._stopping_count or self._disconnecting_count:
+        if self._recovering or self._connecting or self._move_admitting or self.motion_pending or self._stopping_count or self._disconnecting_count:
             raise StageError("请等待当前操作或发送全部停止")
         if command.operation in ("zero", "optimize") and not command.confirmed:
             raise StageError("请确认开环计数清零或自动优化的操作说明")
