@@ -278,6 +278,29 @@ test('debug timed shutoff is opt-in',async()=>{
   assert.equal(debugCalls.length,1)
 })
 
+test('reverse valve debug requires acknowledgement for release-open while energize-close remains available',async()=>{
+  const original=globalThis.fetch
+  globalThis.fetch=async(url,options)=>{
+    const response=await original(url,options)
+    if(String(url).includes('/debug/relays'))return new Response(JSON.stringify({...await response.json(),valve_output:0,valve_open_on_energized:false}))
+    return response
+  }
+  await click(byText('Debug'))
+  assert.equal(byLabel('开启 OUT1').disabled,false)
+  assert.equal(byLabel('关闭 OUT1').disabled,true)
+  assert.ok(container.textContent?.includes('吸合（关阀）'))
+  assert.ok(container.textContent?.includes('释放（开阀）'))
+  await click(byLabel('开启 OUT1'))
+  const acknowledgement=[...container.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find(node=>node.parentElement?.textContent?.includes('已确认设备可以动作'))!
+  await click(acknowledgement)
+  assert.equal(byLabel('关闭 OUT1').disabled,false)
+  await click(byLabel('关闭 OUT1'))
+  await act(async()=>Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify({...status,interlock:'fault'})}))
+  assert.equal(byLabel('关闭 OUT1').disabled,true)
+  assert.equal(byLabel('开启 OUT1').disabled,false)
+  assert.deepEqual(debugCalls.map(row=>row.enabled),[true,false])
+})
+
 test('fault acknowledgement uses clear-fault without automatically arming',async()=>{
   await act(async()=>{Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify({...status,interlock:'fault',trip_reason:'关闭位置反馈超时'})})})
   await click(byText('联锁控制'))

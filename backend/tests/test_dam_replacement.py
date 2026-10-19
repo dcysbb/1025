@@ -102,3 +102,15 @@ class DamReplacementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.engine.interlock, 'fault')
         self.device.close.assert_awaited_once()
 
+    async def test_reverse_mapping_requires_close_coil_state_before_adopting_replacement(self):
+        self.engine.config.valve_open_on_energized = False
+        with self.assertRaises(InterlockError):
+            await self.engine.replace_dam('COM9', True, True)
+        self.assertEqual(self.engine.config.dam_serial_port, 'COM5')
+        self.device.read_outputs.return_value = [True] + [False] * 7
+        await self.engine.replace_dam('COM9', True, True)
+        self.assertEqual(self.engine.config.dam_serial_port, 'COM9')
+        self.assertEqual(self.engine.interlock, 'fault')
+        self.assertTrue(self.engine._io_manual_reset_required)
+        self.device.write_output.assert_not_awaited()
+

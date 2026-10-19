@@ -122,6 +122,7 @@ class InterlockEngine:
         # None tracks a held manual output without an automatic shutoff timer.
         self._debug_deadlines: dict[int, Optional[float]] = {}
         self._debug_sim_outputs = [False] * 8
+        self._debug_sim_outputs[self.config.open_output] = not self.config.valve_open_on_energized
         self._last_io_read = 0.0
         self._next_io_poll = 0.0
         self._next_unit_check = 0.0
@@ -398,12 +399,23 @@ class InterlockEngine:
             return "阀位反馈冲突仍未恢复"
         return None
 
+    def _valve_relay_state(self, opened: bool, config: Optional[AppConfig] = None) -> bool:
+        return opened == (config or self.config).valve_open_on_energized
+
+    def _debug_closed_state(self, channel: int) -> bool:
+        return self._valve_relay_state(False) if channel == self.config.open_output else False
+
+    async def _write_valve_request(self, opened: bool) -> None:
+        await self._write_output(self.config.open_output, self._valve_relay_state(opened))
+        self._open_output = opened
+
     async def _write_output(self, channel: int, value: bool) -> None:
         if self.mode == "simulation":
             if channel == self.config.open_output:
-                self._open_output = value
+                self._debug_sim_outputs[channel] = value
+                self._open_output = value == self.config.valve_open_on_energized
                 now = time.monotonic()
-                if value:
+                if self._open_output:
                     self._sim_close_after = 0.0
                     self._sim_open_after = now + 0.45
                 else:
@@ -418,6 +430,7 @@ class InterlockEngine:
 
     async def _safe_open_output(self) -> None:
         if self.mode == "simulation":
+            self._debug_sim_outputs[self.config.open_output] = self._valve_relay_state(False)
             self._open_output = False
             self._off_retry_pending = False
             self._sim_open_after = 0.0
@@ -425,7 +438,7 @@ class InterlockEngine:
             return
         if self.adam:
             try:
-                await self._write_output(self.config.open_output, False)
+                await self._write_valve_request(False)
                 self._open_output = False
                 self._off_retry_pending = False
             except (ModbusError, OSError) as exc:
@@ -497,7 +510,7 @@ class InterlockEngine:
         if self.interlock not in ("disarmed", "ready"):
             raise InterlockError("联锁当前状态不允许启用")
         try:
-            await self._write_output(self.config.open_output, False)
+            await self._write_valve_request(False)
             if self.mode == "real":
                 await self._poll_io()
                 await self._poll_tpg()
@@ -545,10 +558,10 @@ class InterlockEngine:
                     await self._poll_io()
             await self._clear_debug_outputs()
             if self.mode == "real":
-                await self._write_output(self.config.open_output, False)
+                await self._write_valve_request(False)
                 await self._poll_io()
             else:
-                await self._write_output(self.config.open_output, False)
+                await self._write_valve_request(False)
         except (ModbusError, OSError) as exc:
             self._adam_connected = False
             self._io_error = str(exc)
@@ -589,7 +602,7 @@ class InterlockEngine:
         if self.mode == "real":
             if not self.adam or not self.config.fail_closed_confirmed:
                 raise InterlockError("真实硬件没有就绪")
-            await self._write_output(self.config.open_output, False)
+            await self._write_valve_request(False)
             await self._poll_io()
             await self._poll_tpg()
             self._check_fresh()
@@ -622,7 +635,7 @@ class InterlockEngine:
         if self.status.valve != "closed":
             raise InterlockError("只有确认阀门关闭后才能发送开阀命令")
         try:
-            await self._write_output(self.config.open_output, True)
+            await self._write_valve_request(True)
         except (ModbusError, OSError) as exc:
             await self.trip(str(exc), kind="open_output_failed", fault=True)
             raise InterlockError(str(exc)) from exc
@@ -666,16 +679,19 @@ class InterlockEngine:
             else:
                 await self._safe_open_output()
             old = self.config
+            polarity_changed = old.valve_open_on_energized != config.valve_open_on_energized
+            if polarity_changed:
+                config.fail_closed_confirmed = False
             routing_changed = any(getattr(old, key) != getattr(config, key) for key in (
                 "io_device", "dam_serial_port", "dam_baudrate", "dam_unit_id",
-                "adam_host", "adam_port", "adam_unit_id", "open_output"))
+                "adam_host", "adam_port", "adam_unit_id", "open_output", "valve_open_on_energized"))
             if routing_changed and self._off_retry_pending:
                 raise InterlockError("旧开阀输出关闭尚未确认，拒绝切换 I/O 或输出映射")
-            if self.mode == "real" and self.adam and old.open_output != config.open_output and not any(
+            if self.mode == "real" and self.adam and not polarity_changed and old.open_output != config.open_output and not any(
                 getattr(old, key) != getattr(config, key) for key in (
                     "io_device", "dam_serial_port", "dam_baudrate", "dam_unit_id",
                     "adam_host", "adam_port", "adam_unit_id")):
-                await self._write_output(config.open_output, False)
+                await self._write_output(config.open_output, self._valve_relay_state(False, config))
             self.config_store.update(config)
             self.config = config
             self.mode = config.mode
@@ -701,6 +717,19 @@ class InterlockEngine:
             else:
                 self._tpg_connected = False
                 self._adam_connected = False
+            if polarity_changed:
+                self._rearm_required = True
+                self._valve_command = None
+                self._motion_reported = True
+                self._motion_timed_out = False
+                if self.mode == "real" and not self.adam:
+                    self._off_retry_pending = True
+                else:
+                    await self._safe_open_output()
+                if self._off_retry_pending:
+                    self.interlock = "fault"
+                    self.trip_reason = "新阀控映射已保存，关阀请求尚未确认"
+                    self._event("valve_mapping_close_failed", "critical", self.trip_reason, actor)
             self._event(
                 "config_changed", "warning", "设备或联锁配置已保存",
                 actor,
@@ -736,7 +765,7 @@ class InterlockEngine:
         io = {"mode", "io_device", "dam_serial_port", "dam_baudrate", "dam_unit_id",
               "adam_host", "adam_port", "adam_unit_id"}
         mapping = {"valve_closed_di", "valve_open_di", "valve_closed_active_high",
-                   "valve_open_active_high", "open_output"}
+                   "valve_open_active_high", "open_output", "valve_open_on_energized"}
         if changed & (gauge | io | mapping):
             candidate.fail_closed_confirmed = False
         pending = self._gauge_config_pending, self._io_config_pending
@@ -857,10 +886,12 @@ class InterlockEngine:
                 await device.connect()
                 inputs = await device.read_inputs()
                 outputs = await device.read_outputs()
-                if len(inputs) != 8 or len(outputs) != 8 or any(outputs):
-                    raise InterlockError("新 DAM 必须返回八路输入及八路已关闭输出；保留原配置和故障锁定")
+                if (len(inputs) != 8 or len(outputs) != 8
+                        or outputs[candidate.open_output] != self._valve_relay_state(False, candidate)
+                        or any(value for channel, value in enumerate(outputs) if channel != candidate.open_output)):
+                    raise InterlockError("新 DAM 阀控输出须处于关阀状态，其余输出须关闭；保留原配置和故障锁定")
                 # The absent old module is acknowledged as removed, never OFF.
-                # Keep the fault/manual-reset latch until clear_fault verifies OFF
+                # Keep the fault/manual-reset latch until clear_fault verifies CLOSE
                 # again through the newly installed module.
                 if self.adam:
                     await self.adam.close()
@@ -877,10 +908,11 @@ class InterlockEngine:
                 self._debug_deadlines.clear()
                 self._io_config_pending = False
                 self._rearm_required = True
-            self._event("dam_replaced", "warning", "操作员确认更换 DAM；新模块输出均关闭，仍需清除故障且重新验证失电关闭", actor,
+            self._event("dam_replaced", "warning", "操作员确认更换 DAM；新模块已核对关阀输出，仍需清除故障且重新验证失电关闭", actor,
                         {"old_port": old_port, "new_port": serial_port,
                          "old_device_removed": True, "same_wiring_confirmed": True,
-                         "old_output_off_verified": False, "new_outputs": outputs})
+                         "old_output_off_verified": False, "new_outputs": outputs,
+                         "valve_open_on_energized": candidate.valve_open_on_energized})
             self._refresh_status()
             self._publish()
         finally:
@@ -903,10 +935,12 @@ class InterlockEngine:
 
     async def _clear_debug_outputs(self) -> None:
         for channel in list(self._debug_deadlines):
-            if self.mode == "simulation":
+            if channel == self.config.open_output:
+                await self._write_valve_request(False)
+            elif self.mode == "simulation":
                 self._debug_sim_outputs[channel] = False
             elif self.adam:
-                await self._write_output(channel, False)
+                await self._write_output(channel, self._debug_closed_state(channel))
             self._debug_deadlines.pop(channel, None)
 
     @serialized
@@ -915,7 +949,7 @@ class InterlockEngine:
         # provisional cleanup deadline while an ON request was still pending.
         for channel, deadline in list(self._debug_deadlines.items()):
             if deadline is not None and time.monotonic() >= deadline:
-                await self.debug_set_relay(channel, False, 1, 'system')
+                await self.debug_set_relay(channel, self._debug_closed_state(channel), 1, 'system')
 
     @serialized
     async def debug_relays(self) -> dict:
@@ -935,6 +969,7 @@ class InterlockEngine:
                 "output_labels": self.config.dam_output_labels,
                 "output_notes": self.config.dam_output_notes,
                 "valve_output": self.config.open_output,
+                "valve_open_on_energized": self.config.valve_open_on_energized,
                 "interlock": self.interlock,
                 "remaining_s": {str(ch): max(0, deadline-time.monotonic())
                                 for ch, deadline in self._debug_deadlines.items() if deadline is not None}}
@@ -946,18 +981,21 @@ class InterlockEngine:
             raise InterlockError("继电器编号或通电时长无效")
         if self.config.io_device != "dam0808d":
             raise InterlockError("Debug 继电器菜单仅支持 DAM0808D")
-        if enabled and (self.interlock != "disarmed" or self._stopping):
-            raise InterlockError("只有联锁未启用时才能手动开启继电器")
-        if enabled and self._history_error:
+        opening = enabled == self.config.valve_open_on_energized if channel == self.config.open_output else enabled
+        if opening and (self.interlock != "disarmed" or self._stopping):
+            raise InterlockError("只有联锁未启用时才能手动请求开阀或开启普通继电器")
+        if opening and self._history_error:
             raise InterlockError("审计存储故障，不能开启 Debug 输出")
         if self.mode == "simulation":
             self._debug_sim_outputs[channel] = enabled
+            if channel == self.config.open_output:
+                await self._write_output(channel, enabled)
         else:
             if not self.adam or not self._adam_connected:
                 raise InterlockError("DAM 未连接")
             # Register cleanup before writing: a write can succeed even if its
             # acknowledgement is lost. Never lose the obligation to clear it.
-            if enabled:
+            if opening:
                 self._debug_deadlines[channel] = time.monotonic()
             try:
                 await self._write_output(channel, enabled)
@@ -965,18 +1003,24 @@ class InterlockEngine:
                 self._last_io_read = time.monotonic()
             except (ModbusError, OSError) as exc:
                 self._begin_io_recovery(str(exc))
-                if enabled:
+                if channel == self.config.open_output and not opening:
+                    self._off_retry_pending = True
+                    self._next_off_retry = time.monotonic()
+                if opening:
                     try:
                         await self._clear_debug_outputs()
                     except (ModbusError, OSError):
                         pass
                 raise
-        if enabled:
+        if channel == self.config.open_output:
+            self._open_output = opening
+        if opening:
             self._debug_deadlines[channel] = time.monotonic() + duration_s if duration_s else None
         else:
             self._debug_deadlines.pop(channel, None)
-        self._event("debug_relay", "warning", f"Debug OUT{channel+1} {'开启' if enabled else '关闭'}",
-                    actor, {"channel": channel, "enabled": enabled, "duration_s": duration_s})
+        self._event("debug_relay", "warning", f"Debug OUT{channel+1} {'吸合' if enabled else '释放'}",
+                    actor, {"channel": channel, "enabled": enabled, "duration_s": duration_s,
+                            "valve_request": ("open" if opening else "close") if channel == self.config.open_output else None})
         return await self.debug_relays()
 
     @serialized
@@ -1016,7 +1060,7 @@ class InterlockEngine:
         self._adam_connected = True
         self._io_error = None
         self._last_io_read = time.monotonic()
-        if self.interlock == "armed" and not outputs[self.config.open_output] and self._open_output:
+        if self.interlock == "armed" and outputs[self.config.open_output] == self._valve_relay_state(False) and self._open_output:
             self._open_output = False
 
     async def _poll_tpg(self) -> None:
@@ -1145,7 +1189,7 @@ class InterlockEngine:
             await self._poll_io()
             self._finish_io_recovery()
             self._next_io_poll = time.monotonic() + 0.2
-            # Only pending OFF operations are resumed. Never replay an OPEN.
+            # Only pending CLOSE operations are resumed. Never replay an OPEN.
             await self._expire_debug_outputs()
             if self._off_retry_pending and time.monotonic() >= self._next_off_retry:
                 await self._safe_open_output()
@@ -1223,7 +1267,7 @@ class InterlockEngine:
         if self.mode == "simulation":
             for channel, deadline in list(self._debug_deadlines.items()):
                 if deadline is not None and tick >= deadline:
-                    await self.debug_set_relay(channel, False, 1, "system")
+                    await self.debug_set_relay(channel, self._debug_closed_state(channel), 1, "system")
         if self._tpg_task is None:
             await self._gauge_cycle(tick)
 

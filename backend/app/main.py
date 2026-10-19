@@ -260,6 +260,7 @@ async def put_config(body: ConfigPatch, request: Request, actor: str = Depends(r
         "config": ENGINE.config.model_dump(mode="json"),
         "version": CONFIG.version,
         "restart_required": previous.allow_lan != ENGINE.config.allow_lan,
+        "warning": "配置已保存，但关阀请求尚未确认，请检查连接并清除故障。" if ENGINE._off_retry_pending else None,
     }
 
 
@@ -272,7 +273,8 @@ async def patch_config(body: ConfigUpdate, request: Request, actor: str = Depend
     except (ValueError, InterlockError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return {"config": ENGINE.config.model_dump(mode="json"), "version": CONFIG.version,
-            "restart_required": previous.allow_lan != ENGINE.config.allow_lan}
+            "restart_required": previous.allow_lan != ENGINE.config.allow_lan,
+            "warning": "配置已保存，但关阀请求尚未确认，请检查连接并清除故障。" if ENGINE._off_retry_pending else None}
 
 
 @app.get("/api/hardware/ports", dependencies=[Depends(require_read_access)])
@@ -295,7 +297,7 @@ async def hardware_status():
         if ENGINE.config.valve_open_di is not None:
             inputs[ENGINE.config.valve_open_di] = (status["valve_open_sensor"] == ENGINE.config.valve_open_active_high)
         outputs = list(ENGINE._debug_sim_outputs)
-        outputs[ENGINE.config.open_output] = ENGINE._open_output
+        outputs[ENGINE.config.open_output] = ENGINE._valve_relay_state(ENGINE._open_output)
     return {"tpg": {"connected": ENGINE._tpg_connected, "error": getattr(ENGINE, "_tpg_error", None)},
             "io": {"connected": ENGINE._adam_connected, "error": ENGINE._io_error,
                    "inputs": inputs if fresh else None,

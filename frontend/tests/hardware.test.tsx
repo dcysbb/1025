@@ -29,7 +29,7 @@ beforeEach(() => {
       if (path === '/api/config') config = { ...config, ...body.config }
       if (path.startsWith('/api/debug/relays/')) outputs[Number(path.split('/').at(-1))] = body.enabled
     }
-    const data = path.includes('/debug/relays') ? {mode:system.mode,interlock:system.interlock,outputs,valve_output:config.open_output,remaining_s:{}} : path.includes('/stage') ? stage : path.includes('/ports') ? { ports: detectedPorts } : path.includes('/hardware/status') ? { tpg: { connected: true, error: null }, io: { connected: true, error: null, inputs: Array(8).fill(false), outputs } } : { config }
+    const data = path.includes('/debug/relays') ? {mode:system.mode,interlock:system.interlock,outputs,valve_output:config.open_output,valve_open_on_energized:config.valve_open_on_energized??true,remaining_s:{}} : path.includes('/stage') ? stage : path.includes('/ports') ? { ports: detectedPorts } : path.includes('/hardware/status') ? { tpg: { connected: true, error: null }, io: { connected: true, error: null, inputs: Array(8).fill(false), outputs } } : { config }
     return new Response(JSON.stringify(data))
   }
   container = document.getElementById('root')!; root = createRoot(container)
@@ -37,7 +37,7 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); dom.window.close() })
 async function render(auth = true) { await act(async () => { root.render(<HardwarePanel auth={auth} connected systemState={system}/>); await new Promise(r => setTimeout(r, 20)) }) }
 function button(name: string) { const node = [...container.querySelectorAll<HTMLButtonElement>('button')].find(x => x.textContent?.trim() === name || x.getAttribute('aria-label') === name); assert.ok(node, name); return node }
-function field(name: string) { const label = [...container.querySelectorAll('label')].find(x => x.firstChild?.textContent === name); assert.ok(label, name); return label.querySelector<HTMLInputElement | HTMLSelectElement>('input,select')! }
+function field(name: string) { const label = [...container.querySelectorAll('label')].find(x => !x.closest('[hidden]') && x.firstChild?.textContent === name); assert.ok(label, name); return label.querySelector<HTMLInputElement | HTMLSelectElement>('input,select')! }
 async function change(node: HTMLInputElement | HTMLSelectElement, value: string) {
   await act(async () => {
     const proto = node.tagName === 'SELECT' ? dom.window.HTMLSelectElement.prototype : dom.window.HTMLInputElement.prototype
@@ -198,7 +198,37 @@ test('terminal assignments edit the actual shared valve mapping and save only ma
   await click('DAM 端子');await click('保存功能分配')
   assert.equal(writes.length,1)
   assert.equal(writes[0].path,'/api/config')
-  assert.deepEqual(writes[0].body.config,{valve_closed_di:1,valve_open_di:2,open_output:4,valve_closed_active_high:true,valve_open_active_high:false})
+  assert.deepEqual(writes[0].body.config,{valve_closed_di:1,valve_open_di:2,open_output:4,valve_closed_active_high:true,valve_open_active_high:false,valve_open_on_energized:true})
+})
+
+test('valve polarity shares one draft across mapping and terminal menus and saves without moving', async () => {
+  await render(); await click('插板阀映射')
+  assert.equal(field('开关映射').value,'true')
+  await change(field('开关映射'),'false')
+  assert.deepEqual([...container.querySelectorAll('.valve-truth span')].map(node=>node.textContent),['关阀请求','开阀请求'])
+  await click('DAM 端子')
+  assert.equal(terminalSelect('OUT1 开关映射').value,'false')
+  assert.equal(button('端子页打开插板阀').disabled,true)
+  assert.deepEqual(writes,[])
+  await click('保存功能分配')
+  assert.equal((writes[0].body.config as Record<string,unknown>).valve_open_on_energized,false)
+  assert.deepEqual(writes.map(row=>row.path),['/api/config'])
+  assert.ok(container.textContent?.includes('吸合 → 关阀请求；释放 → 开阀请求'))
+  await click('插板阀映射')
+  assert.equal(field('开关映射').value,'false')
+})
+
+test('saving an unconfirmed close retains the applied config and displays the server warning', async () => {
+  const original=globalThis.fetch
+  globalThis.fetch=async(url,options)=>{
+    const response=await original(url,options)
+    if(String(url)==='/api/config'&&options?.method==='PATCH')return new Response(JSON.stringify({config,warning:'配置已保存，但关阀请求尚未确认'}))
+    return response
+  }
+  await render();await click('插板阀映射');await change(field('开关映射'),'false');await click('保存阀门映射')
+  assert.equal(field('开关映射').value,'false')
+  assert.ok(container.textContent?.includes('配置已保存，但关阀请求尚未确认'))
+  assert.equal(button('保存阀门映射').disabled,true)
 })
 
 test('required closed feedback and the single valve output cannot be silently unassigned', async () => {

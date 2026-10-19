@@ -74,6 +74,16 @@ class LocalAccess(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['ports'][0]['device'], 'COM3')
         open_port.assert_not_called()
 
+    async def test_simulated_hardware_status_exposes_mapped_physical_valve_coil(self):
+        engine = self.main.ENGINE
+        config = engine.config.model_copy(update={'valve_open_on_energized': False})
+        with patch.object(engine, 'mode', 'simulation'), patch.object(engine, 'config', config), \
+             patch.object(engine, 'snapshot', return_value={'adam_connected': True, 'valve_closed_sensor': True, 'valve_open_sensor': False}), \
+             patch.object(engine, '_open_output', False):
+            self.assertTrue((await self.main.hardware_status())['io']['outputs'][config.open_output])
+            engine._open_output = True
+            self.assertFalse((await self.main.hardware_status())['io']['outputs'][config.open_output])
+
     async def test_remote_control_still_requires_session(self):
         request=self.request('192.168.1.25')
         with self.assertRaises(HTTPException) as error: self.main.require_operator(request)

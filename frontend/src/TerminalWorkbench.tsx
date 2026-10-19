@@ -9,7 +9,7 @@ export type TerminalSystemState = {
   mode: 'real' | 'simulation'; interlock: string; valve: string; pressure_ok: boolean
   adam_connected: boolean; history_recording: boolean
 }
-type Relays = { mode: string; outputs: boolean[]; valve_output: number; interlock: string; remaining_s: Record<string, number> }
+type Relays = { mode: string; outputs: boolean[]; valve_output: number; valve_open_on_energized?: boolean; interlock: string; remaining_s: Record<string, number> }
 type Props = {
   draft: HardwareConfig; saved: HardwareConfig; active: boolean; auth: boolean; connected: boolean; online: boolean
   io: { connected: boolean; inputs: boolean[] | null; outputs: boolean[] | null }
@@ -21,7 +21,7 @@ type Props = {
 export default function TerminalWorkbench({ draft, saved, active, auth, connected, online, io, systemState, configurationBusy, routingDirty, onPatch, onBusyChange, mappingActions, textActions }: Props) {
   const [relays, setRelays] = useState<Relays | null>(null), [readError, setReadError] = useState('')
   const [lastRead, setLastRead] = useState(0), [fresh, setFresh] = useState(false)
-  const identity = JSON.stringify([saved.mode, saved.io_device, saved.dam_serial_port, saved.dam_baudrate, saved.dam_unit_id, saved.open_output])
+  const identity = JSON.stringify([saved.mode, saved.io_device, saved.dam_serial_port, saved.dam_baudrate, saved.dam_unit_id, saved.open_output, saved.valve_open_on_energized])
   const [readIdentity, setReadIdentity] = useState('')
   const [awaitingRead, setAwaitingRead] = useState(false)
   const [acknowledged, setAcknowledged] = useState(false), [timed, setTimed] = useState(false), [duration, setDuration] = useState('10')
@@ -39,7 +39,7 @@ export default function TerminalWorkbench({ draft, saved, active, auth, connecte
     const hide = () => { if (document.visibilityState !== 'visible') revoke() }
     document.addEventListener('visibilitychange', hide)
     return () => document.removeEventListener('visibilitychange', hide)
-  }, [active, auth, connected, online, fresh, routingDirty, saved.mode, saved.open_output, saved.dam_serial_port, systemState?.interlock, revoke])
+  }, [active, auth, connected, online, fresh, routingDirty, saved.mode, saved.open_output, saved.valve_open_on_energized, saved.dam_serial_port, systemState?.interlock, revoke])
   useEffect(() => {
     if (!lastRead) return
     const timer = setTimeout(() => setFresh(false), Math.max(0, 3500 - (Date.now() - lastRead)))
@@ -64,7 +64,7 @@ export default function TerminalWorkbench({ draft, saved, active, auth, connecte
     return () => { cancelled = true; clearTimeout(timer) }
   }, [usable, identity, reload])
 
-  const sameMapping = readIdentity === identity && relays?.valve_output === saved.open_output && relays?.mode === saved.mode && systemState?.mode === saved.mode
+  const sameMapping = readIdentity === identity && relays?.valve_output === saved.open_output && (relays?.valve_open_on_energized ?? true) === saved.valve_open_on_energized && relays?.mode === saved.mode && systemState?.mode === saved.mode
   function positiveReason(valve: boolean) {
     if (!active || !auth) return '登录后可操作输出'
     if (saved.io_device !== 'dam0808d') return '当前生效的 I/O 不是 DAM0808D'
@@ -151,8 +151,9 @@ export default function TerminalWorkbench({ draft, saved, active, auth, connecte
         <div className="terminal-output-actions"><button className="button button--primary" aria-label={currentValve ? '端子页打开插板阀' : `吸合 OUT${index + 1}`} disabled={!!reason} onClick={() => void operate(index, true)}><Power size={14}/>{starting === index ? '发送中…' : currentValve ? '请求开阀' : '吸合'}</button><button className="button button--danger-soft" aria-label={currentValve ? '端子页关闭插板阀' : `释放 OUT${index + 1}`} disabled={!canRelease} onClick={() => void operate(index, false)}><Square size={14}/>{releasing === index ? '发送中…' : currentValve ? '请求关阀' : '释放'}</button></div>
         <p className="terminal-disabled-reason">{reason || (currentValve ? '开阀受压力和阀位联锁保护' : timed ? `吸合后 ${duration} 秒自动释放` : '吸合后保持，需手动释放')}</p>
         <label className="field">控制功能<select aria-label={`OUT${index + 1} 控制功能`} value={futureValve ? 'valve' : 'manual'} disabled={!editable || draft.io_device !== 'dam0808d'} onChange={event => { if (event.target.value === 'valve') onPatch({ open_output: index }) }}><option value="manual" disabled={futureValve}>普通继电器手动输出</option><option value="valve">插板阀电磁阀</option></select></label>
+        {futureValve && <label className="field">开关映射<select aria-label={`OUT${index + 1} 开关映射`} value={String(draft.valve_open_on_energized)} disabled={!editable} onChange={event => onPatch({ valve_open_on_energized: event.target.value === 'true' })}><option value="true">吸合开阀 / 释放关阀</option><option value="false">吸合关阀 / 释放开阀</option></select></label>}
         {currentValve !== futureValve && <p className="terminal-draft-note">待保存：{futureValve ? '分配为阀控输出' : '改为普通手动输出'}；当前仍按已保存功能运行。</p>}
-        {currentValve && <p className="terminal-valve-position">阀位反馈：{connected && online ? position : '未知'}<small>吸合 → 开阀请求；释放 → 关阀请求</small></p>}
+        {currentValve && <p className="terminal-valve-position">阀位反馈：{connected && online ? position : '未知'}<small>{saved.valve_open_on_energized ? '吸合 → 开阀请求；释放 → 关阀请求' : '吸合 → 关阀请求；释放 → 开阀请求'}</small></p>}
         {!currentValve && relays?.remaining_s?.[String(index)] != null && value && <p>约 {Math.ceil(relays.remaining_s[String(index)])} 秒后自动释放</p>}
         <Disclosure title="名称与用途备注" className="terminal-output-details">
         <label className="field">名称<input aria-label={`OUT${index + 1} 名称`} maxLength={32} value={draft.dam_output_labels[index]} disabled={!editable} onChange={event => editText('dam_output_labels', index, event.target.value)}/></label>

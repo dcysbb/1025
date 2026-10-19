@@ -46,12 +46,13 @@ class AppConfig(BaseModel):
     recovery_hold_s: float = Field(default=5.0, ge=0.0, le=120.0)
     history_retention_days: Optional[int] = Field(default=None, ge=1, le=3650)
     allow_lan: bool = False
-    # Position inputs must match the installed sensors; output 0 requests OPEN.
+    # Position inputs and output mapping must match the installed hardware.
     valve_closed_di: int = Field(default=0, ge=0, le=11)
     valve_open_di: Optional[int] = Field(default=None, ge=0, le=11)
     valve_closed_active_high: bool = True
     valve_open_active_high: bool = True
     open_output: int = Field(default=0, ge=0, le=7)
+    valve_open_on_energized: bool = Field(default=True, strict=True)
     # Confirm the installed solenoid and pneumatic plumbing close on deenergizing.
     fail_closed_confirmed: bool = False
     channels: list[ChannelConfig] = Field(

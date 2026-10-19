@@ -13,11 +13,12 @@ export type HardwareConfig = {
   adam_host: string; adam_port: number; adam_unit_id: number
   valve_closed_di: number; valve_open_di: number | null; open_output: number
   valve_closed_active_high: boolean; valve_open_active_high: boolean
+  valve_open_on_energized: boolean
 } & Record<TerminalText, string[]>
 type HardwareStatus = { tpg: { connected: boolean; error: string | null }; io: { connected: boolean; error: string | null; inputs: boolean[] | null; outputs: boolean[] | null; manual_reset_required: boolean } }
 const TPG: (keyof HardwareConfig)[] = ['tpg_connection', 'tpg_serial_port', 'tpg_baudrate', 'tpg_host', 'tpg_port']
 const IO: (keyof HardwareConfig)[] = ['io_device', 'dam_serial_port', 'dam_baudrate', 'dam_unit_id', 'adam_host', 'adam_port', 'adam_unit_id']
-const MAPPING: (keyof HardwareConfig)[] = ['valve_closed_di', 'valve_open_di', 'open_output', 'valve_closed_active_high', 'valve_open_active_high']
+const MAPPING: (keyof HardwareConfig)[] = ['valve_closed_di', 'valve_open_di', 'open_output', 'valve_closed_active_high', 'valve_open_active_high', 'valve_open_on_energized']
 const TEXT: TerminalText[] = ['dam_input_labels', 'dam_output_labels', 'dam_input_notes', 'dam_output_notes']
 const FIXED = [
   [1, '电源 +', 'DC 7–30 V'], [2, '电源 −', '电源负极'], [3, 'A+', 'RS485 A'], [4, 'B−', 'RS485 B'],
@@ -29,7 +30,7 @@ function request<T>(path: string, method = 'GET', body?: unknown, operation?: st
 }
 
 function normalize(config: HardwareConfig) {
-  return { ...config, ...Object.fromEntries(TEXT.map(key => [key, config[key] ?? Array(8).fill('')])) } as HardwareConfig
+  return { ...config, valve_open_on_energized: config.valve_open_on_energized ?? true, ...Object.fromEntries(TEXT.map(key => [key, config[key] ?? Array(8).fill('')])) } as HardwareConfig
 }
 
 export default function HardwarePanel({ auth, connected, systemState, onDirtyChange }: { auth: boolean; connected: boolean; systemState?: TerminalSystemState | null; onDirtyChange?: (dirty: boolean) => void }) {
@@ -101,10 +102,11 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
     if (!draft) return
     const values = Object.fromEntries(keys.map(key => [key, draft[key]]))
     void run(section, async () => {
-      const next = await request<{ config: HardwareConfig }>('/config', 'PATCH', { config: values }, `保存${section === 'tpg' ? 'TPG366 真空规连接配置' : section === 'io' ? 'I/O 控制器连接配置' : section === 'valve' ? '插板阀映射' : 'DAM 端子名称与备注'}`)
+      const next = await request<{ config: HardwareConfig; warning?: string | null }>('/config', 'PATCH', { config: values }, `保存${section === 'tpg' ? 'TPG366 真空规连接配置' : section === 'io' ? 'I/O 控制器连接配置' : section === 'valve' ? '插板阀映射' : 'DAM 端子名称与备注'}`)
       const normalized = normalize(next.config)
       setSaved(normalized)
       setDraft(prior => prior && ({ ...prior, ...Object.fromEntries(keys.map(key => [key, normalized[key]])) }))
+      if (next.warning) setErrors(prior => ({ ...prior, [section]: next.warning! }))
     }, '已保存')
   }
   const notice = (id: string) => <>{errors[id] && <p className="inline-error" role="alert">{errors[id]}</p>}{messages[id] && <p role="status" className="hardware-message">{messages[id]}</p>}</>
@@ -167,8 +169,9 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
             {(['valve_closed_di', 'valve_open_di', 'open_output'] as const).map(key => <label className="field" key={key}>{key === 'valve_closed_di' ? '关闭到位输入' : key === 'valve_open_di' ? '打开到位输入' : '电磁阀控制输出'}<select value={draft[key] ?? ''} onChange={event => patch(key, event.target.value === '' ? null as never : Number(event.target.value))}>
               {key === 'valve_open_di' && <option value="">未安装</option>}{Array.from({ length: draft.io_device === 'dam0808d' ? 8 : key === 'open_output' ? 6 : 12 }, (_, i) => <option value={i} key={i}>{draft.io_device === 'dam0808d' ? `${key === 'open_output' ? 'OUT' : 'IN'}${i + 1} / ` : ''}{key === 'open_output' ? 'DO' : 'DI'}{i}{draft.io_device === 'dam0808d' && draft[key === 'open_output' ? 'dam_output_labels' : 'dam_input_labels'][i] ? ` · ${draft[key === 'open_output' ? 'dam_output_labels' : 'dam_input_labels'][i]}` : ''}</option>)}</select></label>)}
             {(['valve_closed_active_high', 'valve_open_active_high'] as const).filter(key => key === 'valve_closed_active_high' || draft.valve_open_di !== null).map(key => <label className="field" key={key}>{key === 'valve_closed_active_high' ? '关闭到位有效电平' : '打开到位有效电平'}<select value={String(draft[key])} onChange={event => patch(key, event.target.value === 'true')}><option value="true">高电平有效</option><option value="false">低电平有效</option></select></label>)}
+            <label className="field">开关映射<select value={String(draft.valve_open_on_energized)} onChange={event => patch('valve_open_on_energized', event.target.value === 'true')}><option value="true">吸合开阀 / 释放关阀</option><option value="false">吸合关阀 / 释放开阀</option></select></label>
           </div></fieldset>
-          <div className="valve-truth"><div><b>继电器吸合</b><span>开阀请求</span></div><div><b>继电器释放</b><span>关阀请求</span></div></div>
+          <div className="valve-truth"><div><b>继电器吸合</b><span>{draft.valve_open_on_energized ? '开阀请求' : '关阀请求'}</span></div><div><b>继电器释放</b><span>{draft.valve_open_on_energized ? '关阀请求' : '开阀请求'}</span></div></div>
           <p>单路输出控制电磁阀；实际阀门位置以到位反馈为准。</p>
           {draft.valve_closed_di === draft.valve_open_di && <p className="inline-error">打开与关闭到位必须使用不同输入。</p>}
           {actions('valve', MAPPING)}{notice('valve')}
