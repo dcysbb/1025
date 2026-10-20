@@ -30,12 +30,26 @@
 .stage-axis-details dd b { color: var(--text); font-variant-numeric: tabular-nums; }
 .stage-axis-details dd small { margin-left: 8px; font-size: 10px; color: var(--dim); }
 .stage-step-field input { font-family: 'Cascadia Mono', Consolas, monospace; font-size: 16px !important; font-variant-numeric: tabular-nums; }
+.stage-presets-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 12px; margin: 14px 0 0; background: var(--field-bg); border: 1px solid var(--line); border-radius: 12px; }
+.stage-presets-bar>.button { margin-left: auto; min-height: 32px; font-size: 11px; padding: 6px 12px; }
+.stage-presets-edit { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.stage-presets-edit input { width: 72px; min-height: 32px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); color: var(--text); font: 12px 'Cascadia Mono', Consolas, monospace; font-variant-numeric: tabular-nums; }
+.stage-presets-edit .button { min-height: 32px; font-size: 11px; padding: 6px 10px; }
+.stage-presets-bar .inline-error { margin: 0; font-size: 11px; }
 .stage-step-presets { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 5px; margin: 9px 0 16px; }
 .stage-step-presets button { min-width: 0; min-height: 30px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); color: var(--muted); font: 11px 'Cascadia Mono', Consolas, monospace; cursor: pointer; }
 .stage-step-presets button:hover:not(:disabled), .stage-step-presets button[aria-pressed='true'] { color: var(--accent); border-color: rgba(var(--accent-rgb),.4); background: rgba(var(--accent-rgb),.07); }
 .stage-workbench .stage-axis-buttons { display: flex; gap: 9px; margin: 0; }
-.stage-workbench .stage-axis-buttons .button { flex: 1; min-height: 46px; font-size: 14px; gap: 10px; }
+.stage-workbench .stage-axis-buttons .button { flex: 1; min-height: 46px; font-size: 14px; gap: 10px; user-select: none; -webkit-user-select: none; touch-action: none; }
+.stage-jog-button--active { color: var(--green) !important; border-color: rgba(100,223,189,.55) !important; background: rgba(100,223,189,.12) !important; }
 .stage-axis-buttons .button>span { font-size: 22px; font-weight: 400; }
+.stage-quick-params { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.stage-quick-params .disclosure__toggle { font-size: 11px; padding: 4px 0; }
+.stage-quick-grid { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-top: 8px; }
+.stage-quick-grid .field { flex: 1; min-width: 120px; margin: 0; font-size: 11px; }
+.stage-quick-grid .field input { font-family: 'Cascadia Mono', Consolas, monospace; font-variant-numeric: tabular-nums; }
+.stage-quick-grid .button { min-height: 36px; font-size: 12px; }
+.stage-quick-params .stage-note, .stage-quick-params .stage-message { margin: 6px 0 0; font-size: 11px; }
 .stage-workbench .stage-axis-reason { min-height: 38px; margin: 12px 0 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; opacity: 1; }
 .stage-workbench .stage-axis-reason--ready { color: var(--green); }
 .stage-panel .stage-workbench-note { align-items: flex-start; padding-top: 2px; font-size: 11px; }

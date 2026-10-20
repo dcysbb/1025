@@ -1,6 +1,7 @@
 import asyncio
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 
 from pydantic import ValidationError
 
-from app.stage import SimulatedStage, StageConfig, StageController, StageError, StageMove
+from app.stage import SimulatedStage, StageAction, StageConfig, StageController, StageError, StageJog, StageMove
 
 
 class StageTests(unittest.IsolatedAsyncioTestCase):
@@ -84,12 +85,15 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_busy_unknown_and_fault_states_block_motion(self):
         await self.simulate()
+        await self.pause_polling()
         driver = self.stage.driver
         original = driver.status
         for changes in ({"moving": True}, {"moving": None}, {"ready": False, "error": "位移台类型不匹配"}):
             rows = original()
             rows[0].update(changes)
             driver.status = lambda: rows
+            # Cached-sample fast path: force a fresh read so the mocked state applies.
+            self.stage._last_sample = None
             with self.assertRaises(StageError):
                 await self.stage.move(StageMove(axis="x", direction=1, steps=5), "test")
         driver.status = original
@@ -166,10 +170,12 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
             await self.stage.move(command, "test")
         self.assertEqual(self.move_results()[-1]["result"], "rejected")
         await self.simulate(axes={"x": 3, "y": 1, "z": 2}, inverted={"x": False, "y": True, "z": False})
+        await self.pause_polling()
         driver = self.stage.driver
         original = driver.status
         driver.status = Mock(side_effect=OSError("preflight read failed"))
         driver.move = Mock()
+        self.stage._last_sample = None
         with self.assertRaises(StageError):
             await self.stage.move(command, "test")
         driver.move.assert_not_called()
@@ -218,6 +224,7 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
         await self.pause_polling()
         driver = self.stage.driver
         original = driver.status
+        self.stage._last_sample = None
         entered, release = threading.Event(), threading.Event()
         calls = 0
         def blocked_status():
@@ -253,6 +260,91 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
         await self.stage.disconnect("test")
         self.assertFalse(self.stage.snapshot()["motion_pending"])
 
+    async def test_move_reuses_fresh_poll_sample_without_preflight_read(self):
+        await self.simulate()
+        await self.pause_polling()
+        driver = self.stage.driver
+        original = driver.status
+        driver.status = Mock(side_effect=AssertionError("fresh poll sample must be reused"))
+        try:
+            response = await self.stage.move(StageMove(axis="x", direction=1, steps=4), "test")
+            self.assertTrue(response["motion_pending"])
+            self.assertEqual(driver.counts[1], 4)
+        finally:
+            driver.status = original
+
+    async def test_stale_sample_forces_one_fresh_preflight_read(self):
+        await self.simulate()
+        await self.pause_polling()
+        driver = self.stage.driver
+        original = driver.status
+        calls = []
+        driver.status = lambda: (calls.append(1), original())[1]
+        self.stage._last_sample = 0
+        await self.stage.move(StageMove(axis="x", direction=1, steps=1), "test")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(driver.counts[1], 1)
+
+    async def test_continuous_jog_runs_until_stop_without_deadline(self):
+        await self.simulate()
+        await self.pause_polling()
+        response = await self.stage.jog(StageJog(axis="y", direction=-1), "test")
+        self.assertTrue(response["motion_pending"])
+        self.assertEqual(response["jogging"], {"axis": "y", "channel": 2, "direction": -1})
+        self.assertEqual(self.stage._motion_deadline, 0)
+        self.assertTrue(any(row["moving"] for row in self.stage.driver.status()))
+        with self.assertRaises(StageError):
+            await self.stage.jog(StageJog(axis="y", direction=1), "test")
+        results = self.move_results()
+        self.assertTrue(results[-2].get("continuous"))
+        self.assertEqual(results[-2]["result"], "submitted")
+        self.assertEqual(results[-1]["result"], "rejected")
+        await self.stage.stop("test")
+        snapshot = self.stage.snapshot()
+        self.assertFalse(snapshot["motion_pending"])
+        self.assertIsNone(snapshot["jogging"])
+        self.assertFalse(any(row["moving"] for row in snapshot["channels"]))
+        self.assertEqual(self.stage.driver.counts, {1: 0, 2: 0, 3: 0})
+
+    async def test_home_instant_return_reports_counter_zero_only(self):
+        await self.simulate()
+        await self.pause_polling()
+        driver = self.stage.driver
+        driver.home = Mock()  # Firmware answers instantly; no motion observed.
+        response = await self.stage.control(StageAction(axis="x", operation="home", confirmed=True), "test")
+        self.assertFalse(response["motion_pending"])
+        driver.home.assert_called_once_with(1, -1)  # default direction from config
+        actions = [call.args for call in self.events.call_args_list if call.args[0] == "stage_action"]
+        self.assertEqual(actions[-1][4]["result"], "zeroed_only")
+
+    async def test_home_motion_waits_for_completion_and_honours_direction(self):
+        await self.simulate(inverted={"x": True, "y": False, "z": False})
+        await self.pause_polling()
+        driver = self.stage.driver
+        driver.home = Mock(side_effect=lambda channel, direction: SimulatedStage.home(driver, channel, direction))
+        response = await self.stage.control(
+            StageAction(axis="x", operation="home", confirmed=True, home_direction=1), "test")
+        self.assertTrue(response["motion_pending"])
+        driver.home.assert_called_once_with(1, -1)  # UI +1 inverted maps to hardware −1
+        self.assertEqual(driver.counts[1], 0)
+        self.stage._operation_at = time.monotonic() - 5
+        await asyncio.sleep(0.9)  # Let the simulated search motion finish.
+        await self.stage._poll_once()
+        self.assertFalse(self.stage.motion_pending)
+        actions = [call.args for call in self.events.call_args_list if call.args[0] == "stage_action"]
+        self.assertEqual(actions[-1][4]["result"], "completed")
+
+    async def test_step_presets_editable_while_connected_and_persisted(self):
+        await self.simulate()
+        response = await self.stage.set_presets([2, 20, 200], "test")
+        self.assertEqual(response["config"]["step_presets"], [2, 20, 200])
+        reloaded = StageController(Path(self.temp.name), Mock())
+        self.assertEqual(reloaded.config.step_presets, [2, 20, 200])
+        for bad in ([1], [1] * 7, [0, 2], [2, 2]):
+            with self.assertRaises(StageError):
+                await self.stage.set_presets(bad, "test")
+        self.assertEqual(self.stage.config.step_presets, [2, 20, 200])
+
 
 class DriverTests(unittest.TestCase):
     def test_move_uses_verified_single_step_jog_with_no_wait(self):
@@ -262,6 +354,7 @@ class DriverTests(unittest.TestCase):
         channel = Mock()
         channel.get_stage_axis_params.return_value.part_number = "PD1V/M"
         driver.channels = {3: channel}
+        driver.stage_names = {3: "PD1V/M"}
         driver._set_setting = Mock()
         channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value={'jog.mode':2,'jog.openLoopStepSize':23,'jog.openLoopMaxVelocity':5000,'jog.openLoopAcceleration':1000}[key])
         driver.move(3, -1, 23)

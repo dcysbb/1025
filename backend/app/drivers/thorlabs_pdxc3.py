@@ -59,6 +59,12 @@ class Pdxc3Driver:
         self._lease = None
         self.last_latency_ms = None
         self.move_budget_s = 30
+        # Per-channel prepared state so a jog command does not re-identify the
+        # stage, re-read drive parameters or re-assert unchanged settings. The
+        # status sweep keeps "enabled"/"open_loop" in sync; parameter writes
+        # invalidate the drive cache.
+        self._channel_state = {}
+        self._drive_params = {}
 
     def connect(self):
         self._acquire_lease()
@@ -98,6 +104,9 @@ class Pdxc3Driver:
         self.transport = transport if transport else f"USB / {self.serial_number}"
         self.channels = {n: self.device.get_subchannel(n) for n in (1, 2, 3)}
         self.stage_names = {n: c.get_stage_axis_params(self.TIMEOUT_MS).part_number for n, c in self.channels.items()}
+        for n, name in self.stage_names.items():
+            if not self.supported(name):
+                raise RuntimeError(f"CH{n} 识别为 {name or '未知'}，不支持当前开环台控制；连接已拒绝")
         # Connecting reads state only: no enable, home, position-zero or movement.
 
     def _acquire_lease(self):
@@ -197,40 +206,97 @@ class Pdxc3Driver:
                            "open_loop": not bool(states.get("ClosedLoopPositionControl", False)),
                            "command_count": states.get("Position"), "power_ok_raw": states.get("PowerOk"),
                            "error": "；".join(faults) or None})
+            # Keep the prepared-state cache aligned with what the device reports.
+            state = self._channel_state.setdefault(n, {})
+            state["enabled"] = bool(states.get("Enabled", False))
+            state["open_loop"] = not bool(states.get("ClosedLoopPositionControl", False))
         if len(result) != 3:
             raise RuntimeError("控制器未返回三个通道")
         self.last_latency_ms = round((time.monotonic() - started) * 1000, 1)
         return result
 
-    def move(self, channel, direction, steps):
-        from thorlabs_xa.shared.enums import TLMC_EnableState, TLMC_MoveMode, TLMC_PZ_PositionControlMode, TLMC_JogMode
+    def _drive_values(self, channel, target):
+        cached = self._drive_params.get(channel)
+        if cached and 800 <= cached["step_rate"] <= 20000 and 1 <= cached["acceleration"] <= 20000:
+            return cached["step_rate"], cached["acceleration"]
+        rate = target.get_setting("jog.openLoopMaxVelocity", self.TIMEOUT_MS)
+        acceleration = target.get_setting("jog.openLoopAcceleration", self.TIMEOUT_MS)
+        if not rate.is_value_set or not acceleration.is_value_set or not 800 <= rate.value <= 20000 or not 1 <= acceleration.value <= 20000:
+            raise RuntimeError("步频或加速度读回无效；请先读取并设置有效驱动参数，本次移动未下发")
+        self._drive_params[channel] = {"step_rate": rate.value, "acceleration": acceleration.value}
+        return rate.value, acceleration.value
+
+    def _prepare_channel(self, channel, jog_mode, steps=None):
+        """Bring a channel to the requested jog configuration with cached
+        round trips: unchanged settings are never re-sent or re-verified."""
+        from thorlabs_xa.shared.enums import TLMC_EnableState, TLMC_PZ_PositionControlMode, TLMC_JogMode
         target = self.channels[channel]
-        # A vacuum PD1 uses the same open-loop drive family as PD1. Never set a
-        # guessed stage profile or a voltage/frequency silently.
-        name = str(target.get_stage_axis_params(self.TIMEOUT_MS).part_number).upper()
+        state = self._channel_state.setdefault(channel, {})
+        rate, acceleration = self._drive_values(channel, target)
+        if state.get("open_loop") is not True:
+            target.set_position_control_mode(TLMC_PZ_PositionControlMode.TLMC_PZ_PositionControlMode_OpenLoop,
+                                             self.TIMEOUT_MS)
+            state["open_loop"] = True
+        if state.get("jog_mode") != jog_mode:
+            self._set_setting(channel, "jog.mode", jog_mode)
+            actual = target.get_setting("jog.mode", self.TIMEOUT_MS)
+            if not actual.is_value_set or actual.value != jog_mode:
+                raise RuntimeError("点动模式读回不一致；本次移动未下发")
+            state["jog_mode"] = jog_mode
+        if steps is not None and state.get("step_size") != steps:
+            self._set_setting(channel, "jog.openLoopStepSize", steps)
+            actual = target.get_setting("jog.openLoopStepSize", self.TIMEOUT_MS)
+            if not actual.is_value_set or actual.value != steps:
+                raise RuntimeError("点动步数读回不一致；本次移动未下发")
+            state["step_size"] = steps
+        if state.get("enabled") is not True:
+            target.set_enable_state(TLMC_EnableState.TLMC_Enabled)
+            state["enabled"] = True
+        return target, rate, acceleration
+
+    def move(self, channel, direction, steps):
+        from thorlabs_xa.shared.enums import TLMC_MoveMode, TLMC_JogMode
+        # Stage identity was verified at connect and every status sweep still
+        # reports WrongStageDetected faults; no per-move re-identification.
+        name = str(self.stage_names.get(channel, "")).upper()
         if not self.supported(name):
             raise RuntimeError(f"CH{channel} 识别为 {name or '未知'}，不支持当前开环台控制")
         # This PDXC3 rejected Relative (FunctionNotSupported). Its finite jog uses
         # programmed step size; the Move param is UNUSED, not the pulse count.
         if not 1 <= steps <= 20000:
             raise RuntimeError("PDXC3 单次点动步数必须为 1–20000")
-        # Reject invalid drive parameters before changing ANY controller setting.
-        rate = target.get_setting("jog.openLoopMaxVelocity", self.TIMEOUT_MS)
-        acceleration = target.get_setting("jog.openLoopAcceleration", self.TIMEOUT_MS)
-        if not rate.is_value_set or not acceleration.is_value_set or not 800 <= rate.value <= 20000 or not 1 <= acceleration.value <= 20000:
-            raise RuntimeError("步频或加速度读回无效；请先读取并设置有效驱动参数，本次移动未下发")
-        self.move_budget_s = max(3, 4 * math.sqrt(steps / acceleration.value) + steps / rate.value + 2)
-        target.set_position_control_mode(TLMC_PZ_PositionControlMode.TLMC_PZ_PositionControlMode_OpenLoop,
-                                         self.TIMEOUT_MS)
-        single = int(TLMC_JogMode.TLMC_JogMode_SingleStep)
-        self._set_setting(channel, "jog.mode", single)
-        self._set_setting(channel, "jog.openLoopStepSize", steps)
-        for key, expected in (("jog.mode", single), ("jog.openLoopStepSize", steps)):
-            actual = target.get_setting(key, self.TIMEOUT_MS)
-            if not actual.is_value_set or actual.value != expected:
-                raise RuntimeError("单步模式或点动步数读回不一致；本次移动未下发")
-        target.set_enable_state(TLMC_EnableState.TLMC_Enabled)
+        target, rate, acceleration = self._prepare_channel(
+            channel, int(TLMC_JogMode.TLMC_JogMode_SingleStep), steps)
+        self.move_budget_s = max(3, 4 * math.sqrt(steps / acceleration) + steps / rate + 2)
         target.move(TLMC_MoveMode.TLMC_MoveMode_JogForward if direction > 0 else TLMC_MoveMode.TLMC_MoveMode_JogReverse, 0, 0)
+
+    def jog_start(self, channel, direction):
+        """Press-and-hold jog: run continuously in the given direction until stop()."""
+        from thorlabs_xa.shared.enums import TLMC_MoveMode, TLMC_JogMode
+        name = str(self.stage_names.get(channel, "")).upper()
+        if not self.supported(name):
+            raise RuntimeError(f"CH{channel} 识别为 {name or '未知'}，不支持当前开环台控制")
+        target, _, _ = self._prepare_channel(
+            channel, int(TLMC_JogMode.TLMC_JogMode_Continuous))
+        self.move_budget_s = 0  # Continuous jog has no completion deadline.
+        target.move(TLMC_MoveMode.TLMC_MoveMode_JogForward if direction > 0 else TLMC_MoveMode.TLMC_MoveMode_JogReverse, 0, 0)
+
+    def home(self, channel, direction):
+        """Try the documented home search: keep the device's limit-switch mode,
+        set direction/velocity, then request homing. On this open-loop family
+        the firmware may answer instantly (counter zero only); the controller
+        reports honestly from the observed motion state."""
+        from thorlabs_xa.shared.enums import TLMC_HomeDirection
+        from thorlabs_xa.shared.params import TLMC_HomeParams
+        target = self.channels[channel]
+        params = self.manager.native_functions.get_home_params(
+            target.subchannel_handle, self.TIMEOUT_MS)
+        params.direction = (TLMC_HomeDirection.TLMC_HomeDirection_Forward if direction >= 0
+                            else TLMC_HomeDirection.TLMC_HomeDirection_Reverse)
+        rate, _ = self._drive_values(channel, target)
+        params.velocity = rate
+        self.manager.native_functions.set_home_params(target.subchannel_handle, params)
+        target.home(self.TIMEOUT_MS)
 
     def _set_setting(self, channel, key, value):
         from thorlabs_xa.shared.c_params import C_TLMC_Value
@@ -268,6 +334,8 @@ class Pdxc3Driver:
             values[name] = setting.value
             limits[name] = {"min": setting.min_value if setting.has_min else None,
                             "max": setting.max_value if setting.has_max else None}
+        self._drive_params[channel] = {"step_rate": values["step_rate"],
+                                       "acceleration": values["acceleration"]}
         return {"values": values, "limits": limits}
 
     def set_parameters(self, channel, values):

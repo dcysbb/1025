@@ -62,7 +62,7 @@ test('opening stage panel is read-only and shows configured channel permutation'
   assert.equal(button('X 轴正向移动').disabled, true)
 })
 
-test('each axis has one combined card for jog, output, Home, Optimize and its own count', async () => {
+test('each axis has one combined card for jog, output, Home, Optimize, quick params and its own count', async () => {
   state.connected = true
   state.channels.forEach(row => { row.command_count = row.channel * 100 })
   await render()
@@ -70,10 +70,11 @@ test('each axis has one combined card for jog, output, Home, Optimize and its ow
   assert.equal(container.querySelectorAll('.stage-axis').length, 3)
   assert.equal(container.querySelector('.stage-channel-tools'), null)
   assert.equal(container.querySelector('.stage-advanced')?.closest('.content-panel'), workbench)
+  assert.equal(container.querySelectorAll('.stage-quick-params').length, 3)
   for (const axis of ['X', 'Y', 'Z']) {
     const channel = state.config.axes[axis.toLowerCase()]
     const card = workbench.querySelector(`[aria-label="${axis} 轴 CH${channel} 控制卡片"]`)!
-    for (const label of [`${axis} 轴正向移动`, `${axis} 轴反向移动`, `${axis} 轴启用输出`, `${axis} 轴禁用输出`, `${axis} 轴 Home / Zero · 计数清零`, `${axis} 轴 Optimize · 性能优化`]) assert.ok(card.querySelector(`[aria-label="${label}"]`), label)
+    for (const label of [`${axis} 轴正向移动`, `${axis} 轴反向移动`, `${axis} 轴启用输出`, `${axis} 轴禁用输出`, `${axis} 轴 Home · 回零`, `${axis} 轴 Optimize · 性能优化`]) assert.ok(card.querySelector(`[aria-label="${label}"]`), label)
     assert.equal(card.querySelectorAll('.stage-axis-details').length, 1)
     assert.ok(card.querySelector('.stage-axis-details')?.textContent?.includes(`${channel * 100}非实测位置`))
   }
@@ -82,12 +83,13 @@ test('each axis has one combined card for jog, output, Home, Optimize and its ow
 
 test('entering the channel tool controls revokes keyboard jogging without sending an action', async () => {
   state.connected = true
+  state.channels.forEach(row => { row.enabled = true })
   await render()
   await act(async () => button('启用键盘').click())
   assert.equal(button('停用键盘').getAttribute('aria-pressed'), 'true')
-  await act(async () => button('X 轴 Home / Zero · 计数清零').focus())
+  await act(async () => button('X 轴 Home · 回零').focus())
   assert.equal(button('启用键盘').getAttribute('aria-pressed'), 'false')
-  await act(async () => keys('ArrowRight'))
+  await act(async () => { keys('ArrowRight'); keyUps('ArrowRight') })
   assert.equal(document.querySelector('[role="dialog"]'), null)
   assert.deepEqual(writes, [])
 })
@@ -102,11 +104,24 @@ test('a hardware fault blocks movement while keeping stop available', async () =
   assert.ok(container.textContent?.includes('位移台类型不匹配'))
 })
 
-test('one click sends exactly one bounded axis move and no homing or enable call', async () => {
+test('a quick tap sends exactly one bounded axis move and no homing or enable call', async () => {
   state.connected = true
   await render()
-  await act(async () => { button('Y 轴反向移动').click(); await new Promise(r => setTimeout(r, 0)) })
+  await tapButton('Y 轴反向移动')
   assert.deepEqual(writes, [{ path: '/api/stage/move', body: { axis: 'y', direction: -1, steps: 10 } }])
+})
+
+test('press-and-hold sends continuous jog then stop; a quick tap stays a bounded move', async () => {
+  state.connected = true
+  await render()
+  await holdButton('X 轴正向移动')
+  assert.deepEqual(writes.filter(row => row.path.endsWith('/move')), [])
+  assert.deepEqual(writes.map(row => ({ path: row.path.replace('/api/stage', ''), body: row.body })), [
+    { path: '/jog', body: { axis: 'x', direction: 1 } },
+    { path: '/stop', body: {} },
+  ])
+  await tapButton('Y 轴反向移动')
+  assert.deepEqual(writes.filter(row => row.path.endsWith('/move')), [{ path: '/api/stage/move', body: { axis: 'y', direction: -1, steps: 10 } }])
 })
 
 test('failed real connection remains real and does not silently simulate', async () => {
@@ -138,6 +153,27 @@ function step(axis: string) { return container.querySelector<HTMLInputElement>(`
 function keys(key: string, options: KeyboardEventInit = {}) {
   const area = container.querySelector<HTMLElement>('[aria-label="键盘点动控制区域"]')!
   area.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...options }))
+}
+function keyUps(key: string) {
+  const area = container.querySelector<HTMLElement>('[aria-label="键盘点动控制区域"]')!
+  area.dispatchEvent(new dom.window.KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }))
+}
+async function tap(key: string) { await act(async () => { keys(key); keyUps(key) }) }
+function pointer(type: 'pointerdown' | 'pointerup', element: HTMLElement) {
+  element.dispatchEvent(new dom.window.Event(type, { bubbles: true, cancelable: true }))
+}
+async function tapButton(label: string) {
+  const element = button(label)
+  await act(async () => { pointer('pointerdown', element); pointer('pointerup', element); await new Promise(r => setTimeout(r, 0)) })
+}
+async function holdButton(label: string, ms = 220) {
+  const element = button(label)
+  await act(async () => {
+    pointer('pointerdown', element)
+    await new Promise(r => setTimeout(r, ms))
+    pointer('pointerup', element)
+    await new Promise(r => setTimeout(r, 0))
+  })
 }
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -176,7 +212,7 @@ test('imported drive profile is a local preview and never applies without an exp
   const original = globalThis.fetch
   globalThis.fetch = async (url, options) => String(url).includes('/parameters/') ? new Response(JSON.stringify(parameters)) : original(url, options)
   await render()
-  await act(async () => { button('驱动参数 · 幅值、步频与加速度').click(); button('读取当前参数').click(); await new Promise(r => setTimeout(r, 5)) })
+  await act(async () => { button('驱动参数 · 幅值、步频与加速度（全部轴逐轴编辑）').click(); await new Promise(r => setTimeout(r, 5)) })
   const input = container.querySelector<HTMLInputElement>('[aria-label="导入 PDXC3 驱动参数文件"]')!
   const text = makeStageProfile({...parameters.values, step_rate:800}, {serial_number:'129576359',channel:1,stage:'PDXC2AD'})
   Object.defineProperty(input, 'files', {value:[{size:text.length, text:async () => text}]})
@@ -202,16 +238,17 @@ test('controller history distinguishes verified zero from submitted optimization
   assert.deepEqual(writes, [])
 })
 
-for (const axis of ['x', 'y', 'z']) test(`${axis} Home confirms and zeros only its own mapped channel`, async () => {
+for (const axis of ['x', 'y', 'z']) test(`${axis} Home confirms direction and homes only its own mapped channel`, async () => {
   state.connected = true
+  state.channels.forEach(row => { row.enabled = true })
   await render()
   assert.equal(container.querySelector('[aria-label="控制器工具操作轴"]'), null)
-  await act(async () => { button(`${axis.toUpperCase()} 轴 Home / Zero · 计数清零`).click() })
+  await act(async () => { button(`${axis.toUpperCase()} 轴 Home · 回零`).click() })
   assert.deepEqual(writes, [])
-  assert.ok(document.querySelector('[role="dialog"]')?.textContent?.includes('不会寻找机械原点'))
+  assert.ok(document.querySelector('[role="dialog"]')?.textContent?.includes('尝试硬件回零'))
   assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes(`${axis.toUpperCase()} / CH${state.config.axes[axis]}`))
-  await act(async () => { button('确认清零').click(); button('确认清零').click(); await new Promise(r => setTimeout(r, 0)) })
-  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis,operation:'zero',confirmed:true}}])
+  await act(async () => { button('确认回零').click(); button('确认回零').click(); await new Promise(r => setTimeout(r, 0)) })
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis,operation:'home',confirmed:true,home_direction:-1}}])
 })
 
 for (const axis of ['x', 'y', 'z']) test(`${axis} optimization needs its own output enabled and confirms its mapped channel`, async () => {
@@ -233,29 +270,31 @@ for (const axis of ['x', 'y', 'z']) test(`${axis} optimization needs its own out
 
 test('parameter selection cannot retarget a channel Home confirmation', async () => {
   state.connected = true
+  state.channels.forEach(row => { row.enabled = true })
   await render()
-  await act(async () => { button('驱动参数 · 幅值、步频与加速度').click(); button('Y 轴 Home / Zero · 计数清零').click() })
+  await act(async () => { button('驱动参数 · 幅值、步频与加速度（全部轴逐轴编辑）').click(); button('Y 轴 Home · 回零').click() })
   const select = container.querySelector<HTMLSelectElement>('[aria-label="驱动参数通道"]')!
   await act(async () => { select.value = 'z'; select.dispatchEvent(new dom.window.Event('change', {bubbles: true})) })
   assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes('Y / CH1'))
-  await act(async () => { button('确认清零').click() })
-  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'y',operation:'zero',confirmed:true}}])
+  await act(async () => { button('确认回零').click() })
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'y',operation:'home',confirmed:true,home_direction:-1}}])
 })
 
 test('changing the channel mapping revokes an open Home confirmation without sending it', async () => {
   state.connected = true
+  state.channels.forEach(row => { row.enabled = true })
   await render()
-  await act(async () => button('X 轴 Home / Zero · 计数清零').click())
+  await act(async () => button('X 轴 Home · 回零').click())
   assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes('X / CH3'))
   state.config.axes = {x: 1, y: 3, z: 2}
   await act(async () => { await new Promise(r => setTimeout(r, 1100)) })
   assert.equal(document.querySelector('.motion-presence[data-open="true"] [role="dialog"]'), null)
   assert.ok(container.querySelector('.stage-axis--x')?.textContent?.includes('CH1'))
   assert.deepEqual(writes, [])
-  await act(async () => button('X 轴 Home / Zero · 计数清零').click())
+  await act(async () => button('X 轴 Home · 回零').click())
   assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes('X / CH1'))
-  await act(async () => button('确认清零').click())
-  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'x',operation:'zero',confirmed:true}}])
+  await act(async () => button('确认回零').click())
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'x',operation:'home',confirmed:true,home_direction:-1}}])
 })
 
 for (const axis of ['x', 'y', 'z']) test(`${axis} output controls send only their own axis`, async () => {
@@ -272,10 +311,10 @@ test('channel readiness and open-loop eligibility do not follow another card', a
   state.channels[0].error = 'CH1 未接位移台'
   state.channels[1].open_loop = false
   await render()
-  assert.equal(button('X 轴 Home / Zero · 计数清零').disabled, false)
+  assert.equal(button('X 轴 Home · 回零').disabled, false)
   assert.equal(button('X 轴 Optimize · 性能优化').disabled, false)
   for (const axis of ['Y', 'Z']) {
-    assert.equal(button(`${axis} 轴 Home / Zero · 计数清零`).disabled, true)
+    assert.equal(button(`${axis} 轴 Home · 回零`).disabled, true)
     assert.equal(button(`${axis} 轴 Optimize · 性能优化`).disabled, true)
   }
   assert.ok(container.querySelector('.stage-axis--y')?.textContent?.includes('CH1 未接位移台'))
@@ -291,12 +330,12 @@ test('optimization progress is scoped to its channel while all new actions stay 
   await render()
   assert.equal(container.querySelectorAll('.stage-optimization-progress').length, 1)
   assert.ok(container.querySelector('.stage-axis--z .stage-optimization-progress')?.textContent?.includes('Z / CH2'))
-  for (const axis of ['X','Y','Z']) for (const operation of ['Home / Zero · 计数清零','Optimize · 性能优化']) assert.equal(button(`${axis} 轴 ${operation}`).disabled, true)
+  for (const axis of ['X','Y','Z']) for (const operation of ['Home · 回零','Optimize · 性能优化']) assert.equal(button(`${axis} 轴 ${operation}`).disabled, true)
   assert.equal(button('全部停止').disabled, false)
   assert.deepEqual(writes, [])
 })
 
-test('drive parameters require explicit reads, validate limits and apply only selected fields', async () => {
+test('drive parameters auto-read on open, validate limits and apply only edited fields', async () => {
   state.connected = true
   const original = globalThis.fetch
   const parameters = {values:{forward_amplitude:100,reverse_amplitude:90,step_rate:5000,acceleration:1000},limits:{forward_amplitude:{min:10,max:100},reverse_amplitude:{min:10,max:100},step_rate:{min:800,max:20000},acceleration:{min:1,max:20000}}}
@@ -311,8 +350,9 @@ test('drive parameters require explicit reads, validate limits and apply only se
     return original(url, options)
   }
   await render()
-  await act(async () => { button('驱动参数 · 幅值、步频与加速度').click(); button('读取当前参数').click(); await new Promise(r => setTimeout(r, 5)) })
+  await act(async () => { button('驱动参数 · 幅值、步频与加速度（全部轴逐轴编辑）').click(); await new Promise(r => setTimeout(r, 5)) })
   assert.deepEqual(writes, [])
+  assert.ok(container.querySelector<HTMLInputElement>('[aria-label="步频"]'))
   const input = container.querySelector<HTMLInputElement>('[aria-label="正向驱动幅值"]')!
   async function fill(value: string) {
     await act(async () => {
@@ -325,6 +365,69 @@ test('drive parameters require explicit reads, validate limits and apply only se
   await fill('80')
   await act(async () => { button('应用驱动参数').click(); button('应用驱动参数').click(); await new Promise(r => setTimeout(r,5)) })
   assert.deepEqual(writes,[{path:'/api/stage/parameters/x',body:{forward_amplitude:80,reverse_amplitude:90,step_rate:5000,acceleration:1000}}])
+})
+
+test('per-axis quick params auto-read on open and apply rate and acceleration', async () => {
+  state.connected = true
+  const original = globalThis.fetch
+  const parameters = {values:{forward_amplitude:100,reverse_amplitude:90,step_rate:5000,acceleration:1000},limits:{forward_amplitude:{min:10,max:100},reverse_amplitude:{min:10,max:100},step_rate:{min:800,max:20000},acceleration:{min:1,max:20000}}}
+  globalThis.fetch = async (url, options) => {
+    if (String(url).includes('/parameters/')) {
+      if (options?.method === 'PUT') writes.push({path:String(url),body:JSON.parse(String(options.body))})
+      return new Response(JSON.stringify(parameters))
+    }
+    return original(url, options)
+  }
+  await render()
+  const toggles = [...container.querySelectorAll<HTMLButtonElement>('.stage-quick-params .disclosure__toggle')]
+  assert.equal(toggles.length, 3)
+  await act(async () => { toggles[0].click(); await new Promise(r => setTimeout(r, 5)) })
+  const rate = container.querySelector<HTMLInputElement>('[aria-label="X 轴步频"]')!
+  assert.equal(rate.value, '5000')
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(rate,'1600')
+    rate.dispatchEvent(new dom.window.Event('input',{bubbles:true}))
+  })
+  await act(async () => { button('应用').click(); await new Promise(r => setTimeout(r, 5)) })
+  assert.deepEqual(writes,[{path:'/api/stage/parameters/x',body:{forward_amplitude:100,reverse_amplitude:90,step_rate:1600,acceleration:1000}}])
+})
+
+test('step presets are editable, validated and saved server-side while connected', async () => {
+  state.connected = true
+  globalThis.fetch = async (url, options) => {
+    if (String(url).endsWith('/presets')) {
+      writes.push({path:String(url), body: JSON.parse(String(options?.body ?? '{}'))})
+      if (options?.method === 'PUT') {
+        const body = JSON.parse(String(options.body))
+        state.config = { ...state.config, step_presets: body.presets }
+      }
+    }
+    return new Response(JSON.stringify(state))
+  }
+  await render()
+  await act(async () => { button('自定义步长').click() })
+  const inputs = [...container.querySelectorAll<HTMLInputElement>('[aria-label^="快捷步数"]')]
+  assert.equal(inputs.length, 5)
+  await act(async () => {
+    for (const [index, value] of ['2', '20', '200', '', ''].entries()) {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(inputs[index], value)
+      inputs[index].dispatchEvent(new dom.window.Event('input',{bubbles:true}))
+    }
+    button('保存').click()
+    await new Promise(r => setTimeout(r, 5))
+  })
+  assert.deepEqual(writes, [{path:'/api/stage/presets', body:{presets:[2,20,200]}}])
+  assert.ok(container.textContent?.includes('2 / 20 / 200'))
+  assert.ok(button('Y 轴 20 步'))
+  await act(async () => { button('自定义步长').click() })
+  const again = [...container.querySelectorAll<HTMLInputElement>('[aria-label^="快捷步数"]')]
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(again[1], '2')
+    again[1].dispatchEvent(new dom.window.Event('input',{bubbles:true}))
+    button('保存').click()
+    await new Promise(r => setTimeout(r, 5))
+  })
+  assert.ok(container.textContent?.includes('快捷步数不能重复'))
 })
 
 test('motion unlock requires the stationary acknowledgement and never enables output', async () => {
@@ -363,13 +466,13 @@ test('stage page also allows direct connection despite a previous error without 
   assert.equal(button('确认解除运动锁定').disabled, true)
 })
 
-test('read-only users cannot enable, zero, optimize or change drive parameters', async () => {
+test('read-only users cannot enable, home, optimize or change drive parameters', async () => {
   state.connected = true
   state.channels[2].enabled = true
   await render(false)
-  for (const axis of ['X','Y','Z']) for (const label of ['启用输出','禁用输出','Home / Zero · 计数清零','Optimize · 性能优化']) assert.equal(button(`${axis} 轴${label.includes(' · ') ? ' ' : ''}${label}`).disabled,true)
-  await act(async () => { button('驱动参数 · 幅值、步频与加速度').click() })
-  assert.equal(button('读取当前参数').disabled,true)
+  for (const axis of ['X','Y','Z']) for (const label of ['启用输出','禁用输出','Home · 回零','Optimize · 性能优化']) assert.equal(button(`${axis} 轴${label.includes(' · ') ? ' ' : ''}${label}`).disabled,true)
+  await act(async () => { button('驱动参数 · 幅值、步频与加速度（全部轴逐轴编辑）').click() })
+  assert.equal(button('重新读取').disabled,true)
   assert.deepEqual(writes,[])
 })
 
@@ -379,7 +482,7 @@ test('axis steps are independent, persisted, bounded and scoped to the device ma
   await changeStep('X', '25')
   await act(async () => { button('Y 轴 100 步').click() })
   assert.equal(step('X'), '25'); assert.equal(step('Y'), '100'); assert.equal(step('Z'), '10')
-  await act(async () => { button('X 轴正向移动').click() })
+  await tapButton('X 轴正向移动')
   assert.deepEqual(writes.at(-1)?.body, { axis: 'x', direction: 1, steps: 25 })
   await act(async () => root.unmount())
   root = createRoot(container)
@@ -409,7 +512,7 @@ test('invalid steps block only their own axis and never produce a move', async (
     await changeStep('X', value)
     assert.equal(button('X 轴正向移动').disabled, true)
     assert.equal(button('Y 轴正向移动').disabled, false)
-    await act(async () => { button('X 轴正向移动').click() })
+    await tapButton('X 轴正向移动')
   }
   assert.deepEqual(writes, [])
 })
@@ -425,7 +528,8 @@ test('same-turn repeated clicks are dropped and stop remains independent of an o
     }
     return original(url, init)
   }
-  await act(async () => { button('X 轴正向移动').click(); button('X 轴正向移动').click() })
+  await act(async () => { pointer('pointerdown', button('X 轴正向移动')); pointer('pointerup', button('X 轴正向移动')) })
+  await act(async () => { pointer('pointerdown', button('X 轴正向移动')); pointer('pointerup', button('X 轴正向移动')) })
   assert.equal(writes.filter(row => row.path.endsWith('/move')).length, 1)
   assert.equal(button('全部停止').disabled, false)
   await act(async () => { button('全部停止').click() })
@@ -446,7 +550,7 @@ test('motion_pending blocks new requests until a subsequent status update confir
     return original(url, init)
   }
   await render()
-  await act(async () => { button('X 轴正向移动').click() })
+  await tapButton('X 轴正向移动')
   assert.equal(button('Y 轴正向移动').disabled, true)
   assert.ok(container.textContent?.includes('等待后续状态采样确认空闲'))
   await act(async () => { await new Promise(done => setTimeout(done, 1100)) })
@@ -463,7 +567,7 @@ test('an older in-flight poll cannot overwrite the move response with cached idl
     return original(url, init)
   }
   await act(async () => { await entered.promise })
-  await act(async () => { button('X 轴正向移动').click() })
+  await tapButton('X 轴正向移动')
   await act(async () => oldPoll.resolve(new Response(JSON.stringify({...state, motion_pending: false}))))
   assert.equal(button('Y 轴正向移动').disabled, true)
 })
@@ -471,13 +575,13 @@ test('an older in-flight poll cannot overwrite the move response with cached idl
 test('keyboard is opt-in, ignores repeat and modifiers, and deactivates on edits, blur and dialogs', async () => {
   state.connected = true
   await render()
-  await act(async () => { keys('ArrowRight') })
+  await act(async () => { keys('ArrowRight'); keyUps('ArrowRight') })
   assert.deepEqual(writes, [])
   await act(async () => { button('启用键盘').click() })
   assert.equal(document.activeElement?.getAttribute('aria-label'), '键盘点动控制区域')
   await act(async () => { keys('ArrowRight', {repeat: true}); keys('ArrowUp', {ctrlKey: true}); keys('PageUp', {shiftKey: true}) })
   assert.deepEqual(writes, [])
-  await act(async () => { keys('ArrowLeft') })
+  await tap('ArrowLeft')
   assert.deepEqual(writes.at(-1)?.body, {axis: 'x', direction: -1, steps: 10})
   await act(async () => { keys('Escape') })
   assert.ok(writes.some(row => row.path.endsWith('/stop')))
@@ -517,7 +621,7 @@ test('a server error during movement stays unconfirmed until an explicit stop re
     if (String(url).endsWith('/move')) { moves++; return new Response('internal error', { status: 500 }) }
     return original(url, init)
   }
-  await act(async () => { button('Y 轴反向移动').click() })
+  await tapButton('Y 轴反向移动')
   assert.ok(container.textContent?.includes('Y 轴反向点动 10 步失败（HTTP 500）'))
   assert.ok(container.textContent?.includes('结果未确认'))
   assert.equal(button('Y 轴反向移动').disabled, true)
@@ -535,7 +639,7 @@ test('ambiguous HTTP delivery never unlocks movement just because polling later 
     if (String(url).endsWith('/move')) throw new Error('lost response')
     return original(url, init)
   }
-  await act(async () => { button('X 轴正向移动').click() })
+  await tapButton('X 轴正向移动')
   assert.ok(container.textContent?.includes('结果未确认'))
   await act(async () => { await new Promise(done => setTimeout(done, 1100)) })
   assert.equal(button('X 轴正向移动').disabled, true)
@@ -568,8 +672,8 @@ test('Y and Z keyboard commands use their own steps and hidden pages revoke keyb
   await render()
   await changeStep('Y', '25'); await changeStep('Z', '100')
   await act(async () => { button('启用键盘').click() })
-  await act(async () => { keys('ArrowUp') })
-  await act(async () => { keys('PageDown') })
+  await tap('ArrowUp')
+  await tap('PageDown')
   assert.deepEqual(writes.filter(row => row.path.endsWith('/move')).map(row => row.body), [
     {axis: 'y', direction: 1, steps: 25}, {axis: 'z', direction: -1, steps: 100},
   ])

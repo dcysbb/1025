@@ -93,7 +93,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
       }
     } catch (e) {
       if (mounted.current && mine === actionId.current) {
-        const ambiguous = (path === '/move' || path === '/action' || isStop) && !(e instanceof StageRequestError)
+        const ambiguous = (path === '/move' || path === '/jog' || path === '/action' || isStop) && !(e instanceof StageRequestError)
         if (ambiguous) setUncertain(true)
         setAwaitingRefresh(true)
         const reason = errorMessage(e, '位移台操作失败')
@@ -124,16 +124,29 @@ export default function StagePanel({ auth, connected, configuration = false, onD
       if (mounted.current) setBusy(false)
     }
   }
+  async function savePresets(presets: number[]) {
+    if (!auth) throw new Error('登录后可修改快捷步数')
+    const next = await stageApi<StageState>('/api/stage/presets', 'PUT', { presets }, 20000)
+    if (mounted.current) accept(next)
+    return next
+  }
   const writable = auth && connected && online
   const dirty = draft && state && JSON.stringify(draft) !== JSON.stringify(state.config)
   useEffect(() => { onDirtyChange?.(!!dirty) }, [dirty, onDirtyChange])
   const validMapping = draft && new Set(Object.values(draft.axes)).size === 3
-  function move(axis: Axis, direction: -1 | 1, steps: number) {
+  function movable(axis: Axis) {
     if (!writable || !state?.connected || state.error || uncertain || awaitingRefresh || dirty || state.motion_pending ||
-      state.channels.length !== 3 || state.channels.some(row => row.moving !== false) ||
-      !state.channels.find(row => row.channel === state.config.axes[axis])?.ready ||
-      !Number.isSafeInteger(steps) || steps < 1 || steps > state.config.max_steps) return
+        state.channels.length !== 3 || state.channels.some(row => row.moving !== false) ||
+        !state.channels.find(row => row.channel === state.config.axes[axis])?.ready) return false
+    return true
+  }
+  function move(axis: Axis, direction: -1 | 1, steps: number) {
+    if (!movable(axis) || !Number.isSafeInteger(steps) || steps < 1 || steps > (state?.config.max_steps ?? 0)) return
     void act('/move', { axis, direction, steps }, `${axis.toUpperCase()} 轴请求已下发，等待状态采样确认空闲`)
+  }
+  function jog(axis: Axis, direction: -1 | 1) {
+    if (!movable(axis)) return
+    void act('/jog', { axis, direction }, `${axis.toUpperCase()} 轴连续点动已开始；松开按钮或全部停止后结束`)
   }
 
   return <div ref={panelRef} className="page-content stage-panel">
@@ -142,7 +155,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
       <div className="stage-actions">
         <span className="mode-badge" data-mode={state?.config.mode}>{state?.config.mode === 'simulation' ? '模拟设备' : '真实设备'}</span>
         <span className={`stage-state ${state?.connected && online ? 'stage-state--on' : ''}`}>
-          {!online ? '状态过期 / 等待更新' : state?.connected ? state.diagnostics?.motion_locked ? '已连接 · 移动锁定' : state.motion_pending ? '已连接 · 等待运动确认' : '已连接' : '未连接'}
+          {!online ? '状态过期 / 等待更新' : state?.connected ? state.diagnostics?.motion_locked ? '已连接 · 移动锁定' : state.jogging ? `已连接 · ${state.jogging.axis.toUpperCase()} 轴连续点动中` : state.motion_pending ? '已连接 · 等待运动确认' : '已连接' : '未连接'}
         </span>
         {!configuration && <button className="button button--quiet" disabled={!writable || busy || stopping || !state || state.connected}
           onClick={() => void act('/connect', {}, '位移台已连接')}><Plug size={15}/>连接控制器</button>}
@@ -183,6 +196,11 @@ export default function StagePanel({ auth, connected, configuration = false, onD
             </select></label>
             <label className="stage-invert"><input type="checkbox" checked={draft.inverted[axis]}
               onChange={e => setDraft({ ...draft, inverted: { ...draft.inverted, [axis]: e.target.checked } })} />反转方向</label>
+            <label className="field">回零方向<select aria-label={`${axis.toUpperCase()} 轴回零方向`} value={draft.home_direction?.[axis] ?? -1}
+              onChange={e => setDraft({ ...draft, home_direction: { x: draft.home_direction?.x ?? -1, y: draft.home_direction?.y ?? -1, z: draft.home_direction?.z ?? -1, [axis]: Number(e.target.value) } as Record<Axis, -1 | 1> })}>
+              <option value={-1}>负向（−）</option>
+              <option value={1}>正向（+）</option>
+            </select></label>
           </div>)}
         </fieldset>
         {dirty && <p className="subtle-note">有未保存的更改</p>}
@@ -201,6 +219,6 @@ export default function StagePanel({ auth, connected, configuration = false, onD
     {!configuration && (state ? <StageAdvanced state={state} auth={auth} online={connected && online} busy={busy || stopping} uncertain={uncertain || awaitingRefresh}
       onAct={act} onParameters={parameters} historyVersion={historyVersion}>{(axisTools, utilities) => <StageWorkbench key={[state.config.serial_number, state.config.mode, state.config.max_steps, ...AXES.map(axis => `${state.config.axes[axis]}:${state.config.inverted[axis]}`)].join('|')} state={state} auth={auth} connected={connected} online={online}
       busy={busy} stopping={stopping} uncertain={uncertain} awaitingRefresh={awaitingRefresh} historyVersion={historyVersion}
-      onMove={move} onStop={() => { void act('/stop') }} axisTools={axisTools} advanced={utilities}/>}</StageAdvanced> : <section className="content-panel glass-panel">正在读取位移台状态…</section>)}
+      onMove={move} onJog={jog} onPresets={savePresets} onStop={() => { void act('/stop') }} axisTools={axisTools} advanced={utilities}/>}</StageAdvanced> : <section className="content-panel glass-panel">正在读取位移台状态…</section>)}
   </div>
 }

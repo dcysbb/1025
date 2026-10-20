@@ -122,6 +122,8 @@ class UsbRoutingTests(unittest.TestCase):
         from thorlabs_xa.shared.system_manager import SystemManager
         manager = Mock()
         manager.open_device_as.return_value.transport = 'USB129123456'
+        for subchannel in manager.open_device_as.return_value.get_subchannel.return_value,:
+            subchannel.get_stage_axis_params.return_value.part_number = 'PD1V/M'
         manager.get_device_list.return_value = [
             SimpleNamespace(part_number='PDXC3', device='129123456', transport='101.6.241.172:40303'),
             SimpleNamespace(part_number='PDXC3', device='129123456', transport='USB129123456'),
@@ -151,6 +153,7 @@ class UsbRoutingTests(unittest.TestCase):
         from thorlabs_xa.shared.map_python_to_native import MapPythonToNative
         manager = Mock()
         manager.open_device_as.return_value.transport = ''
+        manager.open_device_as.return_value.get_subchannel.return_value.get_stage_axis_params.return_value.part_number = 'PD1V/M'
         manager.get_device_list.return_value = [
             SimpleNamespace(part_number='PDXC3', device='129999999', transport=''),
             SimpleNamespace(part_number='PDXC3', device='129123456', transport=''),
@@ -191,11 +194,11 @@ class UsbRoutingTests(unittest.TestCase):
         from thorlabs_xa.shared.system_manager import SystemManager
         manager = Mock()
         manager.open_device_as.return_value.transport = '101.6.241.172:40303'
+        manager.open_device_as.return_value.get_subchannel.return_value.get_stage_axis_params.return_value.part_number = 'PD1V/M'
         driver = Pdxc3Driver('129123456', '101.6.241.172')
         with patch.object(SystemManager, 'instance', return_value=manager): driver.connect()
         self.assertEqual(manager.open_device_as.call_args.args[1], '101.6.241.172:40303')
         channel = driver.channels[1]
-        channel.get_stage_axis_params.return_value.part_number = 'PD1V/M'
         driver._set_setting = Mock()
         channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value={'jog.mode':2,'jog.openLoopStepSize':1,'jog.openLoopMaxVelocity':5000,'jog.openLoopAcceleration':1000}[key])
         driver.move(1, 1, 1)

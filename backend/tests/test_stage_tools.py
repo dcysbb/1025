@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import time
 import threading
@@ -270,11 +271,16 @@ class StageToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.stage.connected)
 
     async def test_parameter_reads_and_applies_preserve_connection_configuration(self):
-        before = self.stage.path.read_bytes()
+        before = json.loads(self.stage.path.read_text(encoding="utf-8"))
         values = dict((await self.stage.parameters('x'))['values'], step_rate=1600)
         result = await self.stage.parameters('x', values, 'test')
         self.assertEqual(result['values']['step_rate'], 1600)
-        self.assertEqual(self.stage.path.read_bytes(), before)
+        after = json.loads(self.stage.path.read_text(encoding="utf-8"))
+        for key in ('mode', 'serial_number', 'connection', 'host', 'port', 'axes', 'inverted', 'max_steps'):
+            self.assertEqual(after[key], before[key])
+        self.assertEqual(after['drive_params']['x']['step_rate'], 1600)
+        reloaded = StageController(Path(self.temp.name), self.events)
+        self.assertEqual(reloaded.config.drive_params['x'].step_rate, 1600)
         self.assertEqual(self.stage.driver.counts, {1: 0, 2: 0, 3: 0})
         for bad in ({**values, 'forward_amplitude': 101}, {**values, 'step_rate': 799}, {**values, 'acceleration': 0}, {**values, 'step_rate': True}, {**values, 'arbitrary_setting': 0}):
             with self.assertRaises(ValidationError):
@@ -423,6 +429,7 @@ class DriverContractTests(unittest.TestCase):
         channel.get_stage_axis_params.return_value.part_number = 'PDXC2AD'
         channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value={'jog.mode':1,'jog.openLoopStepSize':1,'jog.openLoopMaxVelocity':5000,'jog.openLoopAcceleration':1000}[key])
         driver.channels = {1: channel}
+        driver.stage_names = {1: 'PDXC2AD'}
         driver._set_setting = Mock()
         with self.assertRaisesRegex(RuntimeError, '读回不一致'):
             driver.move(1, 1, 1)
@@ -436,6 +443,7 @@ class DriverContractTests(unittest.TestCase):
         channel.get_stage_axis_params.return_value.part_number = 'PDXC2AD'
         channel.get_setting.return_value = SimpleNamespace(is_value_set=True, value=0)
         driver.channels = {1: channel}
+        driver.stage_names = {1: 'PDXC2AD'}
         driver._set_setting = Mock()
         with self.assertRaisesRegex(RuntimeError, '本次移动未下发'):
             driver.move(1, 1, 1)
@@ -443,6 +451,97 @@ class DriverContractTests(unittest.TestCase):
         channel.set_position_control_mode.assert_not_called()
         channel.set_enable_state.assert_not_called()
         channel.move.assert_not_called()
+
+    def test_repeat_moves_skip_reconfiguration_and_verification(self):
+        driver = Pdxc3Driver('129123456')
+        channel = Mock()
+        channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value={'jog.mode':2,'jog.openLoopStepSize':23,'jog.openLoopMaxVelocity':5000,'jog.openLoopAcceleration':1000}[key])
+        driver.channels = {1: channel}
+        driver.stage_names = {1: 'PDXC2AD'}
+        driver._set_setting = Mock()
+        driver.move(1, 1, 23)
+        channel.move.assert_called_once()
+        channel.set_position_control_mode.assert_called_once()
+        channel.set_enable_state.assert_called_once()
+        self.assertEqual(len(driver._set_setting.call_args_list), 2)  # jog.mode + step size
+        channel.move.reset_mock()
+        driver.move(1, 1, 23)
+        channel.move.assert_called_once()  # motion re-issued...
+        self.assertEqual(len(driver._set_setting.call_args_list), 2)   # ...with zero reconfiguration
+        channel.set_position_control_mode.assert_called_once()
+        channel.set_enable_state.assert_called_once()
+
+    def test_jog_start_switches_mode_to_continuous_and_moves(self):
+        driver = Pdxc3Driver('129123456')
+        channel = Mock()
+        state = {'jog.mode': 2, 'jog.openLoopStepSize': 23, 'jog.openLoopMaxVelocity': 5000, 'jog.openLoopAcceleration': 1000}
+        channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value=state[key])
+        driver.channels = {1: channel}
+        driver.stage_names = {1: 'PDXC2AD'}
+        driver._set_setting = Mock(side_effect=lambda _, key, value: state.__setitem__(key, value))
+        driver.jog_start(1, -1)
+        self.assertEqual(state['jog.mode'], 1)  # TLMC_JogMode_Continuous
+        self.assertEqual(driver.move_budget_s, 0)  # no completion deadline for continuous jog
+        from thorlabs_xa.shared.enums import TLMC_MoveMode
+        channel.move.assert_called_once_with(TLMC_MoveMode.TLMC_MoveMode_JogReverse, 0, 0)
+
+    def test_home_sets_direction_and_velocity_then_requests_homing(self):
+        driver = Pdxc3Driver('129123456')
+        channel = Mock()
+        channel.subchannel_handle = 7
+        channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value={'jog.openLoopMaxVelocity': 5000, 'jog.openLoopAcceleration': 1000}[key])
+        driver.channels = {2: channel}
+        driver.stage_names = {2: 'PD1V/M'}
+        params = SimpleNamespace(direction='stale', limit_switch='keep', offset_distance=3, velocity=0)
+        native = Mock()
+        native.get_home_params.return_value = params
+        driver.manager = SimpleNamespace(native_functions=native)
+        driver.home(2, -1)
+        from thorlabs_xa.shared.enums import TLMC_HomeDirection
+        native.get_home_params.assert_called_once_with(7, driver.TIMEOUT_MS)
+        self.assertIs(params.direction, TLMC_HomeDirection.TLMC_HomeDirection_Reverse)
+        self.assertEqual(params.velocity, 5000)
+        self.assertEqual(params.limit_switch, 'keep')  # device limit-switch mode untouched
+        native.set_home_params.assert_called_once_with(7, params)
+        channel.home.assert_called_once_with(driver.TIMEOUT_MS)
+
+    async def test_saved_drive_params_restored_on_connect_after_drift(self):
+        await self.stage.disconnect('test')
+        values = {'forward_amplitude': 100, 'reverse_amplitude': 100, 'step_rate': 1600, 'acceleration': 1000}
+        await self.stage.configure(StageConfig(mode='simulation', drive_params={'x': values}), 'test')
+        await self.stage.connect('test')
+        try:
+            self.assertEqual(self.stage.driver.settings[1]['step_rate'], 1600)
+            self.assertFalse(self.stage.snapshot()['error'])
+        finally:
+            self.stage._poll_task.cancel()
+        parameters_events = [c.args for c in self.events.call_args_list if c.args[0] == 'stage_parameters']
+        self.assertTrue(any('恢复' in c.args[2] for c in parameters_events))
+
+    async def test_drive_params_restore_failure_locks_motion_without_dropping_link(self):
+        await self.stage.disconnect('test')
+        driver = Mock()
+        driver.connect.return_value = None
+        driver.status.return_value = [{'channel': n, 'moving': False, 'enabled': True, 'stage': 'PD1V/M',
+                                       'ready': True, 'optimizing': False, 'optimized': False,
+                                       'open_loop': True, 'command_count': 0, 'error': None} for n in (1, 2, 3)]
+        driver.parameters.return_value = {'values': {'forward_amplitude': 100, 'reverse_amplitude': 100,
+                                                      'step_rate': 5000, 'acceleration': 1000},
+                                          'limits': {k: {'min': 1, 'max': 20000} for k in
+                                                     ('forward_amplitude', 'reverse_amplitude', 'step_rate', 'acceleration')}}
+        driver.set_parameters.side_effect = OSError('apply lost')
+        self.stage.driver_factory = lambda _: driver
+        values = {'forward_amplitude': 100, 'reverse_amplitude': 100, 'step_rate': 1600, 'acceleration': 1000}
+        await self.stage.configure(StageConfig(mode='simulation', drive_params={'x': values}), 'test')
+        await self.stage.connect('test')
+        try:
+            self.assertTrue(self.stage.connected)
+            with self.assertRaisesRegex(StageError, '恢复保存的驱动参数失败'):
+                await self.stage.move(StageMove(axis='x', direction=1, steps=1), 'test')
+            driver.move.assert_not_called()
+        finally:
+            self.stage._poll_task.cancel()
+            driver.close = Mock()
 
     def test_close_always_releases_local_device_after_lost_disconnect(self):
         driver = Pdxc3Driver('129123456')
