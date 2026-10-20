@@ -165,8 +165,13 @@ class Pdxc3Driver:
         self.channels = {n: self.device.get_subchannel(n) for n in (1, 2, 3)}
         self.stage_names = {n: c.get_stage_axis_params(self.TIMEOUT_MS).part_number for n, c in self.channels.items()}
         for n, name in self.stage_names.items():
-            if not self.supported(name):
-                raise RuntimeError(f"CH{n} 识别为 {name or '未知'}，不支持当前开环台控制；连接已拒绝")
+            # An empty identification means nothing is attached to that
+            # sub-channel: unused CH2/CH3 must not block a valid CH1. The
+            # channel stays not-ready and motion preflight still refuses it.
+            # A stage that identifies itself with an unsupported part number
+            # is a real mismatch and refuses the whole connection.
+            if name and not self.supported(name):
+                raise RuntimeError(f"CH{n} 识别为 {name}，不支持当前开环台控制；连接已拒绝")
         # Connecting reads state only: no enable, home, position-zero or movement.
 
     def _acquire_lease(self):
@@ -252,7 +257,13 @@ class Pdxc3Driver:
                 if states.get(key):
                     faults.append(label)
             name = self.stage_names.get(n, "")
-            if name and not self.supported(name):
+            if not name:
+                # The controller can flag WrongStageDetected on an unused
+                # sub-channel; "类型不匹配" would read as a hardware fault when
+                # the real condition is simply "no stage connected here".
+                faults = [fault for fault in faults if fault != "位移台类型不匹配"]
+                faults.append("未检测到位移台")
+            elif not self.supported(name):
                 faults.append(f"当前控制台仅支持 PD1/PD1V 开环台，识别为 {name}")
             # This PDXC3 returns PowerOk=False even while XA successfully
             # drives PDXC2AD. It is diagnostic data, not an independent fault.

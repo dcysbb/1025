@@ -226,3 +226,43 @@ class UsbRoutingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '不一致'):
                 driver.connect()
         manager.open_device_as.return_value.get_subchannel.assert_not_called()
+
+    @staticmethod
+    def _manager_with_channel_names(names):
+        manager = Mock()
+        manager.open_device_as.return_value.transport = ''
+        channels = {n: Mock() for n in (1, 2, 3)}
+        for n, name in names.items():
+            channels[n].get_stage_axis_params.return_value.part_number = name
+            channels[n].get_status_item_count.return_value = 0
+            channels[n].get_status_items.return_value = []
+        manager.open_device_as.return_value.get_subchannel.side_effect = lambda n: channels[n]
+        manager.get_device_list.return_value = [
+            SimpleNamespace(part_number='PDXC3', device='129123456', transport='')]
+        return manager, channels
+
+    def test_unconnected_subchannels_do_not_block_the_connected_axis(self):
+        from thorlabs_xa.shared.system_manager import SystemManager
+        manager, channels = self._manager_with_channel_names({1: 'PDXC2AD', 2: '', 3: ''})
+        driver = Pdxc3Driver('129123456', connection='usb')
+        with patch.object(SystemManager, 'instance', return_value=manager):
+            driver.connect()
+            status = driver.status()
+        self.assertEqual(driver.stage_names, {1: 'PDXC2AD', 2: '', 3: ''})
+        self.assertTrue(status[0]['ready'])
+        self.assertFalse(status[1]['ready'])
+        self.assertFalse(status[2]['ready'])
+        self.assertEqual(status[1]['error'], '未检测到位移台')
+        for channel in channels.values():
+            channel.set_enable_state.assert_not_called()
+            channel.move.assert_not_called()
+
+    def test_identified_but_unsupported_stage_still_refuses_the_connection(self):
+        from thorlabs_xa.shared.system_manager import SystemManager
+        manager, channels = self._manager_with_channel_names({1: 'PDXC2AD', 2: 'MLJ050', 3: ''})
+        driver = Pdxc3Driver('129123456', connection='usb')
+        with patch.object(SystemManager, 'instance', return_value=manager):
+            with self.assertRaisesRegex(RuntimeError, 'CH2 识别为 MLJ050，不支持当前开环台'):
+                driver.connect()
+        channels[2].set_enable_state.assert_not_called()
+        channels[2].move.assert_not_called()
