@@ -229,8 +229,13 @@ class StageController:
                 raise StageError("请先断开位移台，再修改连接或轴映射")
             self.path.parent.mkdir(parents=True, exist_ok=True)
             temp = self.path.with_suffix(".json.tmp")
-            temp.write_text(config.model_dump_json(indent=2), encoding="utf-8")
-            temp.replace(self.path)
+            try:
+                temp.write_text(config.model_dump_json(indent=2), encoding="utf-8")
+                temp.replace(self.path)
+            except OSError as exc:
+                raise StageError(
+                    f"无法写入位移台配置文件 {self.path}：{exc}；"
+                    "请检查运行数据目录是否可写（后台账户需要写入权限）") from exc
             self.config = config.model_copy(deep=True)
             self.error = None
             self.channels = []

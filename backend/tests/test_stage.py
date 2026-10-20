@@ -4,7 +4,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 from pydantic import ValidationError
@@ -46,6 +46,16 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
         other = StageController(Path(self.temp.name), self.events)
         self.assertEqual(other.config.axes, config.axes)
         self.assertFalse(other.connected)
+
+    async def test_unwritable_stage_config_names_directory_and_permission(self):
+        failure = PermissionError(13, "Permission denied")
+        with patch.object(Path, "write_text", side_effect=failure):
+            with self.assertRaises(StageError) as caught:
+                await self.stage.configure(StageConfig(mode="simulation"), "test")
+        message = str(caught.exception)
+        self.assertIn(str(self.stage.path), message)
+        self.assertIn("写入权限", message)
+        self.assertFalse(self.stage.path.exists())
 
     async def test_invalid_mapping_and_ip_rejected(self):
         for axes in ({"x": 1, "y": 1, "z": 3}, {"x": 1, "y": 2}, {"x": 0, "y": 2, "z": 3}):

@@ -17,6 +17,8 @@ config.json
 stage.json
 lan-cert.pem
 lan-key.pem
+# Thorlabs XA writes its SDK logs under the backend working directory.
+backend/Thorlabs/
 
 # Frontend
 frontend/node_modules/

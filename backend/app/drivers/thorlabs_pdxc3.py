@@ -16,6 +16,62 @@ import subprocess
 import time
 
 
+XA_GUI_PROCESS = "tlmc_xa_dotnet_ui.exe"
+
+
+def running_xa_processes():
+    """PIDs of the XA GUI, read directly from the OS process table.
+
+    This guard used to spawn PowerShell and parse its stdout. Under a restricted
+    service/sandbox token that child process can enumerate nothing, so the guard
+    silently passed while XA still owned the USB device. A Toolhelp snapshot
+    needs no shell and cannot lose its output.
+    """
+    if os.name != "nt":
+        return []
+    from ctypes import wintypes
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    for name in ("Process32FirstW", "Process32NextW"):
+        function = getattr(kernel, name)
+        function.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+        function.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+
+    snapshot = kernel.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot in (-1, 0xFFFFFFFFFFFFFFFF):
+        raise RuntimeError("无法枚举本机进程，不能确认 XA 是否已退出；请关闭 XA 后重试")
+    found = []
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+        present = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+        while present:
+            if entry.szExeFile.lower() == XA_GUI_PROCESS:
+                found.append(int(entry.th32ProcessID))
+            present = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel.CloseHandle(snapshot)
+    return found
+
+
 def local_networks():
     if os.name != "nt":
         raise RuntimeError("请填写控制器 IPv4 地址；此系统未启用自动网段发现")
@@ -24,7 +80,11 @@ def local_networks():
          "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.AddressState -eq 'Preferred' } | "
          "Select-Object IPAddress,PrefixLength | ConvertTo-Json -Compress"],
         capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
-    data = json.loads(result.stdout or "[]")
+    if result.returncode != 0 or not result.stdout.strip():
+        # An empty result used to look like "no local networks" and produced a
+        # misleading "device not found" message.
+        raise RuntimeError("无法读取本机网段信息，自动发现未执行；请填写控制器 IPv4 地址")
+    data = json.loads(result.stdout)
     rows = data if isinstance(data, list) else [data]
     networks = set()
     for row in rows:
@@ -113,10 +173,7 @@ class Pdxc3Driver:
         if os.name != "nt":
             return
         # XA and this console must never be active control owners simultaneously.
-        running = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-            "Get-Process -Name tlmc_xa_dotnet_ui -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"],
-            capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
-        if running.stdout.strip():
+        if running_xa_processes():
             raise RuntimeError("检测到 XA 进程仍在运行，请完全退出 XA 后再连接；仅关闭通道窗口可能仍占用设备")
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]

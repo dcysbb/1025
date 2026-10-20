@@ -407,7 +407,17 @@ class StageToolsTests(unittest.IsolatedAsyncioTestCase):
         driver.set_parameters.assert_not_called()
 
 
-class DriverContractTests(unittest.TestCase):
+class DriverContractTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # Two contract tests drive the controller, not the bare driver; they
+        # were defined here without fixtures and never ran as coroutines.
+        self.temp = tempfile.TemporaryDirectory()
+        self.events = Mock()
+        self.stage = StageController(Path(self.temp.name), self.events)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
     def test_adapter_and_raw_power_bit_do_not_mask_real_faults(self):
         driver = Pdxc3Driver('129123456')
         driver.channels = {n: Mock() for n in (1, 2, 3)}
@@ -516,7 +526,7 @@ class DriverContractTests(unittest.TestCase):
         finally:
             self.stage._poll_task.cancel()
         parameters_events = [c.args for c in self.events.call_args_list if c.args[0] == 'stage_parameters']
-        self.assertTrue(any('恢复' in c.args[2] for c in parameters_events))
+        self.assertTrue(any('恢复' in args[2] for args in parameters_events))
 
     async def test_drive_params_restore_failure_locks_motion_without_dropping_link(self):
         await self.stage.disconnect('test')
