@@ -44,6 +44,7 @@ class AppConfig(BaseModel):
     stale_timeout_s: float = Field(default=1.0, ge=0.5, le=10.0)
     valve_timeout_s: float = Field(default=2.0, ge=0.5, le=20.0)
     recovery_hold_s: float = Field(default=5.0, ge=0.0, le=120.0)
+    pressure_trip_latched: bool = Field(default=True, strict=True)
     history_retention_days: Optional[int] = Field(default=None, ge=1, le=3650)
     allow_lan: bool = False
     # Position inputs and output mapping must match the installed hardware.
@@ -123,6 +124,8 @@ class SystemStatus(BaseModel):
     interlock: Literal["disarmed", "ready", "armed", "tripped", "fault"] = "disarmed"
     interlock_label: str = "未启用"
     trip_reason: Optional[str] = None
+    auto_reopen_pending: bool = False
+    recovery_remaining_s: Optional[float] = None
     valve: Literal["unknown", "open", "closed", "opening", "closing", "fault"] = "unknown"
     valve_open_sensor: bool = False
     valve_closed_sensor: bool = False

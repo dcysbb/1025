@@ -83,6 +83,7 @@ class InterlockEngine:
         self.mode = self.config.mode
         self.interlock = "disarmed"
         self.trip_reason: Optional[str] = None
+        self._auto_reopen_pending = False
         self._rearm_required = False
         self._lock = TaskLock()
         self._task: Optional[asyncio.Task] = None
@@ -150,6 +151,7 @@ class InterlockEngine:
 
     async def stop(self) -> None:
         self._stopping = True
+        self._auto_reopen_pending = False
         tasks = [task for task in (self._task, self._tpg_task, self._io_task) if task]
         for task in tasks:
             # USB gauge reads run in a thread. Let its bounded request finish
@@ -236,8 +238,11 @@ class InterlockEngine:
             timestamp=self._stamp(),
             mode=self.mode,
             interlock=self.interlock,
-            interlock_label=labels.get(self.interlock, self.interlock),
+            interlock_label="等待压力恢复，自动开阀" if self._auto_reopen_pending else labels.get(self.interlock, self.interlock),
             trip_reason=self.trip_reason,
+            auto_reopen_pending=self._auto_reopen_pending,
+            recovery_remaining_s=(max(0.0, self.config.recovery_hold_s - (now - self._recovery_since))
+                                  if self._auto_reopen_pending and self._recovery_since is not None else None),
             valve=valve,
             valve_open_sensor=open_sensor,
             valve_closed_sensor=closed_sensor,
@@ -399,6 +404,43 @@ class InterlockEngine:
             return "阀位反馈冲突仍未恢复"
         return None
 
+    def _pressure_limit_reached(self) -> bool:
+        selected = [(index + 1, cfg.trip_pa) for index, cfg in enumerate(self.config.channels) if cfg.enabled]
+        samples = {sample["channel"]: sample for sample in self._channels}
+        exceeded = False
+        for channel, limit in selected:
+            sample = samples.get(channel)
+            pressure = sample.get("pressure_pa") if sample else None
+            if not sample or not sample.get("valid") or pressure is None or not math.isfinite(pressure):
+                return False
+            exceeded = exceeded or pressure >= limit
+        return exceeded
+
+    async def _maybe_auto_reopen(self) -> None:
+        if not self._auto_reopen_pending or self.interlock != "tripped":
+            return
+        try:
+            self._check_fresh()
+            if self._off_retry_pending or self._io_reconnecting or self._io_manual_reset_required:
+                raise InterlockError("关阀输出或 I/O 通信尚未确认")
+            pressure_fault = self._pressure_fault()
+            if pressure_fault and not self._pressure_limit_reached():
+                raise InterlockError(pressure_fault)
+        except InterlockError as exc:
+            await self.trip(f"自动恢复已取消：{exc}", kind="auto_recovery_aborted", fault=True)
+            return
+        self._refresh_status()
+        if (self.config.pressure_trip_latched or self._reset_conditions() is not None
+                or self.status.valve != "closed" or self._recovery_since is None
+                or time.monotonic() - self._recovery_since < self.config.recovery_hold_s):
+            return
+        try:
+            await self.reset("system")
+            self._event("interlock_auto_recovered", "warning", "压力恢复并保持稳定，自动恢复联锁并请求开阀")
+            await self.open_valve("system")
+        except (InterlockError, ModbusError, OSError) as exc:
+            await self.trip(f"自动恢复失败：{exc}", kind="auto_recovery_failed", fault=True)
+
     def _valve_relay_state(self, opened: bool, config: Optional[AppConfig] = None) -> bool:
         return opened == (config or self.config).valve_open_on_energized
 
@@ -450,9 +492,16 @@ class InterlockEngine:
                 self._event("io_error", "critical", "撤销开阀输出失败，阀门关闭状态无法保证", details={"error": str(exc)})
 
     @serialized
-    async def trip(self, reason: str, kind: str = "pressure_trip", fault: bool = False) -> None:
+    async def trip(self, reason: str, kind: str = "pressure_trip", fault: bool = False,
+                   pressure_exceeded: Optional[bool] = None) -> None:
         async with self._lock:
             already = self.interlock in ("tripped", "fault")
+            self._auto_reopen_pending = (
+                self.interlock == "armed" and not fault and kind == "pressure_trip"
+                and not self.config.pressure_trip_latched and not self._stopping
+                and self._open_output
+                and (self._pressure_limit_reached() if pressure_exceeded is None else pressure_exceeded)
+            )
             same_fault = already and self.trip_reason == reason
             self.interlock = "fault" if fault else "tripped"
             self.trip_reason = reason
@@ -488,6 +537,7 @@ class InterlockEngine:
 
     @serialized
     async def disarm(self, actor: str = "operator") -> None:
+        self._auto_reopen_pending = False
         await self._clear_debug_outputs()
         if self.interlock == "armed" or self.interlock == "ready":
             self.interlock = "disarmed"
@@ -535,6 +585,7 @@ class InterlockEngine:
 
     @serialized
     async def clear_fault(self, actor: str = "operator") -> None:
+        self._auto_reopen_pending = False
         if self.interlock not in ("tripped", "fault"):
             raise InterlockError("当前没有待清除的故障")
         try:
@@ -586,6 +637,7 @@ class InterlockEngine:
 
     @serialized
     async def reset(self, actor: str = "operator") -> None:
+        self._auto_reopen_pending = False
         if self.interlock not in ("tripped", "fault"):
             raise InterlockError("当前没有待复位的联锁故障")
         recovery_fault = self._reset_conditions()
@@ -611,13 +663,15 @@ class InterlockEngine:
             self._refresh_status()
             if self.status.valve != "closed":
                 raise InterlockError("关闭位置反馈已变化，不能复位联锁")
+        if self._recovery_since is None or time.monotonic() - self._recovery_since < self.config.recovery_hold_s:
+            raise InterlockError("真空恢复状态已变化，请重新等待稳定时间")
         self.interlock = "armed"
         self.trip_reason = None
         self._valve_command = "close"
         self._valve_command_at = time.monotonic()
         self._motion_reported = False
         self._motion_timed_out = False
-        self._event("interlock_reset", "warning", "操作员复位联锁；阀门仍保持关闭", actor)
+        self._event("interlock_reset", "warning", "联锁已复位；阀门仍保持关闭", actor)
         self._rearm_required = False
         self._refresh_status()
         self._publish()
@@ -648,7 +702,7 @@ class InterlockEngine:
         self._valve_command_at = time.monotonic()
         self._motion_reported = False
         self._motion_timed_out = False
-        self._event("valve_open_command", "warning", "操作员请求开阀", actor)
+        self._event("valve_open_command", "warning", "压力恢复自动请求开阀" if actor == "system" else "操作员请求开阀", actor)
         if self._history_error:
             await self.trip("开阀审计写入失败", kind="storage_fault", fault=True)
             raise InterlockError("审计存储故障，已撤销开阀输出")
@@ -657,6 +711,8 @@ class InterlockEngine:
 
     @serialized
     async def close_valve(self, actor: str = "operator", reason: str = "操作员请求关阀") -> None:
+        self._auto_reopen_pending = False
+        self._recovery_since = None
         await self._clear_debug_outputs()
         await self._safe_open_output()
         self._valve_command = "close"
@@ -670,6 +726,8 @@ class InterlockEngine:
     @serialized
     async def apply_config(self, config: AppConfig, actor: str = "operator", reconnect: bool = True) -> None:
         async with self._lock:
+            self._auto_reopen_pending = False
+            self._recovery_since = None
             await self._clear_debug_outputs()
             if self.interlock == "armed":
                 self.interlock = "tripped"
@@ -1139,6 +1197,11 @@ class InterlockEngine:
             await self.trip("历史存储故障，已撤销开阀许可", kind="history_write_error", fault=True)
 
     def _begin_io_recovery(self, error: str) -> None:
+        if self._auto_reopen_pending:
+            self._auto_reopen_pending = False
+            self._recovery_since = None
+            self.trip_reason = "DAM 通信中断，自动开阀已取消；请人工复位"
+            self._event("auto_recovery_aborted", "critical", self.trip_reason)
         self._adam_connected = False
         self._io_error = error
         if self.config.io_device != "dam0808d" or self._io_manual_reset_required:
@@ -1222,14 +1285,17 @@ class InterlockEngine:
                 async with self._gauge_lock:
                     await self.tpg.read_unit()
                 self._next_unit_check = time.monotonic() + 1.0
-            if self.interlock == "armed":
+            if self._auto_reopen_pending and self._reset_conditions() is not None:
+                self._recovery_since = None
+            if self.interlock == "armed" or self._auto_reopen_pending:
                 reason = self._pressure_fault()
                 if reason and self._pending_gauge_trip is None:
-                    self._pending_gauge_trip = (reason, "pressure_trip")
+                    kind = "pressure_trip" if self._pressure_limit_reached() else "measurement_trip"
+                    self._pending_gauge_trip = (reason, kind)
         except (TPG366Error, ModbusError, OSError, ValueError) as exc:
             self._tpg_connected = False
             self._tpg_error = str(exc)
-            if self.interlock == "armed" and self._pending_gauge_trip is None:
+            if (self.interlock == "armed" or self._auto_reopen_pending) and self._pending_gauge_trip is None:
                 self._pending_gauge_trip = (f"真空规通信故障：{exc}", "device_communication_trip")
             if self.tpg:
                 async with self._gauge_lock:
@@ -1297,7 +1363,12 @@ class InterlockEngine:
         pending = self._pending_gauge_trip
         self._pending_gauge_trip = None
         if self.interlock == "armed" and pending:
-            await self.trip(pending[0], kind=pending[1], fault=pending[1] != "pressure_trip")
+            await self.trip(pending[0], kind=pending[1], fault=pending[1] not in ("pressure_trip", "measurement_trip"),
+                            pressure_exceeded=pending[1] == "pressure_trip")
+        elif self._auto_reopen_pending and pending:
+            self._recovery_since = None
+            if pending[1] != "pressure_trip":
+                await self.trip(pending[0], kind=pending[1], fault=True)
         pressure_fault = self._pressure_fault()
         if self.interlock == "armed" and pressure_fault:
             await self.trip(pressure_fault)
@@ -1340,7 +1411,8 @@ class InterlockEngine:
 
         recovery_pending = self.interlock in ("tripped", "fault") or self._rearm_required
         recovery_fault = self._reset_conditions() if recovery_pending else "inactive"
-        if recovery_pending and recovery_fault is None:
+        if (recovery_pending and recovery_fault is None
+                and (not self._auto_reopen_pending or self.status.valve == "closed")):
             if self._recovery_since is None:
                 self._recovery_since = time.monotonic()
         elif recovery_pending:
@@ -1350,6 +1422,7 @@ class InterlockEngine:
         if self._channels and now - self._last_history_write >= self.config.sample_interval_s:
             await self._record_sample()
             self._last_history_write = now
+        await self._maybe_auto_reopen()
         if self.config.history_retention_days is not None and now - self._last_retention_check >= 3600:
             cutoff = datetime.now(timezone.utc).timestamp() - self.config.history_retention_days * 86400
             cutoff_iso = datetime.fromtimestamp(cutoff, timezone.utc).isoformat()

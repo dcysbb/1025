@@ -309,6 +309,44 @@ test('fault acknowledgement uses clear-fault without automatically arming',async
   assert.ok(container.textContent?.includes('故障已清除，联锁未启用'))
   assert.ok(byText('启用联锁'))
 })
+
+test('pressure recovery mode is selectable and saved without touching hardware settings',async()=>{
+  const original=globalThis.fetch
+  let saved:Record<string,unknown>|null=null
+  globalThis.fetch=async(url,options)=>{
+    if(String(url).endsWith('/config')&&options?.method==='PATCH'){
+      saved=JSON.parse(String(options.body)).config
+      return new Response(JSON.stringify({config:{...config,...saved},restart_required:false}))
+    }
+    return original(url,options)
+  }
+  await click(byText('设置'))
+  const select=container.querySelector<HTMLSelectElement>('select[aria-label="超压恢复方式"]')!
+  assert.equal(select.value,'latched')
+  await act(async()=>{select.value='automatic';select.dispatchEvent(new dom.window.Event('change',{bubbles:true}))})
+  await click(byText('保存设置'))
+  assert.ok(saved)
+  assert.equal(saved.pressure_trip_latched,false)
+  assert.equal('open_output' in saved,false)
+  assert.equal('dam_serial_port' in saved,false)
+  assert.equal(select.value,'automatic')
+})
+
+test('automatic reopen status shows the timer and provides a manual close cancellation',async()=>{
+  const original=globalThis.fetch
+  const requests:string[]=[]
+  globalThis.fetch=async(url,options)=>{
+    if(options?.method==='POST')requests.push(String(url))
+    return original(url,options)
+  }
+  await act(async()=>{Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify({...status,
+    interlock:'tripped',auto_reopen_pending:true,recovery_remaining_s:2.2})})})
+  assert.ok(container.textContent?.includes('稳定倒计时 3 秒'))
+  await click(byText('联锁控制'))
+  await click(byText('取消自动开阀'))
+  assert.deepEqual(requests,['/api/valve/close'])
+  assert.equal(container.textContent?.includes('等待压力恢复后自动开阀'),false)
+})
 test('hardware navigation owns connections and valve mapping',async()=>{
   await click(byText('设置'))
   assert.equal(container.textContent?.includes('TPG366 真空规'),false)
