@@ -436,6 +436,14 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DriverTests(unittest.TestCase):
+    def test_status_failure_identifies_channel_and_is_never_reported_as_idle(self):
+        from app.drivers.thorlabs_pdxc3 import Pdxc3Driver
+        driver = Pdxc3Driver("129123456")
+        driver.channels = {2: Mock()}
+        driver.channels[2].request_status.side_effect = OSError("timeout")
+        with self.assertRaisesRegex(RuntimeError, "CH2.*timeout"):
+            driver.status()
+
     def test_isolated_worker_routes_continuous_motion_and_home(self):
         from app.drivers.isolated_pdxc3 import IsolatedPdxc3Driver, _serve
         proxy = IsolatedPdxc3Driver("129123456")

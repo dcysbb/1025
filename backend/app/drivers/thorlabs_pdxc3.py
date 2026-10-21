@@ -125,6 +125,7 @@ class Pdxc3Driver:
         # invalidate the drive cache.
         self._channel_state = {}
         self._drive_params = {}
+        self._last_motion_at = float("-inf")
 
     def connect(self):
         self._acquire_lease()
@@ -243,9 +244,15 @@ class Pdxc3Driver:
 
     def status(self):
         started = time.monotonic()
+        settling = .05 - (started - self._last_motion_at)
+        if settling > 0:
+            time.sleep(settling)
         result = []
         for n, channel in self.channels.items():
-            channel.request_status(self.TIMEOUT_MS)
+            try:
+                channel.request_status(self.TIMEOUT_MS)
+            except Exception as exc:
+                raise RuntimeError(f"CH{n} 状态查询失败：{exc}") from exc
             items = channel.get_status_items(0, channel.get_status_item_count())
             states = {item.id.name.removeprefix("TLMC_StatusItemId_"): item.value for item in items}
             moving_keys = ("MovingClockwise", "MovingCounterclockwise", "JoggingClockwise", "JoggingCounterclockwise")
@@ -356,6 +363,7 @@ class Pdxc3Driver:
             channel, int(TLMC_JogMode.TLMC_JogMode_SingleStep), steps)
         self.move_budget_s = max(3, 4 * math.sqrt(steps / acceleration) + steps / rate + 2)
         target.move(TLMC_MoveMode.TLMC_MoveMode_JogForward if direction > 0 else TLMC_MoveMode.TLMC_MoveMode_JogReverse, 0, 0)
+        self._last_motion_at = time.monotonic()
 
     def jog_start(self, channel, direction):
         """Press-and-hold jog: run continuously in the given direction until stop()."""
@@ -367,6 +375,7 @@ class Pdxc3Driver:
             channel, int(TLMC_JogMode.TLMC_JogMode_Continuous))
         self.move_budget_s = 0  # Continuous jog has no completion deadline.
         target.move(TLMC_MoveMode.TLMC_MoveMode_JogForward if direction > 0 else TLMC_MoveMode.TLMC_MoveMode_JogReverse, 0, 0)
+        self._last_motion_at = time.monotonic()
 
     def home(self, channel, direction):
         """Try the documented home search: keep the device's limit-switch mode,
