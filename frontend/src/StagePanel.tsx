@@ -139,7 +139,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
       return result
     } finally {
       generation.current++; commandRef.current = false
-      if (mounted.current) setBusy(false)
+      if (mounted.current) { setBusy(false); refreshRef.current() }
     }
   }
   async function savePresets(presets: number[]) {

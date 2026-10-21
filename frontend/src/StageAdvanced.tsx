@@ -75,10 +75,10 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
   // Opening the parameter panel reads the current axis automatically; the old
   // manual "read first" step is gone.
   useEffect(() => {
-    if (!paramOpen || !canReadParameters || parameters || parameterRef.current) return
+    if (!paramOpen || !canReadParameters || parameters || parameterRef.current || error) return
     void readOrApply(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- Auto-read on open/axis change only.
-  }, [paramOpen, identity, canReadParameters])
+  }, [paramOpen, identity, canReadParameters, error])
   const confirmRow = confirm && confirm.operation !== 'recover' ? state.channels.find(item => item.channel === confirm.channel) : null
   const canConfirm = confirm?.identity === deviceIdentity && (confirm.operation === 'recover' ? auth && online && !busy && stationary && (state.motion_pending || state.diagnostics?.motion_locked) :
     !blockedFor(confirm.axis) && confirm.channel === state.config.axes[confirm.axis] && confirmRow?.open_loop !== false && (confirm.operation !== 'optimize' || !!confirmRow?.enabled))
@@ -196,45 +196,48 @@ export function QuickParams({axis, state, auth, online, busy, uncertain, onParam
   const [draft, setDraft] = useState<{step_rate: string; acceleration: string} | null>(null)
   const [error, setError] = useState(''), [feedback, setFeedback] = useState('')
   const [working, setWorking] = useState(false)
-  const identity = JSON.stringify([axis, state.config.serial_number, state.config.mode, state.connected, state.config.axes])
+  const epoch = useRef(0), requestRef = useRef(false)
+  const identity = JSON.stringify([axis, state.config.serial_number, state.config.mode, state.config.connection, state.config.host, state.config.port, state.connected, state.config.axes, state.config.inverted])
   useEffect(() => {
+    epoch.current++; requestRef.current = false
     // eslint-disable-next-line react/set-state-in-effect -- Device/axis changes revoke the quick draft.
-    setParams(null); setDraft(null); setError(''); setFeedback('')
+    setParams(null); setDraft(null); setError(''); setFeedback(''); setWorking(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- This ref tracks request generations, not a DOM node.
+    return () => { epoch.current++ }
   }, [identity])
   const row = state.channels.find(item => item.channel === channel)
   const idle = state.channels.length === 3 && state.channels.every(item => item.moving === false && !item.optimizing)
-  const canUse = auth && online && state.connected && !busy && !uncertain && !state.error && idle && !state.motion_pending && !!row?.ready
+  const blocked = !auth ? '登录后可读取和修改参数。' : !online ? '后台状态已过期，请等待连接恢复。' : !state.connected ? '控制器未连接。' : uncertain ? '操作结果未确认，请先停止并核对状态。' : state.error || (state.motion_pending || !idle ? '运动或优化进行中，停止并确认空闲后可读取和修改参数。' : !row?.ready ? row?.error || '此通道未就绪。' : busy && !working ? '其他请求处理中，请稍候。' : '')
+  const canUse = !blocked && !busy
   useEffect(() => {
-    if (!open || !canUse || params || working) return
-    let cancelled = false
-    setWorking(true); setError('')
-    void onParameters(axis).then(next => {
-      if (!cancelled) { setParams(next); setDraft({step_rate: String(next.values.step_rate), acceleration: String(next.values.acceleration)}) }
-    }).catch(e => { if (!cancelled) setError(errorMessage(e, '读取驱动参数失败')) })
-      .finally(() => { if (!cancelled) setWorking(false) })
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- Auto-read once per open.
-  }, [open, canUse, identity])
+    if (open && canUse && !params && !working && !error) void readOrApply()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Busy changes must not cancel the request they started.
+  }, [open, canUse, identity, params, working, error])
   const dirty = params && draft && (String(params.values.step_rate) !== draft.step_rate || String(params.values.acceleration) !== draft.acceleration)
-  const invalid = !params || !draft || [draft.step_rate, draft.acceleration].some(value => {
-    const n = Number(value), bounds = value === draft.step_rate ? params.limits.step_rate : params.limits.acceleration
+  const invalid = !params || !draft || (['step_rate', 'acceleration'] as const).some(key => {
+    const value = draft[key], n = Number(value), bounds = params.limits[key]
     return !value.trim() || !Number.isSafeInteger(n) || bounds.min != null && n < bounds.min || bounds.max != null && n > bounds.max
   })
-  async function apply() {
-    if (!params || !draft || invalid || !dirty || !canUse || working) return
+  async function readOrApply(apply = false) {
+    if (!canUse || requestRef.current || apply && (!params || !draft || invalid || !dirty)) return
+    requestRef.current = true
+    const mine = epoch.current
     setWorking(true); setError(''); setFeedback('')
     try {
-      const next = await onParameters(axis, {...params.values, step_rate: Number(draft.step_rate), acceleration: Number(draft.acceleration)})
-      setParams(next); setDraft({step_rate: String(next.values.step_rate), acceleration: String(next.values.acceleration)})
-      setFeedback('已应用并保存；重连后自动恢复。')
-    } catch (e) { setError(errorMessage(e, '参数应用未确认，请重新读取核对')) }
-    finally { setWorking(false) }
+      const next = await onParameters(axis, apply ? {...params!.values, step_rate: Number(draft!.step_rate), acceleration: Number(draft!.acceleration)} : undefined)
+      if (mine === epoch.current) {
+        setParams(next); setDraft({step_rate: String(next.values.step_rate), acceleration: String(next.values.acceleration)})
+        if (apply) setFeedback('已应用并保存；重连后自动恢复。')
+      }
+    } catch (e) { if (mine === epoch.current) setError(errorMessage(e, apply ? '参数应用未确认，请重新读取核对' : '读取驱动参数失败')) }
+    finally { if (mine === epoch.current) { requestRef.current = false; setWorking(false) } }
   }
   return <div className="stage-quick-params">
     <button type="button" className="disclosure__toggle" aria-expanded={open} aria-controls={`stage-quick-${axis}`} onClick={() => setOpen(value => !value)}>
       速度 / 加速度{params ? `：${params.values.step_rate} 步/秒 · ${params.values.acceleration} 步/秒²` : ''}
     </button>
     <Reveal open={open} id={`stage-quick-${axis}`}>
+      <div className="stage-parameter-actions"><button className="button button--quiet" disabled={!canUse || working} onClick={() => void readOrApply()}><RefreshCw size={14}/>{working ? '处理中…' : '重新读取'}</button>{dirty && <span className="subtle-note">有未应用的参数</span>}</div>
       {draft && params ? <div className="stage-quick-grid">
         <label className="field">步频（步/秒）<input type="number" aria-label={`${axis.toUpperCase()} 轴步频`} value={draft.step_rate} disabled={!canUse || working}
           min={params.limits.step_rate.min ?? undefined} max={params.limits.step_rate.max ?? undefined} step={1}
@@ -242,8 +245,10 @@ export function QuickParams({axis, state, auth, online, busy, uncertain, onParam
         <label className="field">加速度（步/秒²）<input type="number" aria-label={`${axis.toUpperCase()} 轴加速度`} value={draft.acceleration} disabled={!canUse || working}
           min={params.limits.acceleration.min ?? undefined} max={params.limits.acceleration.max ?? undefined} step={1}
           onChange={event => setDraft({...draft, acceleration: event.target.value})}/></label>
-        <button className="button button--primary" disabled={!canUse || working || invalid || !dirty} onClick={() => void apply()}>应用</button>
-      </div> : <p className="stage-note">{canUse ? '正在读取…' : '通道就绪且空闲后自动读取。'}</p>}
+        <button className="button button--primary" disabled={!canUse || working || invalid || !dirty} onClick={() => void readOrApply(true)}>应用</button>
+      </div> : !blocked && <p className="stage-note">{working ? '正在读取…' : error ? '读取失败，请重试。' : '等待读取当前参数。'}</p>}
+      {blocked && <p className="stage-note">{blocked}</p>}
+      {params && draft && invalid && <p className="inline-error">请输入范围内的整数：步频 {params.limits.step_rate.min ?? '—'}–{params.limits.step_rate.max ?? '—'}，加速度 {params.limits.acceleration.min ?? '—'}–{params.limits.acceleration.max ?? '—'}。</p>}
       {error && <p className="inline-error" role="alert">{error}</p>}
       {feedback && <p className="stage-message" role="status">{feedback}</p>}
     </Reveal>

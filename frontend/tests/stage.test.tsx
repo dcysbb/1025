@@ -4,6 +4,8 @@ import { JSDOM } from 'jsdom'
 import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import StagePanel from '../src/StagePanel'
+import { QuickParams } from '../src/StageAdvanced'
+import type { ParameterState, StageState } from '../src/stageClient'
 import { makeStageProfile } from '../src/stageProfiles'
 
 const initialDom = new JSDOM('<!doctype html><div/>', { url: 'http://localhost' })
@@ -447,6 +449,140 @@ test('per-axis quick params auto-read on open and apply rate and acceleration', 
   })
   await act(async () => { button('应用').click(); await new Promise(r => setTimeout(r, 5)) })
   assert.deepEqual(writes,[{path:'/api/stage/parameters/x',body:{forward_amplitude:100,reverse_amplitude:90,step_rate:1600,acceleration:1000}}])
+})
+
+const quickParameterFixture = (): ParameterState => ({values:{forward_amplitude:100,reverse_amplitude:90,step_rate:5000,acceleration:1000},limits:{forward_amplitude:{min:10,max:100},reverse_amplitude:{min:10,max:100},step_rate:{min:800,max:20000},acceleration:{min:1,max:20000}}})
+async function fillQuick(label: string, value: string) {
+  const input = container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`)!
+  assert.ok(input)
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(input,value)
+    input.dispatchEvent(new dom.window.Event('input',{bubbles:true}))
+  })
+}
+
+test('quick params survive parent busy renders and collapsing during a slow read and write', async () => {
+  state.connected = true
+  const original = globalThis.fetch
+  const parameters = quickParameterFixture()
+  let release!: () => void
+  let reads = 0
+  globalThis.fetch = async (url, options) => {
+    if (!String(url).includes('/parameters/')) return original(url, options)
+    if (options?.method === 'PUT') {
+      writes.push({path:String(url),body:JSON.parse(String(options.body))})
+      parameters.values = JSON.parse(String(options.body))
+    } else reads++
+    await new Promise<void>(resolve => { release = resolve })
+    return new Response(JSON.stringify(parameters))
+  }
+  await render()
+  const toggle = container.querySelector<HTMLButtonElement>('.stage-quick-params .disclosure__toggle')!
+  await act(async () => toggle.click())
+  assert.ok(container.querySelector('.stage-quick-params')?.textContent?.includes('正在读取…'))
+  assert.equal(button('处理中…').disabled, true)
+  assert.equal(reads, 1)
+  await act(async () => toggle.click())
+  await act(async () => release())
+  await act(async () => toggle.click())
+  assert.equal(container.querySelector<HTMLInputElement>('[aria-label="X 轴步频"]')?.value, '5000')
+  assert.equal(reads, 1)
+  await fillQuick('X 轴步频','1600')
+  await fillQuick('X 轴加速度','250')
+  await act(async () => { button('应用').click(); button('应用').click() })
+  assert.equal(writes.length, 1)
+  assert.equal(container.querySelector<HTMLInputElement>('[aria-label="X 轴步频"]')?.disabled, true)
+  assert.equal(button('全部停止').disabled, false)
+  await act(async () => release())
+  assert.equal(container.querySelector<HTMLInputElement>('[aria-label="X 轴步频"]')?.disabled, false)
+  assert.ok(toggle.textContent?.includes('1600 步/秒 · 250 步/秒²'))
+  assert.deepEqual(writes,[{path:'/api/stage/parameters/x',body:{forward_amplitude:100,reverse_amplitude:90,step_rate:1600,acceleration:250}}])
+})
+
+for (const quick of [true, false]) test(`${quick ? 'quick' : 'advanced'} parameter read failure waits for explicit retry`, async () => {
+  state.connected = true
+  const original = globalThis.fetch
+  let reads = 0
+  globalThis.fetch = async (url, options) => {
+    if (!String(url).includes('/parameters/')) return original(url, options)
+    reads++
+    await new Promise(resolve => setTimeout(resolve, 10))
+    return reads === 1 ? new Response(JSON.stringify({detail:'参数读取超时'}),{status:409}) : new Response(JSON.stringify(quickParameterFixture()))
+  }
+  await render()
+  await act(async () => {
+    if (quick) container.querySelector<HTMLButtonElement>('.stage-quick-params .disclosure__toggle')!.click()
+    else button('驱动参数 · 幅值、步频与加速度（全部轴逐轴编辑）').click()
+  })
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+  assert.equal(reads, 1)
+  assert.ok(container.textContent?.includes('参数读取超时'))
+  const reread = container.querySelector<HTMLButtonElement>(quick ? '.stage-quick-params .stage-parameter-actions button' : '.stage-parameter-disclosure .stage-parameter-actions button')!
+  assert.equal(reread.disabled, false)
+  await act(async () => reread.click())
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 25)) })
+  assert.equal(reads, 2)
+  assert.equal(container.querySelector<HTMLInputElement>(quick ? '[aria-label="X 轴步频"]' : '[aria-label="步频"]')?.value, '5000', container.querySelector('.stage-parameter-disclosure')?.textContent ?? '')
+  assert.deepEqual(writes, [])
+})
+
+test('quick parameter validation uses each field limits even when the numbers are equal', async () => {
+  state.connected = true
+  const original = globalThis.fetch
+  const parameters = quickParameterFixture()
+  parameters.limits.acceleration.max = 500
+  parameters.values.acceleration = 100
+  globalThis.fetch = async (url, options) => {
+    if (!String(url).includes('/parameters/')) return original(url, options)
+    if (options?.method === 'PUT') writes.push({path:String(url),body:JSON.parse(String(options.body))})
+    return new Response(JSON.stringify(parameters))
+  }
+  await render()
+  await act(async () => container.querySelector<HTMLButtonElement>('.stage-quick-params .disclosure__toggle')!.click())
+  await fillQuick('X 轴步频','800')
+  await fillQuick('X 轴加速度','800')
+  assert.equal(button('应用').disabled, true)
+  assert.ok(container.textContent?.includes('加速度 1–500'))
+  assert.deepEqual(writes, [])
+  await fillQuick('X 轴加速度','100')
+  assert.equal(button('应用').disabled, false)
+  await act(async () => button('应用').click())
+  assert.deepEqual(writes,[{path:'/api/stage/parameters/x',body:{forward_amplitude:100,reverse_amplitude:90,step_rate:800,acceleration:100}}])
+})
+
+test('quick params discard responses from the previous controller and permit the next read', async () => {
+  const snapshot = {...state,connected:true,motion_pending:false} as unknown as StageState
+  let release!: (value: ParameterState) => void
+  let reads = 0
+  const onParameters = async () => { reads++; return new Promise<ParameterState>(resolve => {release = resolve}) }
+  const show = async (current: StageState) => act(async () => root.render(<QuickParams axis="x" state={current} auth online busy={false} uncertain={false} onParameters={onParameters}/>))
+  await show(snapshot)
+  await act(async () => container.querySelector<HTMLButtonElement>('.disclosure__toggle')!.click())
+  const oldRelease = release
+  await show({...snapshot,config:{...snapshot.config,serial_number:'new-controller'}})
+  assert.equal(reads, 2)
+  await act(async () => oldRelease(quickParameterFixture()))
+  assert.equal(container.querySelector('[aria-label="X 轴步频"]'), null)
+  const latest = quickParameterFixture(); latest.values.step_rate = 1600
+  await act(async () => release(latest))
+  assert.equal(container.querySelector<HTMLInputElement>('[aria-label="X 轴步频"]')?.value, '1600')
+})
+
+test('quick params explain motion blocks and make no request while moving', async () => {
+  state.connected = true; state.motion_pending = true
+  state.channels[0].moving = true
+  let reads = 0
+  const original = globalThis.fetch
+  globalThis.fetch = async (url,options) => {
+    if (String(url).includes('/parameters/')) reads++
+    return original(url,options)
+  }
+  await render()
+  await act(async () => container.querySelector<HTMLButtonElement>('.stage-quick-params .disclosure__toggle')!.click())
+  assert.equal(reads, 0)
+  assert.ok(container.querySelector('.stage-quick-params')?.textContent?.includes('运动或优化进行中'))
+  assert.equal(container.querySelector<HTMLButtonElement>('.stage-quick-params .stage-parameter-actions button')?.disabled, true)
+  assert.equal(button('全部停止').disabled,false)
 })
 
 test('step presets are editable, validated and saved server-side while connected', async () => {
