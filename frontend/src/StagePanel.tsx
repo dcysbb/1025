@@ -19,6 +19,13 @@ export default function StagePanel({ auth, connected, configuration = false, onD
   const [uncertain, setUncertain] = useState(false), [awaitingRefresh, setAwaitingRefresh] = useState(false)
   const [lastRead, setLastRead] = useState(0), [historyVersion, setHistoryVersion] = useState(0)
   const commandRef = useRef(false), stopRef = useRef(false), generation = useRef(0), actionId = useRef(0)
+  const refreshRef = useRef<() => void>(() => {})
+  const motionRef = useRef(false)
+  const jogLease = useRef<{id: string; timer?: ReturnType<typeof setInterval>} | null>(null)
+  function clearJogLease() {
+    if (jogLease.current?.timer) clearInterval(jogLease.current.timer)
+    jogLease.current = null
+  }
   const mounted = useRef(true)
   const panelRef = useRef<HTMLDivElement>(null), headerRef = useRef<HTMLElement>(null)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
@@ -34,6 +41,8 @@ export default function StagePanel({ auth, connected, configuration = false, onD
     target?.scrollIntoView({block: 'start', behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'})
   }
   const accept = useCallback((next: StageState) => {
+    motionRef.current = !!next.motion_pending
+    if (!next.jogging && !commandRef.current) clearJogLease()
     setState(next)
     setDraft(prior => configuration ? prior ?? structuredClone(next.config) : structuredClone(next.config))
     setOnline(true)
@@ -49,7 +58,11 @@ export default function StagePanel({ auth, connected, configuration = false, onD
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
+    let inFlight = false
     async function refresh() {
+      if (cancelled || inFlight) return
+      clearTimeout(timer)
+      inFlight = true
       const epoch = generation.current
       try {
         if (commandRef.current || stopRef.current) return
@@ -64,15 +77,18 @@ export default function StagePanel({ auth, connected, configuration = false, onD
           setReadError(errorMessage(error, '读取 PDXC3 位移台状态失败'))
         }
       } finally {
-        if (!cancelled) timer = setTimeout(refresh, 1000)
+        inFlight = false
+        if (!cancelled) timer = setTimeout(refresh, motionRef.current ? 100 : 500)
       }
     }
+    refreshRef.current = () => { void refresh() }
     void refresh()
-    return () => { cancelled = true; clearTimeout(timer) }
+    return () => { cancelled = true; clearTimeout(timer); clearJogLease() }
   }, [accept])
 
   async function act(path: string, body?: unknown, success = '') {
     const isStop = path === '/stop'
+    if (isStop) clearJogLease()
     if (isStop ? stopRef.current : commandRef.current || stopRef.current) return
     if (!auth) return
     if (isStop) stopRef.current = true
@@ -91,6 +107,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
         else if (path === '/recover' || path === '/disconnect' || isStop && !next.motion_pending) setUncertain(false)
         setMessage(isStop ? next.motion_pending ? '已发送停止，等待空闲确认' : '控制器已报告全部通道空闲' : path === '/connect' && next.motion_pending ? '控制器已连接，运动锁定仍保留' : success)
       }
+      return next
     } catch (e) {
       if (mounted.current && mine === actionId.current) {
         const ambiguous = (path === '/move' || path === '/jog' || path === '/action' || isStop) && !(e instanceof StageRequestError)
@@ -107,6 +124,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
         if (isStop) setStopping(false)
         else setBusy(false)
         setHistoryVersion(version => version + 1)
+        refreshRef.current()
       }
     }
   }
@@ -144,9 +162,23 @@ export default function StagePanel({ auth, connected, configuration = false, onD
     if (!movable(axis) || !Number.isSafeInteger(steps) || steps < 1 || steps > (state?.config.max_steps ?? 0)) return
     void act('/move', { axis, direction, steps }, `${axis.toUpperCase()} 轴请求已下发，等待状态采样确认空闲`)
   }
-  function jog(axis: Axis, direction: -1 | 1) {
+  async function jog(axis: Axis, direction: -1 | 1) {
     if (!movable(axis)) return
-    void act('/jog', { axis, direction }, `${axis.toUpperCase()} 轴连续点动已开始；松开按钮或全部停止后结束`)
+    clearJogLease()
+    const id = window.crypto.randomUUID()
+    const lease: NonNullable<typeof jogLease.current> = {id}
+    jogLease.current = lease
+    const next = await act('/jog', { axis, direction, lease_id: id }, `${axis.toUpperCase()} 轴连续点动已开始；松开按钮或全部停止后结束`)
+    if (jogLease.current !== lease) return
+    if (!next?.jogging || !mounted.current) { clearJogLease(); return }
+    let renewing = false
+    lease.timer = setInterval(() => {
+      if (renewing || jogLease.current !== lease) return
+      renewing = true
+      void stageApi('/api/stage/jog/keepalive', 'POST', {lease_id:id}, 1000).catch(() => {
+        if (jogLease.current === lease) { clearJogLease(); void act('/stop') }
+      }).finally(() => { renewing = false })
+    }, 250)
   }
 
   return <div ref={panelRef} className="page-content stage-panel">

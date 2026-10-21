@@ -9,7 +9,7 @@ import StageToolHistory from './StageToolHistory'
 
 type Props = {
   state: StageState; auth: boolean; online: boolean; busy: boolean; uncertain: boolean
-  onAct: (path: string, body?: unknown, message?: string) => Promise<void>
+  onAct: (path: string, body?: unknown, message?: string) => Promise<unknown>
   onParameters: (axis: Axis, values?: DriveParameters) => Promise<ParameterState>
   historyVersion: number
   // Share confirmations while placing channel actions inside the workbench cards.

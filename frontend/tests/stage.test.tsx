@@ -15,6 +15,7 @@ let state: {
   config: { mode: string; serial_number: string; host: string; port: number; axes: Record<string, number>; inverted: Record<string, boolean>; max_steps: number }
   connected: boolean; error: string | null
   motion_pending?: boolean
+  jogging?: {axis: string; channel: number; direction: number} | null
   operation?: {kind: string; axis: 'x' | 'y' | 'z'; channel: number; elapsed_s: number; phase: 'waiting' | 'running'}
   channels: { channel: number; moving: boolean; ready: boolean; enabled: boolean; stage: string; error: string | null; open_loop?: boolean; command_count?: number }[]
 }
@@ -116,12 +117,68 @@ test('press-and-hold sends continuous jog then stop; a quick tap stays a bounded
   await render()
   await holdButton('X 轴正向移动')
   assert.deepEqual(writes.filter(row => row.path.endsWith('/move')), [])
+  const lease = (writes[0].body as {lease_id:string}).lease_id
+  assert.ok(lease)
   assert.deepEqual(writes.map(row => ({ path: row.path.replace('/api/stage', ''), body: row.body })), [
-    { path: '/jog', body: { axis: 'x', direction: 1 } },
+    { path: '/jog', body: { axis: 'x', direction: 1, lease_id:lease } },
     { path: '/stop', body: {} },
   ])
   await tapButton('Y 轴反向移动')
   assert.deepEqual(writes.filter(row => row.path.endsWith('/move')), [{ path: '/api/stage/move', body: { axis: 'y', direction: -1, steps: 10 } }])
+})
+
+test('losing focus before the hold threshold cancels the pending timer without moving', async () => {
+  state.connected = true
+  await render()
+  await act(async () => {
+    pointer('pointerdown', button('X 轴正向移动'))
+    window.dispatchEvent(new dom.window.Event('blur'))
+    await new Promise(r => setTimeout(r, 220))
+  })
+  assert.deepEqual(writes, [])
+})
+
+test('a held control renews its lease and unmount sends stop and ends heartbeats', async () => {
+  state.connected = true
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    const path = String(url)
+    if (path.endsWith('/jog') && options?.method === 'POST') {
+      state.jogging = {axis:'x',channel:3,direction:1}; state.motion_pending = true
+    }
+    if (path.endsWith('/stop')) { state.jogging = null; state.motion_pending = false }
+    return original(url, options)
+  }
+  await render()
+  await act(async () => { pointer('pointerdown', button('X 轴正向移动')); await new Promise(r => setTimeout(r, 220)) })
+  await act(async () => { await new Promise(r => setTimeout(r, 300)) })
+  assert.ok(writes.some(row => row.path.endsWith('/jog/keepalive')))
+  await act(async () => root.render(<div/>))
+  const count = writes.length
+  await act(async () => { await new Promise(r => setTimeout(r, 300)) })
+  assert.equal(writes.length, count)
+  assert.equal(writes.at(-1)?.path, '/api/stage/stop')
+})
+
+test('release while jog submission is pending sends stop and cannot restart heartbeats later', async () => {
+  state.connected = true
+  const original = globalThis.fetch
+  let finish: () => void = () => {}
+  const gate = new Promise<void>(resolve => {finish = resolve})
+  globalThis.fetch = async (url, options) => {
+    if (String(url).endsWith('/jog')) {
+      writes.push({path:String(url),body:JSON.parse(String(options?.body))})
+      await gate
+      return new Response(JSON.stringify({...state,motion_pending:true,jogging:{axis:'x',channel:3,direction:1}}))
+    }
+    return original(url, options)
+  }
+  await render()
+  await act(async () => { pointer('pointerdown', button('X 轴正向移动')); await new Promise(r => setTimeout(r, 220)) })
+  await act(async () => { pointer('pointerup', button('X 轴正向移动')); await new Promise(r => setTimeout(r, 0)) })
+  await act(async () => { finish(); await new Promise(r => setTimeout(r, 300)) })
+  assert.deepEqual(writes.map(row => row.path), ['/api/stage/jog','/api/stage/stop'])
+  assert.equal(button('Y 轴正向移动').disabled, false)
 })
 
 test('failed real connection remains real and does not silently simulate', async () => {
@@ -160,7 +217,7 @@ function keyUps(key: string) {
 }
 async function tap(key: string) { await act(async () => { keys(key); keyUps(key) }) }
 function pointer(type: 'pointerdown' | 'pointerup', element: HTMLElement) {
-  element.dispatchEvent(new dom.window.Event(type, { bubbles: true, cancelable: true }))
+  element.dispatchEvent(new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }))
 }
 async function tapButton(label: string) {
   const element = button(label)
@@ -545,6 +602,7 @@ test('motion_pending blocks new requests until a subsequent status update confir
   globalThis.fetch = async (url, init) => {
     if (String(url).endsWith('/move')) {
       writes.push({path: String(url), body: JSON.parse(String(init?.body))})
+      state.motion_pending = true
       return new Response(JSON.stringify({...state, motion_pending: true}))
     }
     return original(url, init)
@@ -553,7 +611,8 @@ test('motion_pending blocks new requests until a subsequent status update confir
   await tapButton('X 轴正向移动')
   assert.equal(button('Y 轴正向移动').disabled, true)
   assert.ok(container.textContent?.includes('等待后续状态采样确认空闲'))
-  await act(async () => { await new Promise(done => setTimeout(done, 1100)) })
+  state.motion_pending = false
+  await act(async () => { await new Promise(done => setTimeout(done, 200)) })
   assert.equal(button('Y 轴正向移动').disabled, false)
 })
 

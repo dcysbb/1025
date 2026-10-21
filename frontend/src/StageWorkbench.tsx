@@ -89,7 +89,7 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
     const hold = holds.current.get(id)
     if (!hold) return
     holds.current.delete(id)
-    if (hold.timer) { clearTimeout(hold.timer); hold.timer = 0 }
+    if (hold.timer) { window.clearTimeout(hold.timer); hold.timer = 0 }
     if (hold.jogging) { if (auth) onStop(); return }
     if (!fire) return
     let command: [Axis, -1 | 1] | undefined
@@ -102,20 +102,44 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
     // eslint-disable-next-line react-hooks/exhaustive-deps -- "reason"/"step" closures re-capture on every listed state change.
   }, [auth, onStop, onMove, steps, state, uncertain, awaitingRefresh, busy, stopping])
   const pressHold = useCallback((id: string, axis: Axis, direction: -1 | 1) => {
-    if (holds.current.has(id) || reason(axis)) return
+    if (holds.current.size || reason(axis)) return
     const hold = { timer: 0, jogging: false }
-    hold.timer = window.setTimeout(() => { hold.timer = 0; hold.jogging = true; onJog(axis, direction) }, HOLD_MS)
+    hold.timer = window.setTimeout(() => {
+      if (holds.current.get(id) !== hold) return
+      hold.timer = 0; hold.jogging = true; onJog(axis, direction)
+    }, HOLD_MS)
     holds.current.set(id, hold)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- Same closure-refresh intent as releaseHold.
   }, [onJog, steps, state, uncertain, awaitingRefresh, busy, stopping])
-  useEffect(() => () => { for (const hold of holds.current.values()) if (hold.timer) clearTimeout(hold.timer); holds.current.clear() }, [])
+  const stopCallback = useRef(onStop)
+  useEffect(() => { stopCallback.current = onStop }, [onStop])
+  useEffect(() => () => {
+    const active = [...holds.current.values()].some(hold => hold.jogging)
+    for (const hold of holds.current.values()) if (hold.timer) window.clearTimeout(hold.timer)
+    holds.current.clear()
+    if (active) stopCallback.current()
+  }, [])
   useEffect(() => {
     // Any jog already running must not outlive lost focus or hidden page.
-    const stopAll = () => { for (const [id, hold] of [...holds.current]) if (hold.jogging) releaseHold(id, false) }
+    const stopAll = () => { for (const id of [...holds.current.keys()]) releaseHold(id, false) }
     window.addEventListener('blur', stopAll)
     document.addEventListener('visibilitychange', stopAll)
     return () => { window.removeEventListener('blur', stopAll); document.removeEventListener('visibilitychange', stopAll) }
   }, [releaseHold])
+  useEffect(() => {
+    if (!auth || !connected || !online || !state.connected || uncertain || awaitingRefresh || state.error) {
+      for (const id of [...holds.current.keys()]) releaseHold(id, false)
+    }
+  }, [auth, connected, online, state.connected, uncertain, awaitingRefresh, state.error, releaseHold])
+  useEffect(() => {
+    const cancelKeysOrDialog = () => {
+      for (const id of [...holds.current.keys()]) if (hasDialog() || !armed.current && id.startsWith('key:')) releaseHold(id, false)
+    }
+    const observer = new window.MutationObserver(cancelKeysOrDialog)
+    observer.observe(document.body, {childList:true, subtree:true, attributes:true, attributeFilter:['role','aria-modal']})
+    cancelKeysOrDialog()
+    return () => observer.disconnect()
+  }, [keyboard, releaseHold])
   function handleKey(event: KeyboardEvent<HTMLDivElement>) {
     if (!armed.current) return
     if (event.key === 'Escape') { event.preventDefault(); for (const id of [...holds.current.keys()]) releaseHold(id, false); if (auth) onStop(); return }
@@ -134,6 +158,7 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
     const id = `ptr:${axis}:${direction}`
     return {
       onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => {
+        if (event.button !== 0) return
         event.preventDefault()
         event.currentTarget.setPointerCapture?.(event.pointerId)
         pressHold(id, axis, direction)

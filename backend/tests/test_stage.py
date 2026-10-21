@@ -316,6 +316,85 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(row["moving"] for row in snapshot["channels"]))
         self.assertEqual(self.stage.driver.counts, {1: 0, 2: 0, 3: 0})
 
+    async def test_jog_lease_expiry_stops_and_rejects_old_heartbeat(self):
+        await self.simulate()
+        await self.pause_polling()
+        await self.stage.jog(StageJog(axis="x", direction=1, lease_id="held-1"), "test")
+        self.stage._jog_lease_deadline = time.monotonic() - 1
+        with self.assertRaises(StageError):
+            self.stage.renew_jog("held-1")
+        await asyncio.sleep(.15)
+        self.assertFalse(self.stage.motion_pending)
+        self.assertIsNone(self.stage._jogging)
+        self.assertFalse(any(row["moving"] for row in self.stage.driver.status()))
+
+    async def test_initial_idle_sample_does_not_drop_an_active_jog_lease(self):
+        await self.simulate()
+        await self.pause_polling()
+        await self.stage.jog(StageJog(axis="x", direction=1, lease_id="held-1"), "test")
+        original = self.stage.driver.status
+        self.stage.driver.status = lambda: [{**row,"moving":False} for row in original()]
+        await self.stage._poll_once()
+        self.assertTrue(self.stage.motion_pending)
+        self.assertIsNotNone(self.stage._jogging)
+        self.assertEqual(self.stage.renew_jog("held-1"), {"ok":True})
+        self.stage.driver.status = original
+        await self.stage.stop("test")
+
+    async def test_only_current_hold_can_renew_and_stop_revokes_lease(self):
+        await self.simulate()
+        await self.pause_polling()
+        await self.stage.jog(StageJog(axis="x", direction=1, lease_id="held-1"), "test")
+        with self.assertRaises(StageError):
+            self.stage.renew_jog("different-hold")
+        self.assertEqual(self.stage.renew_jog("held-1"), {"ok": True})
+        await self.stage.stop("test")
+        with self.assertRaises(StageError):
+            self.stage.renew_jog("held-1")
+
+    async def test_stop_during_jog_journal_write_prevents_native_start(self):
+        await self.simulate()
+        await self.pause_polling()
+        entered, release = threading.Event(), threading.Event()
+        original = self.stage._save_recovery
+        def journal(reason):
+            entered.set()
+            if not release.wait(2):
+                raise TimeoutError("test timed out")
+            original(reason)
+        self.stage._save_recovery = journal
+        self.stage.driver.jog_start = Mock()
+        jog = asyncio.create_task(self.stage.jog(StageJog(axis="x", direction=1), "test"))
+        self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+        stop = asyncio.create_task(self.stage.stop("test"))
+        await asyncio.sleep(0)
+        release.set()
+        with self.assertRaisesRegex(StageError, "未下发"):
+            await jog
+        await stop
+        self.stage.driver.jog_start.assert_not_called()
+        self.assertFalse(self.stage.recovery_path.exists())
+
+    async def test_default_5000_step_limit_accepts_boundary_and_rejects_5001(self):
+        await self.simulate()
+        await self.pause_polling()
+        self.assertEqual(self.stage.config.max_steps, 5000)
+        await self.stage.move(StageMove(axis="x", direction=1, steps=5000), "test")
+        await self.stage._poll_once()
+        with self.assertRaisesRegex(StageError, "5000"):
+            await self.stage.move(StageMove(axis="x", direction=1, steps=5001), "test")
+
+    async def test_motion_wakes_idle_poll_immediately_instead_of_waiting_half_second(self):
+        await self.simulate()
+        before = self.stage._sample_count
+        await self.stage.move(StageMove(axis="x", direction=1, steps=1), "test")
+        for _ in range(15):
+            if not self.stage.motion_pending:
+                break
+            await asyncio.sleep(.01)
+        self.assertGreater(self.stage._sample_count, before)
+        self.assertFalse(self.stage.motion_pending)
+
     async def test_home_instant_return_reports_counter_zero_only(self):
         await self.simulate()
         await self.pause_polling()
@@ -357,6 +436,44 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DriverTests(unittest.TestCase):
+    def test_isolated_worker_routes_continuous_motion_and_home(self):
+        from app.drivers.isolated_pdxc3 import IsolatedPdxc3Driver, _serve
+        proxy = IsolatedPdxc3Driver("129123456")
+        proxy._rpc = Mock()
+        proxy.jog_start(1, -1)
+        proxy._rpc.assert_called_with("jog_start", 1, -1)
+        proxy.home(1, 1)
+        proxy._rpc.assert_called_with("home", 1, 1)
+        pipe, driver = Mock(), Mock(transport="USB", last_latency_ms=1, move_budget_s=0)
+        pipe.recv.side_effect = [("jog_start", (1, -1)), ("stop", ()), ("home", (1, 1)), ("close", ())]
+        with patch("app.drivers.thorlabs_pdxc3.Pdxc3Driver", return_value=driver):
+            _serve(pipe, {})
+        driver.jog_start.assert_called_once_with(1, -1)
+        driver.home.assert_called_once_with(1, 1)
+        self.assertTrue(all(call.args[0][0] for call in pipe.send.call_args_list))
+
+    def test_worker_stops_continuous_motion_if_parent_pipe_closes(self):
+        from app.drivers.isolated_pdxc3 import _serve
+        pipe, driver = Mock(), Mock(transport="USB", last_latency_ms=1, move_budget_s=0)
+        pipe.recv.side_effect = [("jog_start", (1, 1)), EOFError()]
+        with patch("app.drivers.thorlabs_pdxc3.Pdxc3Driver", return_value=driver):
+            _serve(pipe, {})
+        driver.stop.assert_called_once()
+
+    def test_connect_setting_reads_warm_cache_without_enabling_or_moving(self):
+        from app.drivers.thorlabs_pdxc3 import Pdxc3Driver
+        driver = Pdxc3Driver("129123456")
+        channel = Mock()
+        driver.channels = {1: channel}
+        channel.get_setting.side_effect = lambda key, _: SimpleNamespace(is_value_set=True, value={
+            'jog.mode':2, 'jog.openLoopStepSize':10, 'jog.openLoopMaxVelocity':6000, 'jog.openLoopAcceleration':1000}[key])
+        driver._read_jog_settings(1)
+        self.assertEqual(driver._channel_state[1]['step_size'], 10)
+        self.assertEqual(driver._drive_params[1]['step_rate'], 6000)
+        channel.set_enable_state.assert_not_called()
+        channel.move.assert_not_called()
+        channel.set_position_control_mode.assert_not_called()
+
     def test_move_uses_verified_single_step_jog_with_no_wait(self):
         from app.drivers.thorlabs_pdxc3 import Pdxc3Driver
         from thorlabs_xa.shared.enums import TLMC_MoveMode

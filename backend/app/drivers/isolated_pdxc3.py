@@ -14,7 +14,8 @@ class NativeCallError(RuntimeError):
 def _serve(pipe, config):
     from .thorlabs_pdxc3 import Pdxc3Driver
     driver = Pdxc3Driver(**config)
-    allowed = {"connect", "status", "move", "stop", "close", "enable", "zero", "optimize", "parameters", "set_parameters"}
+    allowed = {"connect", "status", "move", "jog_start", "home", "stop", "close", "enable", "zero", "optimize", "parameters", "set_parameters"}
+    jogging = False
     try:
         while True:
             name, args = pipe.recv()
@@ -22,7 +23,11 @@ def _serve(pipe, config):
                 pipe.send((False, "不支持的 SDK 操作", {}))
                 continue
             try:
+                if name == "jog_start":
+                    jogging = True
                 result = getattr(driver, name)(*args)
+                if name == "stop":
+                    jogging = False
                 pipe.send((True, result, {"transport": driver.transport, "latency_ms": driver.last_latency_ms, "move_budget_s": driver.move_budget_s}))
             except Exception as exc:
                 pipe.send((False, str(exc), {"error_code": getattr(exc, "error_code", None)}))
@@ -31,6 +36,11 @@ def _serve(pipe, config):
     except (EOFError, BrokenPipeError):
         pass
     finally:
+        try:
+            if jogging:
+                driver.stop()
+        except Exception:
+            pass
         try:
             driver.close()
         except Exception:
@@ -109,6 +119,12 @@ class IsolatedPdxc3Driver:
 
     def move(self, channel, direction, steps):
         return self._rpc("move", channel, direction, steps)
+
+    def jog_start(self, channel, direction):
+        return self._rpc("jog_start", channel, direction)
+
+    def home(self, channel, direction):
+        return self._rpc("home", channel, direction)
 
     def stop(self):
         return self._rpc("stop")

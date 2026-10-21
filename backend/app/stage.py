@@ -33,7 +33,7 @@ class StageConfig(BaseModel):
     port: int = Field(default=40303, ge=1, le=65535)
     axes: dict[str, int] = Field(default_factory=lambda: {"x": 1, "y": 2, "z": 3})
     inverted: dict[str, bool] = Field(default_factory=lambda: {"x": False, "y": False, "z": False})
-    max_steps: int = Field(default=1000, ge=1, le=100000)
+    max_steps: int = Field(default=5000, ge=1, le=100000)
     # Quick-step preset buttons shown per axis card; pure UI preference.
     step_presets: list[int] = Field(default_factory=lambda: [1, 10, 100, 1000])
     # Default hardware direction used when Home attempts a real search.
@@ -72,6 +72,11 @@ class StageMove(BaseModel):
 class StageJog(BaseModel):
     axis: Literal["x", "y", "z"]
     direction: Literal[-1, 1]
+    lease_id: str | None = Field(default=None, min_length=1, max_length=80)
+
+
+class StageJogLease(BaseModel):
+    lease_id: str = Field(min_length=1, max_length=80)
 
 
 class StagePresets(BaseModel):
@@ -136,6 +141,9 @@ class StageController:
         self._connecting = False
         self._motion_lock_reason = None
         self._jogging = None
+        self._jog_lease_id = None
+        self._jog_lease_deadline = 0
+        self._poll_wake = asyncio.Event()
         self.recovery_path = root / "stage-recovery.json"
         if self.recovery_path.exists():
             try:
@@ -358,7 +366,11 @@ class StageController:
 
     async def _poll(self):
         while True:
-            await asyncio.sleep(0.5)
+            try:
+                await asyncio.wait_for(self._poll_wake.wait(), timeout=0.1 if self.motion_pending else 0.5)
+            except asyncio.TimeoutError:
+                pass
+            self._poll_wake.clear()
             if not await self._poll_once():
                 return
 
@@ -396,7 +408,7 @@ class StageController:
                     self._remember_fault()
                     self.event("stage_fault", "error", self.error, "system")
                     return False
-                if self._idle(self.channels) and not self._uncertain and (not self.operation or self._optimization_seen_busy and time.monotonic() - self._operation_at >= 2):
+                if self._idle(self.channels) and not self._uncertain and not self._jogging and (not self.operation or self._optimization_seen_busy and time.monotonic() - self._operation_at >= 2):
                     if self.motion_pending:
                         self._clear_recovery()
                     if self.operation:
@@ -481,10 +493,14 @@ class StageController:
                         await asyncio.to_thread(self._save_recovery, "移动请求已准备下发，尚未确认停止或完成")
                     except OSError as exc:
                         raise StageError(f"无法保存动作恢复记录，本次移动未下发：{exc}") from exc
+                    if epoch != self._stop_epoch or self._stopping_count or self._disconnecting_count:
+                        self._clear_recovery()
+                        raise StageError("停止或断开已请求，本次移动未下发")
                     self._must_stop = True
                     self.motion_pending = True
                     invoked = True
                     await self._call(self.driver.move, channel, direction, command.steps)
+                    self._poll_wake.set()
                     budget = getattr(self.driver, "move_budget_s", 30)
                     self._motion_deadline = time.monotonic() + (budget if isinstance(budget, (int, float)) else 30)
                     self._move_event(command, actor, "submitted")
@@ -545,12 +561,21 @@ class StageController:
                         await asyncio.to_thread(self._save_recovery, "连续点动已准备下发，尚未确认停止")
                     except OSError as exc:
                         raise StageError(f"无法保存动作恢复记录，本次点动未下发：{exc}") from exc
+                    if epoch != self._stop_epoch or self._stopping_count or self._disconnecting_count:
+                        self._clear_recovery()
+                        raise StageError("停止或断开已请求，本次点动未下发")
                     self._must_stop = True
                     self.motion_pending = True
                     invoked = True
                     await self._call(self.driver.jog_start, channel, direction)
                     self._jogging = {"axis": command.axis, "channel": channel,
                                      "direction": command.direction}
+                    self._jog_lease_id = None
+                    if command.lease_id:
+                        self._jog_lease_id = command.lease_id
+                        self._jog_lease_deadline = time.monotonic() + 1.5
+                        asyncio.create_task(self._watch_jog_lease(command.lease_id))
+                    self._poll_wake.set()
                     self._motion_deadline = 0
                     self._move_event(command, actor, "submitted", continuous=True)
                     return self.snapshot()
@@ -578,7 +603,28 @@ class StageController:
         finally:
             self._move_admitting = False
 
+    def renew_jog(self, lease_id):
+        if (not self.connected or not self._jogging or lease_id != self._jog_lease_id
+                or time.monotonic() >= self._jog_lease_deadline):
+            raise StageError("连续移动已结束或控制凭据已失效")
+        self._jog_lease_deadline = time.monotonic() + 1.5
+        return {"ok": True}
+
+    async def _watch_jog_lease(self, lease_id):
+        while self._jog_lease_id == lease_id and self._jogging and self.connected:
+            await asyncio.sleep(0.1)
+            if self._jog_lease_id != lease_id or not self._jogging:
+                return
+            if time.monotonic() >= self._jog_lease_deadline:
+                try:
+                    await self.stop("system")
+                except StageError:
+                    pass
+                self.event("stage_jog_expired", "warning", "按住信号中断，已请求全部停止", "system")
+                return
+
     async def stop(self, actor):
+        self._jog_lease_id = None
         self._stopping_count += 1
         self._stop_epoch += 1
         try:
@@ -618,6 +664,7 @@ class StageController:
             return self.snapshot()
 
     async def disconnect(self, actor="system"):
+        self._jog_lease_id = None
         if self._recovering or self._connecting:
             raise StageError("连接恢复正在进行，请等待；全部停止仍可使用")
         self._disconnecting_count += 1
@@ -1007,6 +1054,14 @@ def install_stage_routes(app, stage, require_read_access, require_operator, veri
     @app.post("/api/stage/jog")
     async def jog(body: StageJog, request: Request, actor: str = Depends(require_operator)):
         return await action("jog", request, actor, body)
+
+    @app.post("/api/stage/jog/keepalive")
+    async def jog_keepalive(body: StageJogLease, request: Request, actor: str = Depends(require_operator)):
+        verify_origin(request)
+        try:
+            return stage.renew_jog(body.lease_id)
+        except StageError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.put("/api/stage/presets")
     async def presets(body: StagePresets, request: Request, actor: str = Depends(require_operator)):

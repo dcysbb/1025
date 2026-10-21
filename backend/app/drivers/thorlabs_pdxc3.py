@@ -172,6 +172,9 @@ class Pdxc3Driver:
             # is a real mismatch and refuses the whole connection.
             if name and not self.supported(name):
                 raise RuntimeError(f"CH{n} 识别为 {name}，不支持当前开环台控制；连接已拒绝")
+        for n, name in self.stage_names.items():
+            if self.supported(name):
+                self._read_jog_settings(n)
         # Connecting reads state only: no enable, home, position-zero or movement.
 
     def _acquire_lease(self):
@@ -293,6 +296,22 @@ class Pdxc3Driver:
             raise RuntimeError("步频或加速度读回无效；请先读取并设置有效驱动参数，本次移动未下发")
         self._drive_params[channel] = {"step_rate": rate.value, "acceleration": acceleration.value}
         return rate.value, acceleration.value
+
+    def _read_jog_settings(self, channel):
+        target = self.channels[channel]
+        state = self._channel_state.setdefault(channel, {})
+        values = {}
+        for key, name, low, high in (("jog.openLoopMaxVelocity", "step_rate", 800, 20000),
+                                     ("jog.openLoopAcceleration", "acceleration", 1, 20000)):
+            setting = target.get_setting(key, self.TIMEOUT_MS)
+            if setting.is_value_set and isinstance(setting.value, (int, float)) and low <= setting.value <= high:
+                values[name] = setting.value
+        if len(values) == 2:
+            self._drive_params[channel] = values
+        for key, cache_key in (("jog.mode", "jog_mode"), ("jog.openLoopStepSize", "step_size")):
+            setting = target.get_setting(key, self.TIMEOUT_MS)
+            if setting.is_value_set:
+                state[cache_key] = setting.value
 
     def _prepare_channel(self, channel, jog_mode, steps=None):
         """Bring a channel to the requested jog configuration with cached

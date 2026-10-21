@@ -117,6 +117,9 @@ class UsbRoutingTests(unittest.TestCase):
         lease = patch.object(Pdxc3Driver, '_acquire_lease')
         lease.start()
         self.addCleanup(lease.stop)
+        warm = patch.object(Pdxc3Driver, '_read_jog_settings')
+        warm.start()
+        self.addCleanup(warm.stop)
 
     def test_usb_uses_exact_native_usb_transport_and_no_com_or_tcp_discovery(self):
         from thorlabs_xa.shared.system_manager import SystemManager
