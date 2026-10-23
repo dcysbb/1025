@@ -9,6 +9,7 @@ import './Chart.css'
 import './StageWorkbench.css'
 import './StageAdvanced.css'
 import './Motion.css'
+import './SystemMenu.css'
 import App from './App.tsx'
 
 createRoot(document.getElementById('root')!).render(

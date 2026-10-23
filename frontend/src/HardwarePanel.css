@@ -60,3 +60,15 @@
 .terminal-wiring { margin-top:24px;padding-top:20px;border-top:1px solid var(--line);font-size:12px;color:var(--muted); }
 @media(max-width:760px){.terminal-output-card{padding:16px}.terminal-output-grid{gap:12px}.terminal-assignment-notice,.terminal-manual-toolbar{padding:12px}.terminal-manual-toolbar button{margin-left:0}.terminal-assignment-notice .hardware-actions{justify-content:flex-start}}
 .hardware-interface{display:block;padding:10px 0;color:var(--muted);font-size:13px;line-height:1.5}.hardware-tools>span{min-width:0;overflow-wrap:anywhere}.hardware-tools>.button{flex-shrink:0}
+.analog-panel .settings-grid { margin-bottom: 16px; }
+.analog-panel fieldset { min-width: 0; border: 0; padding: 0; margin: 0; }
+.analog-mapping-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; margin: 20px 0; }
+.analog-panel .analog-mapping { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--field-bg); }
+.analog-mapping-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+.analog-mapping-heading>label { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+.analog-endpoints { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.analog-confirm { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--muted); }
+.analog-current { display: grid; gap: 3px; padding-top: 12px; border-top: 1px solid var(--line); }
+.analog-current strong { font: 500 20px/1.4 'Cascadia Mono', Consolas, monospace; color: var(--accent); }
+.analog-current small { color: var(--muted); font-size: 11px; }
+@media(max-width: 900px) { .analog-mapping-grid { grid-template-columns: 1fr; } }

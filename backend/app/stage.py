@@ -41,6 +41,17 @@ class StageConfig(BaseModel):
     # Last applied drive parameters per axis; re-applied on connect when the
     # controller reports different values so tuning survives power cycles.
     drive_params: dict[str, DriveParamsConfig] = Field(default_factory=dict)
+    channel_names: dict[str, str] = Field(default_factory=lambda: {str(ch): "" for ch in (1, 2, 3)})
+    card_order: list[int] = Field(default_factory=lambda: [1, 2, 3])
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_legacy_axis_order(cls, values):
+        if isinstance(values, dict) and "card_order" not in values and isinstance(values.get("axes"), dict):
+            axes = values["axes"]
+            if set(axes) == {"x", "y", "z"}:
+                return {**values, "card_order": [axes[axis] for axis in ("x", "y", "z")]}
+        return values
 
     @model_validator(mode="after")
     def mapping_is_permutation(self):
@@ -60,6 +71,13 @@ class StageConfig(BaseModel):
             raise ValueError("每轴回零方向必须为 1 或 -1")
         if not set(self.drive_params) <= {"x", "y", "z"}:
             raise ValueError("驱动参数只能按 x/y/z 轴保存")
+        if set(self.channel_names) != {"1", "2", "3"}:
+            raise ValueError("通道名称必须对应 CH1、CH2、CH3")
+        self.channel_names = {key: value.strip() for key, value in self.channel_names.items()}
+        if any(len(value) > 32 or any(ord(char) < 32 for char in value) for value in self.channel_names.values()):
+            raise ValueError("通道名称最多 32 个字符，不能包含控制字符")
+        if sorted(self.card_order) != [1, 2, 3]:
+            raise ValueError("面板顺序必须包含 CH1、CH2、CH3 各一次")
         return self
 
 
@@ -82,6 +100,12 @@ class StageJogLease(BaseModel):
 class StagePresets(BaseModel):
     model_config = ConfigDict(extra="forbid")
     presets: list[int] = Field(min_length=2, max_length=6)
+
+
+class StagePresentation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    channel_names: dict[str, str] | None = None
+    card_order: list[int] | None = Field(default=None, min_length=3, max_length=3)
 
 
 class StageAction(BaseModel):
@@ -362,6 +386,22 @@ class StageController:
                 raise StageError(f"快捷步数保存失败：{exc}") from exc
             self.config = updated
             self.event("stage_config", "info", "快捷步数已保存", actor, {"step_presets": list(values)})
+            return self.snapshot()
+
+    async def set_presentation(self, body: StagePresentation, actor):
+        async with self._lock:
+            patch = body.model_dump(exclude_none=True)
+            if not patch:
+                raise StageError("请指定通道名称或面板顺序")
+            if "channel_names" in patch:
+                patch["channel_names"] = {**self.config.channel_names, **patch["channel_names"]}
+            try:
+                updated = StageConfig(**{**self.config.model_dump(), **patch})
+                self._persist_config(updated)
+            except (ValueError, OSError) as exc:
+                raise StageError(f"面板设置保存失败：{exc}") from exc
+            self.config = updated
+            self.event("stage_presentation", "info", "位移台通道名称与面板排列已保存", actor, patch)
             return self.snapshot()
 
     async def _poll(self):
@@ -1069,6 +1109,14 @@ def install_stage_routes(app, stage, require_read_access, require_operator, veri
         try:
             return await stage.set_presets(body.presets, actor)
         except (StageError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.patch("/api/stage/presentation")
+    async def presentation(body: StagePresentation, request: Request, actor: str = Depends(require_operator)):
+        verify_origin(request)
+        try:
+            return await stage.set_presentation(body, actor)
+        except StageError as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/stage/stop")

@@ -15,6 +15,8 @@ backend/dist/
 *.sqlite3-wal
 config.json
 stage.json
+analog-output.json
+analog-output-recovery.json
 lan-cert.pem
 lan-key.pem
 # Thorlabs XA writes its SDK logs under the backend working directory.

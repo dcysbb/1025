@@ -15,7 +15,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -27,6 +28,9 @@ from .drivers.adam6050 import ModbusError
 from .models import ActionRequest, AppConfig, ConfigPatch, ConfigUpdate, InjectPressure, LoginRequest
 from .storage import HistoryStore
 from .stage import StageController, StageError, install_stage_routes
+from .build_info import VERSION, build_info
+from .runtime import RuntimeControl, SystemAction
+from .analog_output import AnalogOutput, AnalogError, install_analog_routes
 
 
 DATA_DIR = data_directory()
@@ -34,6 +38,8 @@ CONFIG = ConfigurationStore(DATA_DIR)
 HISTORY = HistoryStore(DATA_DIR / "history.sqlite3")
 ENGINE = InterlockEngine(CONFIG, HISTORY)
 STAGE = StageController(DATA_DIR, ENGINE._event)
+ANALOG = AnalogOutput(DATA_DIR, ENGINE.snapshot, ENGINE._event)
+SYSTEM = RuntimeControl()
 SESSIONS: dict[str, float] = {}
 LOGIN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
 SESSION_COOKIE = "vacuum_interlock_session"
@@ -145,17 +151,22 @@ def set_session(response: Response, token: str, request: Request) -> None:
 async def lifespan(_: FastAPI):
     await ENGINE.start()
     yield
-    try:
-        await STAGE.disconnect()
-    except StageError:
-        pass  # Fault is retained in the stage status; vacuum shutdown still runs.
-    await ENGINE.stop()
+    if not SYSTEM.prepared:
+        try:
+            await ANALOG.disconnect()
+        except AnalogError as exc:
+            ENGINE._event("analog_fault", "error", str(exc), "system")
+        try:
+            await STAGE.disconnect()
+        except StageError:
+            pass  # Fault is retained in the stage status; vacuum shutdown still runs.
+        await ENGINE.stop()
     HISTORY.close()
 
 
 app = FastAPI(
     title="真空联锁控制台",
-    version="0.1.0",
+    version=VERSION,
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -165,15 +176,19 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Content-Type"],
 )
 
 install_stage_routes(app, STAGE, require_read_access, require_operator, verify_origin)
+install_analog_routes(app, ANALOG, require_read_access, require_operator, verify_origin)
 
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    if SYSTEM.pending and request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path not in (
+            "/api/stage/stop", "/api/valve/close", "/api/analog-output/stop"):
+        return JSONResponse({"detail": "控制台正在退出或重启，暂不接受新的操作"}, status_code=409)
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
@@ -185,7 +200,29 @@ async def security_headers(request: Request, call_next):
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "version": "0.1.0"}
+    return {"ok": True, **build_info()}
+
+
+@app.get("/api/system", dependencies=[Depends(require_read_access)])
+async def system_info(request: Request):
+    result = {**build_info(), **SYSTEM.snapshot()}
+    if not is_local(request):
+        result.update(can_manage=False, unavailable_reason="退出与重启只能在运行控制台的本机操作。")
+    return result
+
+
+@app.post("/api/system/control")
+async def system_control(body: SystemAction, request: Request, tasks: BackgroundTasks,
+                         actor: str = Depends(require_operator)):
+    verify_origin(request)
+    if not is_local(request):
+        raise HTTPException(403, "退出与重启只能在运行控制台的本机操作")
+    try:
+        await SYSTEM.prepare(body.action, STAGE, ENGINE, actor, ANALOG)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    tasks.add_task(SYSTEM.finish_response)
+    return {"accepted": True, "action": body.action}
 
 
 @app.get("/api/auth/status")
@@ -612,7 +649,12 @@ def run() -> None:
     if config.allow_lan:
         cert, key = _local_tls_paths()
         options.update(ssl_certfile=cert, ssl_keyfile=key)
-    uvicorn.run("app.main:app", **options)
+    server = uvicorn.Server(uvicorn.Config(app, **options))
+    SYSTEM.signal = lambda: setattr(server, "should_exit", True)
+    server.run()
+    if SYSTEM.prepared and SYSTEM.pending == "restart":
+        from .desktop import start_backend, startup_logs
+        start_backend(startup_logs(DATA_DIR))
 
 
 if __name__ == "__main__":

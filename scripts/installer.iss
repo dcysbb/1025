@@ -1,5 +1,5 @@
 #define AppName "Vacuum Interlock"
-#define AppVersion "0.1.1"
+#define AppVersion "0.2.0"
 [Setup]
 AppId={{447C89B3-FD6F-48A1-88AA-5A4B4B973C4D}
 AppName={#AppName}

@@ -9,6 +9,7 @@ import type { Point } from './chartData'
 import Chart from './Chart'
 import StagePanel from './StagePanel'
 import HardwarePanel from './HardwarePanel'
+import SystemMenu from './SystemMenu'
 import { Disclosure, Presence, Reveal } from './Motion'
 import { apiRequest, errorMessage } from './apiClient'
 
@@ -68,8 +69,13 @@ function Login({kind,onDone,onClose}:{kind:'setup'|'login';onDone:()=>void;onClo
 }
 
 function App(){
+  const [systemState,setSystemState]=useState<'running'|'exit'|'restart'>('running')
+  const systemStateRef=useRef(systemState)
+  const changeSystemState=useCallback((next:'running'|'exit'|'restart')=>{systemStateRef.current=next;setSystemState(next);if(next!=='running')setConnected(false)},[])
   const [relayState,setRelayState]=useState<DebugState|null>(null);const [debugError,setDebugError]=useState('');const [debugAcknowledged,setDebugAcknowledged]=useState(false);const [debugDuration,setDebugDuration]=useState(10);const [debugAutoOff,setDebugAutoOff]=useState(false);const [debugBusy,setDebugBusy]=useState(false)
   const [hardwareDirty,setHardwareDirty]=useState(false)
+  const settingsBaseline=useRef('')
+  function acceptConfig(config:Config){settingsBaseline.current=JSON.stringify(config);setDraft(config)}
   function navigate(next:Page){if(page==='hardware'&&next!=='hardware'&&hardwareDirty&&!window.confirm('硬件配置尚未保存，是否放弃更改？'))return;setHardwareDirty(false);setPage(next)}
   const [page,setPage]=useState<Page>('overview');const [collapsed,setCollapsed]=useState(()=>localStorage.getItem('vacuum-sidebar')==='closed');const [asideOpen,setAsideOpen]=useState(()=>localStorage.getItem('vacuum-events')==='open')
   const [unit,setUnit]=useState<Unit>(()=>(['Pa','mbar','Torr'].includes(localStorage.getItem('vacuum-unit')||'')?localStorage.getItem('vacuum-unit') as Unit:'mbar'));const [theme,setTheme]=useState<'graphite'|'light'>(()=>localStorage.getItem('vacuum-theme')==='light'?'light':'graphite');const [glass,setGlass]=useState(()=>Number(localStorage.getItem('vacuum-glass')||72))
@@ -88,6 +94,7 @@ function App(){
   useEffect(()=>()=>clearTimeout(toastTimer.current),[])
   const readError=useCallback((resource:string,message:string)=>setReadErrors(prior=>({...prior,[resource]:message})),[])
   const acceptStatus=useCallback((next:Status)=>{
+    if(systemStateRef.current!=='running')return
     if(!next || !Array.isArray(next.channels))throw new Error('后台返回的压力与联锁状态格式异常，请刷新页面并检查后台版本。')
     setStatus(next);setConnected(true);readError('status','')
     setPoints(prior=>{
@@ -101,6 +108,7 @@ function App(){
     })
   },[readError])
   const refreshStatus=useCallback(async()=>{
+    if(systemStateRef.current!=='running')return
     try{acceptStatus(await api<Status>('/status'))}
     catch(error){setConnected(false);readError('status',errorMessage(error,'读取压力与联锁状态失败'))}
   },[acceptStatus,readError])
@@ -135,7 +143,7 @@ function App(){
   useEffect(()=>{localStorage.setItem('vacuum-events',asideOpen?'open':'closed')},[asideOpen])
   useEffect(()=>{if(!login)return;const key=(e:KeyboardEvent)=>{if(e.key==='Escape')setLogin(null)};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key)},[login])
   useEffect(()=>{if(page==='settings')void loadConfig();if(page==='events')void refreshEvents();if(page==='history'&&!histReady)void loadHistory();void refreshAuth();/* eslint-disable-next-line react-hooks/exhaustive-deps */},[page])
-  async function loadConfig(){try{const x=await api<{config:Config}>('/config');setDraft(x.config);readError('config','')}catch(error){readError('config',errorMessage(error,'读取控制台设置失败'))}}
+  async function loadConfig(){try{const x=await api<{config:Config}>('/config');acceptConfig(x.config);readError('config','')}catch(error){readError('config',errorMessage(error,'读取控制台设置失败'))}}
   async function loadHistory(){
     if(!start||!end||!channels.length){setHist([]);setHistCount(0);setHistReady(false);notify('请选择有效时间范围和至少一个通道','info');return}
     if(new Date(end)<=new Date(start)){notify('结束时间必须晚于开始时间','info');return}
@@ -158,7 +166,7 @@ function App(){
   const active=status?.channels||[]
   const patch=(key:keyof Config,value:unknown)=>setDraft(cur=>{if(!cur)return cur;if(key==='mode'&&value==='real'&&cur.mode!=='real')return{...cur,mode:'real',fail_closed_confirmed:false,channels:cur.channels.map(ch=>({...ch,enabled:false,trip_pa:null,reset_pa:null}))};return{...cur,[key]:value} as Config})
   const editChannel=(i:number,key:keyof ChanConfig,value:unknown)=>setDraft(cur=>{if(!cur)return cur;const cs=[...cur.channels];cs[i]={...cs[i],[key]:value};return{...cur,channels:cs}})
-  async function saveSettings(){if(!draft||readErrors.config)return;if(draft.mode==='real'&&draft.fail_closed_confirmed&&confirm!=='现场确认'){notify('请先输入“现场确认”后保存真实硬件确认','info');return}setActionError('');setBusy(true);try{const body={...draft,fail_closed_confirmed:draft.mode==='real'&&draft.fail_closed_confirmed&&confirm==='现场确认'};const r=await api<{config:Config;restart_required:boolean}>('/config',{method:'PATCH',body:JSON.stringify({config:Object.fromEntries((['mode','channels','sample_interval_s','stale_timeout_s','valve_timeout_s','recovery_hold_s','pressure_trip_latched','history_retention_days','allow_lan','fail_closed_confirmed'] as const).map(key=>[key,body[key]]))})});setDraft(r.config);setConfirm('');notify(r.restart_required?'已保存。切换局域网监听需要重启后台。':'已保存，请核对联锁状态。');void refreshStatus()}catch(e){reportError(e,'保存失败')}finally{setBusy(false)}}
+  async function saveSettings(){if(!draft||readErrors.config)return;if(draft.mode==='real'&&draft.fail_closed_confirmed&&confirm!=='现场确认'){notify('请先输入“现场确认”后保存真实硬件确认','info');return}setActionError('');setBusy(true);try{const body={...draft,fail_closed_confirmed:draft.mode==='real'&&draft.fail_closed_confirmed&&confirm==='现场确认'};const r=await api<{config:Config;restart_required:boolean}>('/config',{method:'PATCH',body:JSON.stringify({config:Object.fromEntries((['mode','channels','sample_interval_s','stale_timeout_s','valve_timeout_s','recovery_hold_s','pressure_trip_latched','history_retention_days','allow_lan','fail_closed_confirmed'] as const).map(key=>[key,body[key]]))})});acceptConfig(r.config);setConfirm('');notify(r.restart_required?'已保存。切换局域网监听需要重启后台。':'已保存，请核对联锁状态。');void refreshStatus()}catch(e){reportError(e,'保存失败')}finally{setBusy(false)}}
   async function logOut(){setActionError('');try{await api('/auth/logout',{method:'POST'});setAuth(false);notify('已退出操作员会话')}catch(e){reportError(e,'退出失败')}}
   async function connectDevices(){setActionError('');setBusy(true);try{const r=await api<{ok:boolean;tpg?:{ok:boolean;error?:string};adam?:{ok:boolean;error?:string}}>('/devices/connect',{method:'POST',body:'{}'});if(!r.ok)throw new Error(`设备连接失败：${[r.tpg?.error&&`TPG366 真空规：${r.tpg.error}`,r.adam?.error&&`I/O 控制器：${r.adam.error}`].filter(Boolean).join('；')}`);await refreshStatus();await refreshEvents();notify('设备已连接')}catch(e){reportError(e,'设备检查失败')}finally{setBusy(false)}}
   async function simPressure(high:boolean){setActionError('');try{setStatus(await api<Status>('/simulation/pressure',{method:'POST',body:JSON.stringify({channel:1,pressure_pa:high?0.02:0.001})}));notify(high?'已注入通道 1 压力超限':'通道 1 压力已恢复')}catch(e){reportError(e,'模拟操作失败')}}
@@ -208,12 +216,14 @@ function App(){
     <aside className={`sidebar glass-panel ${collapsed?'sidebar--collapsed':''}`}><div className="brand-row"><div className="brand-mark"><Gauge size={20}/></div><div className="brand-copy"><b>真空联锁</b></div><button className="icon-button sidebar-toggle" aria-label={collapsed?'展开导航':'折叠导航'} aria-expanded={!collapsed} aria-controls="primary-navigation" title={collapsed?'展开导航':'折叠导航'} onClick={()=>setCollapsed(value=>!value)}><ChevronDown size={17}/><span className="sidebar-toggle-copy">收起导航</span></button></div>
       <nav id="primary-navigation" className="nav-list" aria-label="主导航">{NAV.map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id?'nav-item--active':''}`} aria-current={page===id?'page':undefined} onClick={()=>navigate(id)} aria-label={label} title={collapsed?label:undefined}><Icon size={18}/><span>{label}</span>{id==='events'&&events.some(e=>e.severity==='critical')&&<i className="nav-alert"/>}</button>)}</nav><div className="sidebar-spacer"/>
       {local?<div className="user-row"><span className="user-avatar">PC</span><span className="user-copy"><b>本机控制</b></span></div>:<><button className="user-row" onClick={()=>auth?void logOut():setLogin(configured?'login':local?'setup':null)} aria-label={auth?'退出操作员会话':'操作员登录'} title={collapsed?'操作员账户':undefined}><span className="user-avatar">{auth?'OP':<LockKeyhole size={16}/>}</span><span className="user-copy"><b>{auth?'操作员已登录':'操作员登录'}</b><small>{auth?'退出操作员会话':'需验证后控制'}</small></span>{auth?<LogOut size={15}/>:<ChevronDown size={15}/>}</button></>}
+      <SystemMenu auth={auth} local={local} connected={connected} dirty={hardwareDirty||!!draft&&JSON.stringify(draft)!==settingsBaseline.current} onStateChange={changeSystemState}/>
     </aside>
 
     <main className="main-column"><header className="topbar glass-panel"><div className="page-heading"><h1>{page==='overview'?'运行总览':page==='history'?'历史数据':page==='control'?'联锁控制':page==='events'?'事件日志':page==='stage'?'位移台':page==='debug'?'继电器调试':page==='hardware'?'硬件连接':'设置'}</h1></div><div className="topbar-right"><button className="theme-toggle" aria-label={theme==='light'?'切换为深色':'切换为浅色'} title={theme==='light'?'切换为深色':'切换为浅色'} onClick={()=>setTheme(value=>value==='light'?'graphite':'light')}>{theme==='light'?<Sun size={16}/>:<Moon size={16}/>}</button>{page!=='events'&&<button ref={eventsTrigger} className="icon-button" aria-label={asideOpen?'收起事件栏':'展开事件栏'} aria-expanded={asideOpen} aria-controls="recent-events" onClick={()=>setAsideOpen(value=>!value)}><Bell size={16}/></button>}<label className="unit-select"><select aria-label="压力单位" value={unit} onChange={e=>setUnit(e.target.value as Unit)}><option>Pa</option><option>mbar</option><option>Torr</option></select></label>{status&&<span className="mode-badge" data-mode={status.mode}>{status.mode==='simulation'?'模拟模式':'真实设备'}</span>}<button className={`live-pill ${connected?'live-pill--on':''}`} onClick={()=>void refreshStatus()}><i/>{connected?'服务在线':readErrors.status?'后台断连':'正在连接'}</button></div></header>
 
 
-      {!connected&&readErrors.status&&<div className="inline-error connection-warning" role="alert"><TriangleAlert size={17}/>{readErrors.status} {status?'显示上次状态':'设备状态尚未读取成功'}，控制已暂停。后台恢复响应后自动更新。</div>}{status&&!status.history_recording&&<div className="inline-error connection-warning" role="alert">历史记录故障：{status.history_error||'存储不可用'}</div>}
+      {systemState!=='running'&&<div className="request-notice" role="status">{systemState==='restart'?'后台正在重启，等待新进程就绪…':'退出请求已接受，后台监测已停止；可从桌面入口重新启动。'}</div>}
+      {systemState==='running'&&!connected&&readErrors.status&&<div className="inline-error connection-warning" role="alert"><TriangleAlert size={17}/>{readErrors.status} {status?'显示上次状态':'设备状态尚未读取成功'}，控制已暂停。后台恢复响应后自动更新。</div>}{status&&!status.history_recording&&<div className="inline-error connection-warning" role="alert">历史记录故障：{status.history_error||'存储不可用'}</div>}
       {connected&&readErrors.events&&<div className="request-notice" role="alert"><div><b>事件日志暂不可用</b><p>{readErrors.events}</p><small>事件列表可能已过期；正在每 7 秒自动重试。此错误不代表设备离线，设备状态请看各自状态卡。</small></div><button className="button button--quiet" onClick={()=>void refreshEvents()}>重试读取日志</button></div>}
       {connected&&readErrors.auth&&<div className="request-notice" role="alert"><div><b>操作权限状态未确认</b><p>{readErrors.auth}</p></div><button className="button button--quiet" onClick={()=>void refreshAuth()}>重新检查权限</button></div>}
       {actionError&&<div className="request-notice request-notice--error" role="alert"><div><b>操作未能确认成功</b><p>{actionError}</p></div><button className="icon-button" aria-label="关闭操作错误提示" onClick={()=>setActionError('')}><X size={15}/></button></div>}

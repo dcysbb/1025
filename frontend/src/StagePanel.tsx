@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plug, Square, Unplug } from 'lucide-react'
 import StageWorkbench from './StageWorkbench'
 import StageAdvanced from './StageAdvanced'
-import { AXES, StageRequestError, stageApi, type Axis, type StageConfig, type StageState, type DriveParameters, type ParameterState } from './stageClient'
+import { AXES, StageRequestError, stageApi, type Axis, type StageConfig, type StageState, type StagePresentation, type DriveParameters, type ParameterState } from './stageClient'
 import { errorMessage } from './apiClient'
 
 function request<T>(path = '', method = 'GET', body?: unknown) {
@@ -148,6 +148,17 @@ export default function StagePanel({ auth, connected, configuration = false, onD
     if (mounted.current) accept(next)
     return next
   }
+  async function savePresentation(presentation: StagePresentation) {
+    if (!auth || !connected || !online || commandRef.current || stopRef.current) throw new Error('请等待当前操作结束并确认后台在线')
+    generation.current++
+    try {
+      const next = await stageApi<StageState>('/api/stage/presentation', 'PATCH', presentation, 10000)
+      // Only presentation fields are taken from this response; motion state comes from polling.
+      if (mounted.current) setState(prior => prior ? {...prior, config: {...prior.config,
+        channel_names: next.config.channel_names, card_order: next.config.card_order}} : prior)
+      return next
+    } finally { generation.current++; refreshRef.current() }
+  }
   const writable = auth && connected && online
   const dirty = draft && state && JSON.stringify(draft) !== JSON.stringify(state.config)
   useEffect(() => { onDirtyChange?.(!!dirty) }, [dirty, onDirtyChange])
@@ -251,6 +262,6 @@ export default function StagePanel({ auth, connected, configuration = false, onD
     {!configuration && (state ? <StageAdvanced state={state} auth={auth} online={connected && online} busy={busy || stopping} uncertain={uncertain || awaitingRefresh}
       onAct={act} onParameters={parameters} historyVersion={historyVersion}>{(axisTools, utilities) => <StageWorkbench key={[state.config.serial_number, state.config.mode, state.config.max_steps, ...AXES.map(axis => `${state.config.axes[axis]}:${state.config.inverted[axis]}`)].join('|')} state={state} auth={auth} connected={connected} online={online}
       busy={busy} stopping={stopping} uncertain={uncertain} awaitingRefresh={awaitingRefresh} historyVersion={historyVersion}
-      onMove={move} onJog={jog} onPresets={savePresets} onStop={() => { void act('/stop') }} axisTools={axisTools} advanced={utilities}/>}</StageAdvanced> : <section className="content-panel glass-panel">正在读取位移台状态…</section>)}
+      onMove={move} onJog={jog} onPresets={savePresets} onPresentation={savePresentation} onStop={() => { void act('/stop') }} axisTools={axisTools} advanced={utilities}/>}</StageAdvanced> : <section className="content-panel glass-panel">正在读取位移台状态…</section>)}
   </div>
 }

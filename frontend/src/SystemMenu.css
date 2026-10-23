@@ -1,0 +1,30 @@
+.system-menu { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; min-width: 0; }
+.system-menu-trigger { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 11px; border: 0; border-radius: 10px; color: var(--muted); background: transparent; cursor: pointer; font-size: 12px; }
+.system-menu-trigger:hover { color: var(--text); background: var(--field-bg); }
+.system-menu-trigger>svg { flex-shrink: 0; }
+.system-menu-trigger>svg:last-child { margin-left: auto; transition: transform var(--motion-fast) var(--ease-out); }
+.system-menu-trigger[aria-expanded=true]>svg:last-child { transform: rotate(180deg); }
+.system-menu-options { padding: 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-strong); }
+.system-menu-options button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); text-align: left; cursor: pointer; font-size: 12px; }
+.system-menu-options button:hover:not(:disabled) { background: var(--field-bg); }
+.system-menu-options button:disabled { opacity: .45; cursor: not-allowed; }
+.system-menu-options .system-menu-exit { color: var(--red); }
+.system-menu-options p { color: var(--muted); font-size: 11px; margin: 6px; overflow-wrap: anywhere; }
+.system-build { display: flex; flex-wrap: wrap; gap: 3px 8px; color: var(--dim); padding: 4px 11px 8px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.system-build b { font-weight: 500; color: var(--muted); }
+.system-build span { white-space: nowrap; }
+.sidebar--collapsed .system-menu-trigger { justify-content: center; padding-inline: 0; }
+.sidebar--collapsed .system-menu-trigger span, .sidebar--collapsed .system-menu-trigger>svg:last-child, .sidebar--collapsed .system-build span { display: none; }
+.sidebar--collapsed .system-build { justify-content: center; padding-inline: 0; }
+.sidebar--collapsed .system-menu { position: relative; }
+.sidebar--collapsed .system-menu-reveal { position: absolute; bottom: 45px; left: 0; width: 220px; z-index: 12; }
+.system-confirm { --pane-glass: var(--surface-strong); width: min(450px, calc(100vw - 32px)); }
+.system-confirm-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 22px; }
+.system-restarting { display: flex; gap: 8px; align-items: flex-start; color: var(--accent); }
+@media (max-width: 760px) {
+  .app-shell .sidebar { flex-wrap: wrap; }
+  .sidebar .system-menu { flex: 1 0 100%; margin-top: 8px; padding-top: 4px; position: relative; }
+  .sidebar .system-menu-trigger { padding: 5px 8px; }
+  .sidebar .system-build { display: flex; padding: 0 8px 4px; }
+  .sidebar .system-menu-reveal { position: absolute; z-index: 15; left: 0; top: 38px; bottom: auto; width: min(300px, 90vw); }
+}

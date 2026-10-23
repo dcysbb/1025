@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, Gauge, Home, Power, RefreshCw, SlidersHorizontal, Upload, WandSparkles, X } from 'lucide-react'
 import { Disclosure, Presence, Reveal } from './Motion'
-import { AXES, type Axis, type DriveParameters, type ParameterState, type StageState } from './stageClient'
+import { AXES, channelName, type Axis, type DriveParameters, type ParameterState, type StageState } from './stageClient'
 import { errorMessage } from './apiClient'
 import { makeStageProfile, parseStageProfile } from './stageProfiles'
 import StageToolHistory from './StageToolHistory'
@@ -176,7 +176,7 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
     </div>)}
     {createPortal(<Presence show={!!confirm}>{confirm && <div className="modal-backdrop stage-tool-modal"><section ref={dialogRef} className="login-card glass-panel" role="dialog" aria-modal="true" aria-label={confirm.operation === 'home' ? '确认回零' : confirm.operation === 'optimize' ? '确认性能优化' : '确认解除运动锁定'}>
       <button className="icon-button modal-close" aria-label="取消控制器操作" onClick={() => setConfirm(null)}><X size={17}/></button>
-      <h2>{confirm.operation === 'recover' ? '解除运动锁定' : `${confirm.axis.toUpperCase()} / CH${confirm.channel} ${confirm.operation === 'home' ? '回零' : '性能优化'}`}</h2>
+      <h2>{confirm.operation === 'recover' ? '解除运动锁定' : `${state.config.channel_names?.[String(confirm.channel)] ? `${channelName(state.config, confirm.channel)} · ` : ''}${confirm.axis.toUpperCase()} / CH${confirm.channel} ${confirm.operation === 'home' ? '回零' : '性能优化'}`}</h2>
       <p>{confirm.operation === 'home' ? '按所选方向尝试硬件回零（寻找机械原点）。此开环位移台无位置反馈，若控制器固件不支持会立即返回并仅清零命令计数，界面会如实提示。回零会真实运动，请确认行程空间；可随时使用全部停止。' : confirm.operation === 'optimize' ? '控制器会自动驱动此通道，通常约 1–2 分钟；实际行程由控制器算法决定，不受点动步数上限限制。请确认负载、行程空间和接线，可随时使用全部停止。' : '确认位移台静止后，后台读取全部通道并确认空闲，再解除历史运动锁定；不会启用输出或重发动作。'}</p>
       {confirm.operation === 'home' && <label className="field">回零方向<select aria-label="回零方向" value={homeDirection} onChange={event => setHomeDirection(Number(event.target.value) as -1 | 1)}><option value={-1}>负向（−）</option><option value={1}>正向（+）</option></select></label>}
       {confirm.operation === 'recover' && <label className="check-row"><input type="checkbox" checked={stationary} onChange={event => setStationary(event.target.checked)}/>我已现场确认位移台静止</label>}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Check, Plug, RefreshCw } from 'lucide-react'
 import StagePanel from './StagePanel'
+import AnalogOutputPanel from './AnalogOutputPanel'
 import { Disclosure } from './Motion'
 import { apiRequest, errorMessage } from './apiClient'
 import TerminalWorkbench, { type TerminalSystemState } from './TerminalWorkbench'
@@ -34,7 +35,7 @@ function normalize(config: HardwareConfig) {
 }
 
 export default function HardwarePanel({ auth, connected, systemState, onDirtyChange }: { auth: boolean; connected: boolean; systemState?: TerminalSystemState | null; onDirtyChange?: (dirty: boolean) => void }) {
-  const [tab, setTab] = useState<'devices' | 'terminals' | 'valve'>('devices')
+  const [tab, setTab] = useState<'devices' | 'terminals' | 'valve' | 'analog'>('devices')
   const [saved, setSaved] = useState<HardwareConfig | null>(null)
   const [draft, setDraft] = useState<HardwareConfig | null>(null)
   const [state, setState] = useState<HardwareStatus | null>(null)
@@ -47,6 +48,7 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
   const [loadVersion, setLoadVersion] = useState(0)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [stageDirty, setStageDirty] = useState(false)
+  const [analogDirty, setAnalogDirty] = useState(false)
   const writable = auth && connected && online && !busy && !terminalBusy && !errors.load
   const editable = auth && !busy && !terminalBusy && !errors.load
   const editReason = !auth ? '需要操作员权限才能修改；本机访问会自动取得本机操作权限。'
@@ -54,7 +56,7 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
     : busy ? '正在保存或连接设备，请等待本次请求结束。'
     : terminalBusy ? '正在操作 DAM 端子，请等待本次请求结束。' : ''
   const dirty = (keys: (keyof HardwareConfig)[]) => !!draft && !!saved && keys.some(key => JSON.stringify(draft[key]) !== JSON.stringify(saved[key]))
-  const anyDirty = dirty([...TPG, ...IO, ...MAPPING, ...TEXT]) || stageDirty
+  const anyDirty = dirty([...TPG, ...IO, ...MAPPING, ...TEXT]) || stageDirty || analogDirty
   useEffect(() => { onDirtyChange?.(anyDirty) }, [anyDirty, onDirtyChange])
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => { if (anyDirty) { event.preventDefault(); event.returnValue = '' } }
@@ -124,8 +126,9 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
 
   return <div className="page-content hardware-panel">
     <div className="hardware-tabs" role="tablist" aria-label="硬件配置">
-      {([['devices', '设备连接'], ['terminals', 'DAM 端子'], ['valve', '插板阀映射']] as const).map(([id, title]) => <button role="tab" aria-selected={tab === id} aria-controls={`hardware-${id}`} id={`hardware-tab-${id}`} key={id} className={`button ${tab === id ? 'button--primary' : 'button--quiet'}`} onClick={() => setTab(id)}>{title}</button>)}
+      {([['devices', '设备连接'], ['terminals', 'DAM 端子'], ['valve', '插板阀映射'], ['analog', '模拟量输出']] as const).map(([id, title]) => <button role="tab" aria-selected={tab === id} aria-controls={`hardware-${id}`} id={`hardware-tab-${id}`} key={id} className={`button ${tab === id ? 'button--primary' : 'button--quiet'}`} onClick={() => setTab(id)}>{title}</button>)}
     </div>
+    <div role="tabpanel" aria-labelledby="hardware-tab-analog" id="hardware-analog" hidden={tab !== 'analog'}><AnalogOutputPanel auth={auth} connected={connected} onDirtyChange={setAnalogDirty}/></div>
     {notice('load')}{errors.load && <button className="button button--quiet" onClick={() => setLoadVersion(value => value + 1)}>重新读取硬件配置</button>}{(!connected || !online) && <p className="inline-error" role="alert">{errors.status || '正在读取后台与硬件状态…'} 保存和连接已暂停；设备是否在线尚未确认，正在自动重试读取。</p>}
     {!draft ? <p>正在读取硬件配置…</p> : <>
       <datalist id="hardware-com-ports">{ports.map(port => <option key={port.device} value={port.device}>{port.description}</option>)}</datalist>

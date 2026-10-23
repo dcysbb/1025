@@ -13,6 +13,15 @@ export type StageConfig = {
   step_presets?: number[]
   home_direction?: Record<Axis, -1 | 1>
   drive_params?: Partial<Record<Axis, DriveParameters>>
+  channel_names?: Record<string, string>
+  card_order?: number[]
+}
+export type StagePresentation = {channel_names?: Record<string, string>; card_order?: number[]}
+export function channelName(config: StageConfig, channel: number) { return config.channel_names?.[String(channel)]?.trim() || `CH${channel}` }
+export function orderedAxes(config: StageConfig): Axis[] {
+  const order = config.card_order
+  if (!order) return [...AXES]
+  return [...AXES].sort((a, b) => order.indexOf(config.axes[a]) - order.indexOf(config.axes[b]))
 }
 export type StageState = {
   config: StageConfig

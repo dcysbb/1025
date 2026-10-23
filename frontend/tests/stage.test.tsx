@@ -14,7 +14,7 @@ const { createRoot } = await import('react-dom/client')
 
 let dom: JSDOM, root: Root, container: HTMLElement
 let state: {
-  config: { mode: string; serial_number: string; host: string; port: number; axes: Record<string, number>; inverted: Record<string, boolean>; max_steps: number }
+  config: { mode: string; serial_number: string; host: string; port: number; axes: Record<string, number>; inverted: Record<string, boolean>; max_steps: number; channel_names?: Record<string, string>; card_order?: number[] }
   connected: boolean; error: string | null
   motion_pending?: boolean
   jogging?: {axis: string; channel: number; direction: number} | null
@@ -40,6 +40,11 @@ beforeEach(() => {
     const path = String(url)
     if (options?.method !== 'GET') {
       writes.push({ path, body: JSON.parse(String(options?.body ?? '{}')) })
+      if (path.endsWith('/presentation')) {
+        const presentation = JSON.parse(String(options?.body))
+        if (presentation.card_order) state.config.card_order = presentation.card_order
+        if (presentation.channel_names) state.config.channel_names = {...state.config.channel_names, ...presentation.channel_names}
+      }
       if (path.endsWith('/connect') && rejectConnection) return new Response(JSON.stringify({ detail: '未找到设备' }), { status: 409 })
     }
     return new Response(JSON.stringify(path.startsWith('/api/events') ? {events: movementEvents} : state))
@@ -902,4 +907,54 @@ test('long channel faults remain visible next to disabled motion controls and pr
   assert.equal(container.querySelector('#stage-reason-x')?.textContent, detail)
   assert.equal(button('X 轴正向移动').disabled, true)
   assert.equal(button('全部停止').disabled, false)
+})
+
+test('channel names and physical card order do not alter the movement axis mapping', async () => {
+  state.connected = true
+  state.config.channel_names = {'1': '样品台', '2': '探针', '3': '聚焦'}
+  state.config.card_order = [1, 2, 3]
+  await render()
+  assert.deepEqual([...container.querySelectorAll<HTMLElement>('[data-stage-channel]')].map(card => card.dataset.stageChannel), ['1', '2', '3'])
+  assert.ok(container.querySelector('.stage-axis--x')?.textContent?.includes('聚焦'))
+  await tapButton('X 轴正向移动')
+  assert.deepEqual(writes, [{path: '/api/stage/move', body: {axis: 'x', direction: 1, steps: 10}}])
+})
+
+test('arranging cards disables motion and saves keyboard ordering through presentation only', async () => {
+  state.connected = true
+  await render()
+  await act(async () => button('整理面板').click())
+  assert.equal(button('X 轴正向移动').disabled, true)
+  await act(async () => {
+    button('拖动排列 CH3').dispatchEvent(new dom.window.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}))
+    await new Promise(resolve => setTimeout(resolve, 5))
+  })
+  assert.deepEqual(writes, [{path: '/api/stage/presentation', body: {card_order: [1, 3, 2]}}])
+  await act(async () => button('完成整理').click())
+  assert.equal(button('X 轴正向移动').disabled, false)
+})
+
+test('renaming sends one channel patch and updates the shared card label', async () => {
+  await render()
+  await act(async () => {button('整理面板').click()})
+  await act(async () => {button('命名 CH3').click()})
+  await fillQuick('CH3 名称', '聚焦台')
+  await act(async () => {button('保存名称').click(); await new Promise(resolve => setTimeout(resolve, 5))})
+  assert.deepEqual(writes, [{path: '/api/stage/presentation', body: {channel_names: {'3': '聚焦台'}}}])
+  assert.ok(container.querySelector('.stage-axis--x')?.textContent?.includes('聚焦台'))
+})
+
+test('pointer drag reorders physical cards without sending a motion request', async () => {
+  await render()
+  await act(async () => button('整理面板').click())
+  const handle = button('拖动排列 CH3')
+  const target = container.querySelector<HTMLElement>('[data-stage-channel="2"]')!
+  document.elementFromPoint = () => target
+  await act(async () => {
+    handle.dispatchEvent(new dom.window.MouseEvent('pointerdown', {bubbles: true, button: 0}))
+    handle.dispatchEvent(new dom.window.MouseEvent('pointermove', {bubbles: true, clientX: 100, clientY: 100}))
+    handle.dispatchEvent(new dom.window.MouseEvent('pointerup', {bubbles: true, button: 0}))
+    await new Promise(resolve => setTimeout(resolve, 5))
+  })
+  assert.deepEqual(writes, [{path: '/api/stage/presentation', body: {card_order: [1, 2, 3]}}])
 })

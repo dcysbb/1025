@@ -74,6 +74,18 @@ class LocalAccess(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['ports'][0]['device'], 'COM3')
         open_port.assert_not_called()
 
+    async def test_system_control_and_new_hardware_routes_keep_origin_and_local_guards(self):
+        from fastapi import BackgroundTasks
+        from app.runtime import SystemAction
+        routes = {route.path: route for route in self.main.app.routes if hasattr(route, 'dependant')}
+        for path in ('/api/system/control', '/api/analog-output/enable', '/api/analog-output/config', '/api/stage/presentation'):
+            self.assertIn(self.main.require_operator, [dep.call for dep in routes[path].dependant.dependencies])
+        for origin, host in ((None, '127.0.0.1'), ('http://example.com', '127.0.0.1'), ('http://127.0.0.1:8770', '192.168.1.2')):
+            with patch.object(self.main.SYSTEM, 'prepare', new=AsyncMock()) as prepare:
+                with self.assertRaises(HTTPException):
+                    await self.main.system_control(SystemAction(action='exit'), self.request(host, origin), BackgroundTasks(), 'test')
+                prepare.assert_not_awaited()
+
     async def test_simulated_hardware_status_exposes_mapped_physical_valve_coil(self):
         engine = self.main.ENGINE
         config = engine.config.model_copy(update={'valve_open_on_energized': False})

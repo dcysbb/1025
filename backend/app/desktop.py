@@ -69,14 +69,20 @@ def start_backend(logs: Path):
                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
 
 
+def startup_logs(root: Path) -> Path:
+    local = os.environ.get("LOCALAPPDATA") if os.name == "nt" else None
+    log_root = Path(local) / "VacuumInterlock" / "logs" if local else root / "logs"
+    logs = log_root / f"startup-{time.time_ns()}-{os.getpid()}"
+    logs.mkdir(parents=True, exist_ok=True)
+    return logs
+
+
 def open_console() -> str:
     root = data_directory()
     url, port = connection_options(root)
     with startup_lock(port) as may_start:
         if not server_ready(url, root):
-            log_root = Path(os.environ.get("LOCALAPPDATA", str(root))) / "VacuumInterlock" / "logs" if os.name == "nt" else root / "logs"
-            logs = log_root / f"startup-{time.time_ns()}-{os.getpid()}"
-            logs.mkdir(parents=True, exist_ok=True)
+            logs = startup_logs(root)
             child = start_backend(logs) if may_start else None
             deadline = time.monotonic() + 45
             while not server_ready(url, root):
