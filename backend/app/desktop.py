@@ -74,7 +74,8 @@ def open_console() -> str:
     url, port = connection_options(root)
     with startup_lock(port) as may_start:
         if not server_ready(url, root):
-            logs = root / "logs"
+            log_root = Path(os.environ.get("LOCALAPPDATA", str(root))) / "VacuumInterlock" / "logs" if os.name == "nt" else root / "logs"
+            logs = log_root / f"startup-{time.time_ns()}-{os.getpid()}"
             logs.mkdir(parents=True, exist_ok=True)
             child = start_backend(logs) if may_start else None
             deadline = time.monotonic() + 45

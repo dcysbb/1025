@@ -15,6 +15,9 @@ class DesktopLauncherTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        environment = patch.dict(os.environ, {'LOCALAPPDATA': str(self.root)})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def test_existing_server_opens_browser_without_starting_hardware_again(self):
         with patch.object(desktop, 'data_directory', return_value=self.root), \
@@ -35,7 +38,9 @@ class DesktopLauncherTests(unittest.TestCase):
              patch.object(desktop.time, 'sleep') as sleep, \
              patch.object(desktop.webbrowser, 'open', return_value=True) as browser:
             self.assertEqual(desktop.open_console(), 'http://127.0.0.1:8770')
-        start.assert_called_once_with(self.root / 'logs')
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[0].parent, self.root / 'VacuumInterlock' / 'logs' if os.name == 'nt' else self.root / 'logs')
+        self.assertTrue(start.call_args.args[0].name.startswith('startup-'))
         sleep.assert_called_once()
         browser.assert_called_once()
 
@@ -48,6 +53,22 @@ class DesktopLauncherTests(unittest.TestCase):
              patch.object(desktop.webbrowser, 'open', return_value=True):
             desktop.open_console()
         start.assert_not_called()
+
+    def test_new_start_does_not_reuse_protected_legacy_log_files(self):
+        legacy = self.root / 'logs'
+        legacy.mkdir()
+        (legacy / 'console-stdout.log').write_text('previous installation')
+        with patch.object(desktop, 'data_directory', return_value=self.root), \
+             patch.object(desktop, 'startup_lock', return_value=nullcontext(True)), \
+             patch.object(desktop, 'server_ready', side_effect=[False, True, False, True]), \
+             patch.object(desktop, 'start_backend') as start, \
+             patch.object(desktop.webbrowser, 'open', return_value=True):
+            desktop.open_console()
+            desktop.open_console()
+        first, second = [call.args[0] for call in start.call_args_list]
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(first, legacy)
+        self.assertEqual((legacy / 'console-stdout.log').read_text(), 'previous installation')
 
     def test_backend_failure_reports_log_path_instead_of_opening_a_dead_page(self):
         child = Mock(returncode=23); child.poll.return_value = 23
