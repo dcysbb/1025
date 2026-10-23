@@ -21,7 +21,8 @@ Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 [Tasks]
 Name: "service"; Description: "Install the background Windows service (starts after manual configuration)"; Flags: unchecked
 [Icons]
-Name: "{group}\Open Control Panel"; Filename: "powershell.exe"; Parameters: "-NoProfile -File ""{app}\scripts\open-control-panel.ps1"""
+Name: "{group}\Open Control Panel"; Filename: "{app}\VacuumInterlock.exe"; Parameters: "--open-browser"; WorkingDir: "{app}"
+Name: "{autodesktop}\真空联锁控制台"; Filename: "{app}\VacuumInterlock.exe"; Parameters: "--open-browser"; WorkingDir: "{app}"
 Name: "{group}\Documentation"; Filename: "{app}\README.md"
 [Run]
 Filename: "{app}\service\VacuumInterlockService.exe"; Parameters: "--startup auto install"; Tasks: service; Flags: runhidden waituntilterminated
