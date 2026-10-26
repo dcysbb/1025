@@ -291,3 +291,40 @@ class AnalogTests(unittest.IsolatedAsyncioTestCase):
         for value in (math.inf, math.nan, 16.001, -16.001, 0.0001):
             with self.assertRaises(ValidationError): Calibration(channel=1, offset_ma=value)
             with self.assertRaises(ValidationError): AnalogMapping(offset_ma=value)
+
+
+    async def test_manual_auto_saves_offset_before_write_and_updates_only_selected_channel(self):
+        self.controller.config = self.configured()
+        self.controller.driver = self.driver
+        await self.controller.manual(ManualCurrent(channel=2, current_ma=10), 'test')
+        async def verify_saved(register, current):
+            saved = AnalogConfig.model_validate_json(self.controller.path.read_text(encoding='utf-8'))
+            self.assertEqual(saved.outputs[0].offset_ma, .125)
+            self.assertEqual(saved.outputs[1].offset_ma, 0)
+            self.assertEqual((register, current), (10, 12.125))
+        self.driver.write_current.side_effect = verify_saved
+        await self.controller.manual(ManualCurrent(channel=1, current_ma=12, offset_ma=.125), 'test')
+        self.assertEqual(self.controller.rows[1]['current_ma'], 10)
+        reloaded = AnalogOutput(Path(self.temp.name), lambda: self.sample, Mock())
+        self.assertEqual(reloaded.config.outputs[0].offset_ma, .125)
+        self.assertEqual(reloaded.snapshot()['manual_channels'], [1, 2])
+
+    async def test_manual_auto_save_failure_never_writes_hardware(self):
+        self.controller.config = self.configured()
+        self.controller.driver = self.driver
+        for fail_path in (self.controller.path, self.controller.journal):
+            original = self.controller._save
+            def fail(path, value):
+                if path == fail_path:
+                    raise OSError('disk full')
+                original(path, value)
+            with patch.object(self.controller, '_save', side_effect=fail):
+                with self.assertRaises(OSError):
+                    await self.controller.manual(ManualCurrent(channel=1, current_ma=12, offset_ma=.125), 'test')
+            self.driver.write_current.assert_not_awaited()
+            self.assertFalse(self.controller.snapshot()['manual_active'])
+
+    def test_manual_auto_save_offset_validation(self):
+        for value in (17, -17, .0001, math.nan, math.inf):
+            with self.assertRaises(ValidationError):
+                ManualCurrent(channel=1, current_ma=12, offset_ma=value)

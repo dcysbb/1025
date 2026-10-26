@@ -65,6 +65,7 @@ class ManualCurrent(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     channel: int = Field(ge=1, le=4, strict=True)
     current_ma: float = Field(ge=4, le=20, multiple_of=0.001)
+    offset_ma: float | None = Field(default=None, ge=-16, le=16, multiple_of=0.001)
 
 
 class Calibration(BaseModel):
@@ -232,6 +233,11 @@ class AnalogOutput:
                 raise AnalogError("模拟量模块未连接，请先在硬件连接中连接模块")
             if self.config.register_base is None or not self.config.current_output_confirmed:
                 raise AnalogError("请先在硬件连接中核对输出寄存器与 4–20mA 型号及接线")
+            if body.offset_ma is not None and body.offset_ma != self.config.outputs[body.channel - 1].offset_ma:
+                config = self.config.model_copy(deep=True)
+                config.outputs[body.channel - 1].offset_ma = body.offset_ma
+                self._save(self.path, config.model_dump())
+                self.config = config
             channels = self._manual_channels | {body.channel}
             self._save(self.journal, {"config": self.config.model_dump(), "manual_channels": sorted(channels),
                                       "reason": "手动电流输出尚未停止确认"})

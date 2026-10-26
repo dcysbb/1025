@@ -30,8 +30,9 @@ beforeEach(() => {
       if (path.endsWith('/stop')) {state.enabled = false; state.manual_active = false}
       else if (path.endsWith('/calibration')) state.config.outputs[body.channel-1].offset_ma=body.offset_ma
       else {
+        if (body.offset_ma !== undefined) state.config.outputs[body.channel-1].offset_ma=body.offset_ma
         state.manual_active = true
-        state.outputs = state.outputs.map(row => row.channel === body.channel ? {...row, current_ma: body.current_ma, status: '手动设定'} : row)
+        state.outputs = state.outputs.map(row => row.channel === body.channel ? {...row, target_ma:body.current_ma, offset_ma:body.offset_ma ?? 0, current_ma:currentCommand(body.current_ma,body.offset_ma ?? 0).current, status: '手动设定'} : row)
       }
     } else if (failRead) throw new TypeError('Failed to fetch')
     return new Response(JSON.stringify(state))
@@ -52,7 +53,7 @@ test('entering debug renders four channels and never writes; drafting a current 
   assert.equal(document.querySelector<HTMLInputElement>('[aria-label="AO1 电流"]')!.value, '20')
   assert.deepEqual(writes, [])
   await click(button('下发 AO2'))
-  assert.deepEqual(writes, [{path: '/api/debug/analog-output', body: {channel: 2, current_ma: 8.125}}])
+  assert.deepEqual(writes, [{path: '/api/debug/analog-output', body: {channel: 2, current_ma: 8.125, offset_ma: 0}}])
   assert.ok(document.body.textContent?.includes('8.125 mA'))
 })
 test('pressure following must explicitly stop before manual writes and never resumes automatically', async () => {
@@ -71,7 +72,7 @@ test('invalid range and precision block sending; valid real output needs no popu
   }
   await fill(1, '12.001')
   await click(button('下发 AO1'))
-  assert.deepEqual(writes, [{path:'/api/debug/analog-output',body:{channel:1,current_ma:12.001}}])
+  assert.deepEqual(writes, [{path:'/api/debug/analog-output',body:{channel:1,current_ma:12.001,offset_ma:0}}])
 })
 test('permissions, missing register and unconfirmed state disable manual output with a reason', async () => {
   await render(false)
@@ -166,7 +167,7 @@ test('saving calibration requires stopping output and invalid precision never re
     offset.dispatchEvent(new dom.window.Event('input',{bubbles:true}))
   })
   assert.equal(button('保存 AO1 偏移').disabled,true)
-  assert.ok(document.body.textContent?.includes('请先停止输出，再保存偏移'))
+  assert.ok(document.body.textContent?.includes('下发时自动保存'))
   await click(button('停止模拟量输出'))
   assert.equal(button('保存 AO1 偏移').disabled,false)
   for (const value of ['-', '16.001', '-16.001', '0.0001']) {
@@ -175,6 +176,7 @@ test('saving calibration requires stopping output and invalid precision never re
       offset.dispatchEvent(new dom.window.Event('input',{bubbles:true}))
     })
     assert.equal(button('保存 AO1 偏移').disabled,true)
+    assert.equal(button('下发 AO1').disabled,true)
   }
   assert.equal(writes.length,1)
 })
@@ -189,4 +191,26 @@ test('manual re-entry uses the nominal target without accumulating compensation 
   assert.ok(document.querySelector('.analog-manual-card')!.textContent?.includes('预计下发 20.000mA（已限幅）'))
   assert.deepEqual(currentCommand(4,-.1),{current:4,limited:true})
   assert.deepEqual(currentCommand(12,.001),{current:12.001,limited:false})
+})
+
+
+test('manual output saves its edited offset in the same request, including during manual output', async () => {
+  state.manual_active=true
+  await render(); await fill(1,'12')
+  await act(async () => {
+    for (const [channel,value] of [[1,'0.125'],[2,'-0.200']] as const) {
+      const node=document.querySelector<HTMLInputElement>(`[aria-label="AO${channel} 校准偏移"]`)!
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(node,value)
+      node.dispatchEvent(new dom.window.Event('input',{bubbles:true}))
+    }
+  })
+  assert.ok(document.querySelector('.analog-manual-card')!.textContent?.includes('预计下发 12.125mA'))
+  assert.equal(writes.length,0)
+  await click(button('下发 AO1'))
+  assert.deepEqual(writes,[{path:'/api/debug/analog-output',body:{channel:1,current_ma:12,offset_ma:.125}}])
+  assert.equal(state.config.outputs[0].offset_ma,.125)
+  assert.equal(document.querySelector<HTMLInputElement>('[aria-label="AO2 校准偏移"]')!.value,'-0.200')
+  assert.equal(document.querySelector<HTMLInputElement>('[aria-label="AO1 电流"]')!.value,'12')
+  assert.ok(document.querySelector('.analog-manual-card')!.textContent?.includes('12.125 mA'))
+  assert.ok(document.body.textContent?.includes('参数已保存'))
 })

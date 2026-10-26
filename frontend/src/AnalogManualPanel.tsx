@@ -69,12 +69,12 @@ export default function AnalogManualPanel({auth, connected}: {auth: boolean; con
       const next = await request<AnalogState>(path, body, method)
       if (epoch === generation.current) {
         setState(next); setCommandUnconfirmed(false); setFresh(true); setLastRead(Date.now())
-        if (method === 'PATCH') {
+        if (method === 'PATCH' || path === '/api/debug/analog-output') {
           const {channel} = body as {channel: number}
           setOffsets(prior => prior.map((value, index) => index === channel - 1 ? String(next.config.outputs[index].offset_ma ?? 0) : value))
           savedOffsets.current = next.config.outputs.map(row => row.offset_ma ?? 0)
         }
-        setMessage(stop ? '已停止输出，并写入所控制通道的故障电流' : method === 'PATCH' ? `${label}，下次下发生效` : `${label}，写入应答已确认`)
+        setMessage(stop ? '已停止输出，并写入所控制通道的故障电流' : method === 'PATCH' ? `${label}，下次下发生效` : `${label}，参数已保存，写入应答已确认`)
       }
     } catch (exc) {
       if (epoch === generation.current) {if (method !== 'PATCH') setCommandUnconfirmed(true); setFresh(false); setError(errorMessage(exc, method === 'PATCH' ? '校准偏移保存失败' : '输出结果未确认，请检查连接，勿重复下发'))}
@@ -91,8 +91,8 @@ export default function AnalogManualPanel({auth, connected}: {auth: boolean; con
     {state?.enabled && <div className="analog-manual-switch"><span>停止压力跟随并写入故障电流后，可独立设置各通道。</span><button className="button button--quiet" disabled={!auth || !connected || !fresh || stopping} onClick={() => void act('/api/analog-output/stop', {}, '切换为手动调节', true)}>{stopping ? '切换中…' : '切换为手动调节'}</button></div>}
     <div className="analog-manual-grid">{[1, 2, 3, 4].map((channel, index) => {
       const row = state?.outputs.find(item => item.channel === channel), valid = validCurrent(values[index])
-      const offset = state?.config.outputs[index]?.offset_ma ?? 0, preview = valid ? currentCommand(Number(values[index]), offset) : null
-      const calibrationDirty = offsets[index].trim() === '' || Number(offsets[index]) !== offset
+      const offset = Number(offsets[index]), preview = valid && validOffset(offsets[index]) ? currentCommand(Number(values[index]), offset) : null
+      const calibrationDirty = offsets[index].trim() === '' || offset !== (state?.config.outputs[index]?.offset_ma ?? 0)
       const update = (value: string) => setValues(prior => prior.map((v, i) => i === index ? value : v))
       return <article className="analog-manual-card" key={channel}>
         <h3>AO{channel}{state?.config.outputs[index]?.label && <small>{state.config.outputs[index].label}</small>}</h3>
@@ -101,12 +101,12 @@ export default function AnalogManualPanel({auth, connected}: {auth: boolean; con
         <input className="analog-manual-slider" aria-label={`AO${channel} 电流滑块`} type="range" min={4} max={20} step={0.001} value={valid ? Number(values[index]) : 4} disabled={!auth || !!busy || stopping} onChange={event => update(event.target.value)}/>
         <div className="filter-buttons">{[4, 12, 20].map(value => <button className="button button--quiet" disabled={!auth || !!busy || stopping} key={value} onClick={() => update(String(value))}>{value}mA</button>)}</div>
         {!valid && <p className="inline-error">电流须为 4–20mA，最多三位小数</p>}
-        {preview && <p className="stage-note">按已保存偏移 {offset >= 0 ? '+' : ''}{offset.toFixed(3)}mA，预计下发 {preview.current.toFixed(3)}mA{preview.limited ? '（已限幅）' : ''}</p>}
-        <button className="button button--primary" disabled={!!reason || !valid} onClick={() => void act('/api/debug/analog-output', {channel, current_ma: Number(values[index])}, `AO${channel} 设定 ${Number(values[index]).toFixed(3)}mA`)}><Send size={14}/>{busy.startsWith(`AO${channel} 设定`) ? '下发中…' : `下发 AO${channel}`}</button>
+        {preview && <p className="stage-note">按当前偏移 {offset >= 0 ? '+' : ''}{offset.toFixed(3)}mA，预计下发 {preview.current.toFixed(3)}mA{preview.limited ? '（已限幅）' : ''}</p>}
+        <button className="button button--primary" disabled={!!reason || !valid || !validOffset(offsets[index])} onClick={() => void act('/api/debug/analog-output', {channel, current_ma: Number(values[index]), offset_ma: Number(offsets[index])}, `AO${channel} 设定 ${Number(values[index]).toFixed(3)}mA`)}><Send size={14}/>{busy.startsWith(`AO${channel} 设定`) ? '下发中…' : `下发 AO${channel}`}</button>
         <div className="analog-calibration"><label className="field">校准偏移（mA）<input aria-label={`AO${channel} 校准偏移`} type="text" inputMode="decimal" disabled={!auth || !!busy || stopping} value={offsets[index]} onChange={event => setOffsets(prior => prior.map((value, i) => i === index ? event.target.value : value))}/></label>
           {!validOffset(offsets[index]) && <p className="inline-error">偏移须为 −16 至 +16mA，最多三位小数</p>}
           <button className="button button--quiet" disabled={!!calibrationReason || !calibrationDirty || !validOffset(offsets[index])} onClick={() => void act('/api/analog-output/calibration', {channel, offset_ma: Number(offsets[index])}, `AO${channel} 校准偏移已保存`, false, 'PATCH')}><Check size={14}/>{busy.startsWith(`AO${channel} 校准`) ? '保存中…' : `保存 AO${channel} 偏移`}</button>
-          {calibrationDirty && <small className="stage-note">{state?.enabled || state?.manual_active ? '请先停止输出，再保存偏移' : '偏移尚未保存'}</small>}
+          {calibrationDirty && <small className="stage-note">{state?.enabled ? '请先停止压力跟随' : '偏移尚未保存，下发时自动保存'}</small>}
         </div>
       </article>
     })}</div>

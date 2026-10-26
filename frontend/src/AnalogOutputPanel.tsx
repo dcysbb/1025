@@ -11,17 +11,19 @@ const request = <T,>(path = '', method = 'GET', body?: unknown) => apiRequest<T>
 export default function AnalogOutputPanel({auth, connected, onDirtyChange}: {auth: boolean; connected: boolean; onDirtyChange: (dirty: boolean) => void}) {
   const [state, setState] = useState<State | null>(null), [draft, setDraft] = useState<Config | null>(null)
   const [saved, setSaved] = useState<Config | null>(null), [busy, setBusy] = useState('')
+  const [stopping, setStopping] = useState(false)
   const [error, setError] = useState(''), [readError, setReadError] = useState(''), [message, setMessage] = useState('')
   const [lastRead, setLastRead] = useState(0), [fresh, setFresh] = useState(false)
-  const inFlight = useRef(false), generation = useRef(0)
+  const inFlight = useRef(false), stopPending = useRef(false), generation = useRef(0)
   const dirty = !!draft && JSON.stringify(saved) !== JSON.stringify(draft)
   useEffect(() => {onDirtyChange(dirty)}, [dirty, onDirtyChange])
   useEffect(() => {
+    const sequence = generation
     let cancelled = false, timer: ReturnType<typeof setTimeout>
     async function read() {
       const epoch = generation.current
       try {
-        if (inFlight.current) return
+        if (inFlight.current || stopPending.current) return
         const next = await request<State>()
         if (!next.config || !Array.isArray(next.outputs)) throw new Error('模拟量状态格式无效，请检查后台版本')
         if (!cancelled && epoch === generation.current) {
@@ -31,28 +33,41 @@ export default function AnalogOutputPanel({auth, connected, onDirtyChange}: {aut
       finally {if (!cancelled) timer = setTimeout(read, 1000)}
     }
     void read()
-    return () => {cancelled = true; clearTimeout(timer)}
+    return () => {cancelled = true; clearTimeout(timer); sequence.current++}
   }, [])
   useEffect(() => {
     if (!lastRead) return
     const timer = setTimeout(() => setFresh(false), Math.max(0, 3500 - (Date.now() - lastRead)))
     return () => clearTimeout(timer)
   }, [lastRead])
-  const editable = auth && !!draft && !busy && !state?.enabled && !state?.manual_active && !state?.unconfirmed
-  const writable = auth && connected && fresh && !busy
+  const editable = auth && !!draft && !busy && !stopping && !state?.enabled && !state?.manual_active && !state?.unconfirmed
+  const writable = auth && connected && fresh && !busy && !stopping
   const patch = <K extends keyof Config>(key: K, value: Config[K]) => setDraft(prior => prior ? {...prior, [key]: value} : prior)
   function mapping(index: number, key: keyof Mapping, value: unknown) {
     if (draft) patch('outputs', draft.outputs.map((row, i) => i === index ? {...row, [key]: value} : row))
   }
   async function act(path: string, success: string) {
-    if (!auth || inFlight.current) return
-    inFlight.current = true; generation.current++; setBusy(path); setError(''); setMessage('')
+    const stop = path === '/stop'
+    if (!auth || stopPending.current || !stop && inFlight.current) return
+    if (stop) {stopPending.current = true; setStopping(true)} else {inFlight.current = true; setBusy(path)}
+    const epoch = ++generation.current
+    setError(''); setMessage('')
     try {
+      if (path === '/enable' && dirty) {
+        const savedState = await request<State>('/config', 'PUT', draft)
+        if (epoch !== generation.current) return
+        setState(savedState); setSaved(savedState.config); setDraft(structuredClone(savedState.config))
+      }
+      if (epoch !== generation.current) return
       const next = await request<State>(path, path === '/config' ? 'PUT' : 'POST', path === '/config' ? draft : {})
+      if (epoch !== generation.current) return
       setState(next); setSaved(next.config); if (path === '/config') setDraft(structuredClone(next.config))
       setFresh(true); setLastRead(Date.now()); setMessage(success)
-    } catch (error) {setError(errorMessage(error, '模拟量操作未确认，请检查状态，勿重复发送输出请求。'))}
-    finally {generation.current++; inFlight.current = false; setBusy('')}
+    } catch (error) {if (epoch === generation.current) {setFresh(false); setError(errorMessage(error, '模拟量操作未确认，请检查状态，勿重复发送输出请求。'))}}
+    finally {
+      if (epoch === generation.current) generation.current++
+      if (stop) {stopPending.current = false; setStopping(false)} else {inFlight.current = false; setBusy('')}
+    }
   }
   return <section className="content-panel glass-panel analog-panel">
     <div className="panel-heading"><div><h2>ZS-AO-4-RJ45</h2><p className="stage-note">中盛科技 · 实时压力 → 4–20mA</p></div><span className={`status-chip ${fresh && state?.connected ? 'status-chip--ok' : 'status-chip--muted'}`}>{!fresh ? '状态未确认' : state?.enabled ? '实时输出中' : state?.manual_active ? '手动输出中' : state?.connected ? '已连接 · 输出未启用' : '未连接'}</span></div>
@@ -86,8 +101,8 @@ export default function AnalogOutputPanel({auth, connected, onDirtyChange}: {aut
       <div className="stage-actions">
         <button className="button button--primary" disabled={!writable || !editable || !dirty || draft.outputs.some(row => !validOffset(row.offset_ma))} onClick={() => void act('/config', '模拟量配置已保存，未启用输出')}><Check size={15}/>{busy === '/config' ? '保存中…' : '保存模拟量设置'}</button>
         <button className="button button--quiet" disabled={!writable || dirty || state?.connected} onClick={() => void act('/connect', '模拟量模块已连接；连接过程未写入电流')}><Plug size={15}/>连接模拟量模块</button>
-        <button className="button button--quiet" disabled={!writable || dirty || !state?.connected || state.enabled || state.manual_active || state.unconfirmed || draft.register_base == null || !draft.current_output_confirmed || !draft.outputs.some(row => row.enabled)} onClick={() => void act('/enable', '实时压力电流输出已启用')}>开始实时输出</button>
-        <button className="button stage-stop" disabled={!auth || !!busy || !state?.enabled && !state?.manual_active && !state?.unconfirmed} onClick={() => void act('/stop', '实时输出已停止，已写入各通道故障电流')}><Square size={15}/>停止实时输出</button>
+        <button className="button button--quiet" disabled={!writable || !state?.connected || state.enabled || state.manual_active || state.unconfirmed || draft.register_base == null || !draft.current_output_confirmed || !draft.outputs.some(row => row.enabled) || draft.outputs.some(row => !validOffset(row.offset_ma))} onClick={() => void act('/enable', '当前参数已保存，实时压力电流输出已启用')}>{busy === '/enable' ? '保存并启用中…' : '开始实时输出'}</button>
+        <button className="button stage-stop" disabled={!auth || stopping || !busy && !state?.enabled && !state?.manual_active && !state?.unconfirmed} onClick={() => void act('/stop', '实时输出已停止，已写入各通道故障电流')}><Square size={15}/>{stopping ? '停止中…' : '停止实时输出'}</button>
         <button className="button button--quiet" disabled={!writable || !state?.connected} onClick={() => void act('/disconnect', '模拟量模块已断开')}><Unplug size={15}/>断开模拟量模块</button>
       </div>
       <p className="stage-note">压力过期、无效或真空规断连时使用故障电流；超量程限幅到 4–20mA。通信中断或程序异常退出后，模块可能保持最后电流，不能据此判断压力有效。</p>

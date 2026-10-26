@@ -26,6 +26,7 @@ beforeEach(() => {
       writes.push({path, body})
       if (path.endsWith('/config')) state.config = body
       if (path.endsWith('/connect')) state.connected = true
+      if (path.endsWith('/enable')) state.enabled = true
     }
     return new Response(JSON.stringify(state))
   }
@@ -34,7 +35,7 @@ afterEach(async () => {await act(async () => root.unmount()); dom.window.close()
 async function render(auth = true) {await act(async () => {root.render(<AnalogOutputPanel auth={auth} connected onDirtyChange={changed}/>); await new Promise(r => setTimeout(r, 5))})}
 function button(label: string) {const found = [...document.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.trim() === label); assert.ok(found, label); return found}
 async function fill(label: string, value: string) {
-  const input = [...document.querySelectorAll<HTMLLabelElement>('label')].find(item => item.textContent?.trim() === label)?.querySelector('input')
+  const input = document.querySelector<HTMLInputElement>(`[aria-label="${label}"]`) ?? [...document.querySelectorAll<HTMLLabelElement>('label')].find(item => item.textContent?.trim() === label)?.querySelector('input')
   assert.ok(input, label)
   await act(async () => {Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value')!.set!.call(input, value); input.dispatchEvent(new dom.window.Event('input', {bubbles: true}))})
 }
@@ -95,4 +96,48 @@ test('hardware settings preserve signed calibration input and reject invalid pre
   await act(async () => {Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(input,'-0.125');input.dispatchEvent(new dom.window.Event('input',{bubbles:true}))})
   await act(async () => {button('保存模拟量设置').click();await new Promise(r=>setTimeout(r,5))})
   assert.equal((writes[0].body as {outputs:{offset_ma:string}[]}).outputs[2].offset_ma,'-0.125')
+})
+
+
+function ready() {
+  state.connected=true
+  Object.assign(state.config,{register_base:10,current_output_confirmed:true,outputs:Array.from({length:4},()=>({enabled:true,label:'',source_channel:1,pressure_4ma_pa:100000,pressure_20ma_pa:0,scale:'linear',fault_ma:20,offset_ma:0}))})
+}
+test('start output automatically saves edited mapping before enabling and blocks duplicate clicks', async () => {
+  ready(); await render(); await fill('AO1 校准偏移','0.125')
+  assert.equal(button('开始实时输出').disabled,false)
+  await act(async () => {button('开始实时输出').click();button('开始实时输出').click();await new Promise(r=>setTimeout(r,5))})
+  assert.deepEqual(writes.map(row=>row.path),['/api/analog-output/config','/api/analog-output/enable'])
+  assert.equal((writes[0].body as {outputs:{offset_ma:string}[]}).outputs[0].offset_ma,'0.125')
+  assert.equal(dirty,false)
+})
+test('save rejection prevents output and retains the edited draft', async () => {
+  ready();await render();await fill('AO1 校准偏移','0.125')
+  globalThis.fetch=async (url,options)=>{
+    if (options?.method==='GET') return new Response(JSON.stringify(state))
+    writes.push({path:String(url),body:JSON.parse(String(options?.body))})
+    return new Response(JSON.stringify({detail:'配置保存失败'}),{status:409})
+  }
+  await act(async()=>{button('开始实时输出').click();await new Promise(r=>setTimeout(r,5))})
+  assert.deepEqual(writes.map(row=>row.path),['/api/analog-output/config'])
+  assert.equal(dirty,true)
+  assert.ok(document.body.textContent?.includes('配置保存失败'))
+})
+test('stop during automatic save cancels the subsequent enable', async () => {
+  ready();await render();await fill('AO1 校准偏移','0.125')
+  const normal=globalThis.fetch
+  let finish:((response:Response)=>void)|undefined
+  globalThis.fetch=async (url,options)=>{
+    if (String(url).endsWith('/config')) {
+      writes.push({path:String(url),body:JSON.parse(String(options?.body))})
+      return new Promise(resolve=>{finish=resolve})
+    }
+    return normal(url,options)
+  }
+  await act(async()=>{button('开始实时输出').click();await new Promise(r=>setTimeout(r,5))})
+  assert.equal(button('停止实时输出').disabled,false)
+  await act(async()=>{button('停止实时输出').click();await new Promise(r=>setTimeout(r,5))})
+  await act(async()=>{finish!(new Response(JSON.stringify(state)));await new Promise(r=>setTimeout(r,5))})
+  assert.deepEqual(writes.map(row=>row.path),['/api/analog-output/config','/api/analog-output/stop'])
+  assert.equal(state.enabled,false)
 })
