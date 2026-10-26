@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from pydantic import ValidationError
-from app.analog_output import AnalogConfig, AnalogError, AnalogMapping, AnalogOutput, pressure_current
+from app.analog_output import AnalogConfig, AnalogError, AnalogMapping, AnalogOutput, ManualCurrent, pressure_current
 from app.drivers.zs_ao import ZsAnalogClient, ModbusError
 
 
@@ -124,3 +124,104 @@ class AnalogTests(unittest.IsolatedAsyncioTestCase):
             request.assert_awaited_once_with(6, payload)
         with patch.object(client, '_request', new=AsyncMock(return_value=b'bad')):
             with self.assertRaises(ModbusError): await client.write_current(10, 12)
+
+    async def test_manual_all_channels_are_independent_and_preserve_pressure_mapping(self):
+        self.controller.config = self.configured()
+        self.controller.driver = self.driver
+        original = self.controller.config.model_dump()
+        for channel, current in enumerate((4, 8.125, 12, 20), 1):
+            result = await self.controller.manual(ManualCurrent(channel=channel, current_ma=current), 'test')
+            self.driver.write_current.assert_awaited_with(9 + channel, current)
+            self.assertFalse(result['enabled'])
+            self.assertTrue(result['manual_active'])
+        self.assertEqual([row['current_ma'] for row in result['outputs']], [4, 8.125, 12, 20])
+        self.assertEqual(self.controller.config.model_dump(), original)
+        with self.assertRaisesRegex(AnalogError, '停止手动输出'):
+            await self.controller.enable('test')
+        with self.assertRaises(AnalogError):
+            await self.controller.configure(self.configured(), 'test')
+        self.driver.write_current.reset_mock()
+        await self.controller.stop('test')
+        self.assertEqual([call.args for call in self.driver.write_current.await_args_list], [(10, 20), (11, 20), (12, 20), (13, 20)])
+        self.assertFalse(self.controller.snapshot()['manual_active'])
+        self.assertFalse(self.controller.journal.exists())
+
+    async def test_manual_rejects_pressure_following_offline_and_unverified_hardware(self):
+        body = ManualCurrent(channel=1, current_ma=12)
+        self.controller.config = self.configured()
+        with self.assertRaisesRegex(AnalogError, '未连接'): await self.controller.manual(body, 'test')
+        self.controller.driver = self.driver
+        self.controller.enabled = True
+        with self.assertRaisesRegex(AnalogError, '压力跟随'): await self.controller.manual(body, 'test')
+        self.controller.enabled = False
+        for update in ({'register_base': None}, {'current_output_confirmed': False}):
+            self.controller.config = self.configured().model_copy(update=update)
+            with self.assertRaisesRegex(AnalogError, '核对'): await self.controller.manual(body, 'test')
+        self.driver.write_current.assert_not_awaited()
+
+    async def test_manual_failure_retains_exact_recovery_channels_including_unmapped_output(self):
+        self.controller.config = self.configured()
+        self.controller.driver = self.driver
+        self.driver.write_current.side_effect = OSError('lost response')
+        with self.assertRaisesRegex(AnalogError, '未确认'):
+            await self.controller.manual(ManualCurrent(channel=4, current_ma=6), 'test')
+        with self.assertRaises(AnalogError):
+            await self.controller.manual(ManualCurrent(channel=3, current_ma=8), 'test')
+        reloaded = AnalogOutput(Path(self.temp.name), lambda: self.sample, Mock(), lambda *args, **kw: self.driver)
+        self.assertTrue(reloaded.uncertain)
+        self.assertEqual(reloaded.snapshot()['manual_channels'], [4])
+        self.driver.write_current.side_effect = None
+        self.driver.write_current.reset_mock()
+        await reloaded.connect('test')
+        await reloaded.stop('test')
+        self.driver.write_current.assert_awaited_once_with(13, 20)
+        self.assertFalse(reloaded.uncertain)
+
+    async def test_stop_waits_for_manual_write_and_prevents_new_writes_while_stopping(self):
+        self.controller.config = self.configured()
+        self.controller.driver = self.driver
+        started, release = asyncio.Event(), asyncio.Event()
+        async def delayed(*args):
+            started.set()
+            await release.wait()
+        self.driver.write_current.side_effect = delayed
+        first = asyncio.create_task(self.controller.manual(ManualCurrent(channel=2, current_ma=12), 'test'))
+        await started.wait()
+        stopped = asyncio.create_task(self.controller.stop('test'))
+        await asyncio.sleep(0)
+        extra = asyncio.create_task(self.controller.manual(ManualCurrent(channel=3, current_ma=8), 'test'))
+        release.set()
+        await first
+        with self.assertRaisesRegex(AnalogError, '停止输出正在处理'): await extra
+        await stopped
+        self.assertEqual([c.args for c in self.driver.write_current.await_args_list], [(11, 12), (11, 20)])
+
+    async def test_stop_does_not_cancel_an_inflight_pressure_write(self):
+        self.controller.config = self.configured(update_interval_s=10)
+        self.controller.driver = self.driver
+        started, release = asyncio.Event(), asyncio.Event()
+        async def delayed(*args):
+            started.set()
+            await release.wait()
+        self.driver.write_current.side_effect = delayed
+        await self.controller.enable('test')
+        await started.wait()
+        stopped = asyncio.create_task(self.controller.stop('test'))
+        await asyncio.sleep(0)
+        self.assertFalse(stopped.done())
+        release.set()
+        await asyncio.wait_for(stopped, 1)
+        self.assertEqual([c.args for c in self.driver.write_current.await_args_list], [(10, 12), (10, 20)])
+
+    async def test_simulation_manual_never_calls_real_transport(self):
+        self.controller.config = self.configured(mode='simulation')
+        await self.controller.connect('test')
+        await self.controller.manual(ManualCurrent(channel=3, current_ma=7.125), 'test')
+        await self.controller.stop('test')
+        self.driver.write_current.assert_not_awaited()
+
+    def test_manual_request_rejects_invalid_channel_current_and_precision(self):
+        for values in ({'channel': 0, 'current_ma': 12}, {'channel': 5, 'current_ma': 12}, {'channel': True, 'current_ma': 12},
+                       {'channel': 1, 'current_ma': 3.999}, {'channel': 1, 'current_ma': 21}, {'channel': 1, 'current_ma': math.nan},
+                       {'channel': 1, 'current_ma': math.inf}, {'channel': 1, 'current_ma': 4.0001}):
+            with self.assertRaises(ValidationError): ManualCurrent(**values)

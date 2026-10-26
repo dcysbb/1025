@@ -4,7 +4,7 @@ import { apiRequest, errorMessage } from './apiClient'
 
 type Mapping = {enabled: boolean; label: string; source_channel: number; pressure_4ma_pa: number | string | null; pressure_20ma_pa: number | string | null; scale: 'linear' | 'log'; fault_ma: number}
 type Config = {mode: 'real' | 'simulation'; host: string; port: number; unit_id: number; register_base: 0 | 10 | null; current_output_confirmed: boolean; update_interval_s: number; outputs: Mapping[]}
-type State = {config: Config; connected: boolean; enabled: boolean; unconfirmed: boolean; error: string | null; outputs: {channel: number; current_ma: number; pressure_pa?: number | null; status: string}[]}
+type State = {config: Config; connected: boolean; enabled: boolean; manual_active?: boolean; unconfirmed: boolean; error: string | null; outputs: {channel: number; current_ma: number; pressure_pa?: number | null; status: string}[]}
 const request = <T,>(path = '', method = 'GET', body?: unknown) => apiRequest<T>(`/api/analog-output${path}`, {method, operation: method === 'GET' ? '读取模拟量模块状态' : '模拟量模块操作', timeoutMs: 15000, body: body === undefined ? undefined : JSON.stringify(body)})
 
 export default function AnalogOutputPanel({auth, connected, onDirtyChange}: {auth: boolean; connected: boolean; onDirtyChange: (dirty: boolean) => void}) {
@@ -37,7 +37,7 @@ export default function AnalogOutputPanel({auth, connected, onDirtyChange}: {aut
     const timer = setTimeout(() => setFresh(false), Math.max(0, 3500 - (Date.now() - lastRead)))
     return () => clearTimeout(timer)
   }, [lastRead])
-  const editable = auth && !!draft && !busy && !state?.enabled && !state?.unconfirmed
+  const editable = auth && !!draft && !busy && !state?.enabled && !state?.manual_active && !state?.unconfirmed
   const writable = auth && connected && fresh && !busy
   const patch = <K extends keyof Config>(key: K, value: Config[K]) => setDraft(prior => prior ? {...prior, [key]: value} : prior)
   function mapping(index: number, key: keyof Mapping, value: unknown) {
@@ -45,7 +45,6 @@ export default function AnalogOutputPanel({auth, connected, onDirtyChange}: {aut
   }
   async function act(path: string, success: string) {
     if (!auth || inFlight.current) return
-    if (path === '/enable' && draft?.mode === 'real' && !window.confirm('将按照已保存的压力映射，向选定 AO 通道实际输出 4–20mA。压力无效时输出配置的故障电流。确认开始？')) return
     inFlight.current = true; generation.current++; setBusy(path); setError(''); setMessage('')
     try {
       const next = await request<State>(path, path === '/config' ? 'PUT' : 'POST', path === '/config' ? draft : {})
@@ -55,7 +54,7 @@ export default function AnalogOutputPanel({auth, connected, onDirtyChange}: {aut
     finally {generation.current++; inFlight.current = false; setBusy('')}
   }
   return <section className="content-panel glass-panel analog-panel">
-    <div className="panel-heading"><div><h2>ZS-AO-4-RJ45</h2><p className="stage-note">中盛科技 · 实时压力 → 4–20mA</p></div><span className={`status-chip ${fresh && state?.connected ? 'status-chip--ok' : 'status-chip--muted'}`}>{!fresh ? '状态未确认' : state?.enabled ? '实时输出中' : state?.connected ? '已连接 · 输出未启用' : '未连接'}</span></div>
+    <div className="panel-heading"><div><h2>ZS-AO-4-RJ45</h2><p className="stage-note">中盛科技 · 实时压力 → 4–20mA</p></div><span className={`status-chip ${fresh && state?.connected ? 'status-chip--ok' : 'status-chip--muted'}`}>{!fresh ? '状态未确认' : state?.enabled ? '实时输出中' : state?.manual_active ? '手动输出中' : state?.connected ? '已连接 · 输出未启用' : '未连接'}</span></div>
     {readError && <p className="inline-error" role="alert">{readError}</p>}{state?.error && <p className="inline-error" role="alert">{state.error}</p>}{error && <p className="inline-error" role="alert">{error}</p>}{message && <p className="stage-message" role="status">{message}</p>}
     {draft ? <>
       <fieldset disabled={!editable}><div className="settings-grid">
@@ -84,8 +83,8 @@ export default function AnalogOutputPanel({auth, connected, onDirtyChange}: {aut
       <div className="stage-actions">
         <button className="button button--primary" disabled={!writable || !editable || !dirty} onClick={() => void act('/config', '模拟量配置已保存，未启用输出')}><Check size={15}/>{busy === '/config' ? '保存中…' : '保存模拟量设置'}</button>
         <button className="button button--quiet" disabled={!writable || dirty || state?.connected} onClick={() => void act('/connect', '模拟量模块已连接；连接过程未写入电流')}><Plug size={15}/>连接模拟量模块</button>
-        <button className="button button--quiet" disabled={!writable || dirty || !state?.connected || state.enabled || state.unconfirmed || draft.register_base == null || !draft.current_output_confirmed || !draft.outputs.some(row => row.enabled)} onClick={() => void act('/enable', '实时压力电流输出已启用')}>开始实时输出</button>
-        <button className="button stage-stop" disabled={!auth || !!busy || !state?.enabled && !state?.unconfirmed} onClick={() => void act('/stop', '实时输出已停止，已写入各通道故障电流')}><Square size={15}/>停止实时输出</button>
+        <button className="button button--quiet" disabled={!writable || dirty || !state?.connected || state.enabled || state.manual_active || state.unconfirmed || draft.register_base == null || !draft.current_output_confirmed || !draft.outputs.some(row => row.enabled)} onClick={() => void act('/enable', '实时压力电流输出已启用')}>开始实时输出</button>
+        <button className="button stage-stop" disabled={!auth || !!busy || !state?.enabled && !state?.manual_active && !state?.unconfirmed} onClick={() => void act('/stop', '实时输出已停止，已写入各通道故障电流')}><Square size={15}/>停止实时输出</button>
         <button className="button button--quiet" disabled={!writable || !state?.connected} onClick={() => void act('/disconnect', '模拟量模块已断开')}><Unplug size={15}/>断开模拟量模块</button>
       </div>
       <p className="stage-note">压力过期、无效或真空规断连时使用故障电流；超量程限幅到 4–20mA。通信中断或程序异常退出后，模块可能保持最后电流，不能据此判断压力有效。</p>

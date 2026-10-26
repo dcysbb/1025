@@ -39,19 +39,18 @@ test('version and Beijing build time are visible without a control request', asy
   assert.ok(document.body.textContent?.includes('2026/10/23 14:00'))
   assert.deepEqual(writes, [])
 })
-test('exit requires confirmation and suppresses duplicate submissions', async () => {
+test('exit acts directly without a confirmation dialog', async () => {
   await render(); await click('控制台退出与重启菜单'); await click('退出控制台')
-  assert.deepEqual(writes, [])
-  await click('确认退出')
+  assert.equal(document.querySelector('[role="dialog"]'), null)
   assert.deepEqual(writes, [{action: 'exit'}]); assert.deepEqual(phases, ['exit'])
   assert.ok(document.body.textContent?.includes('退出请求已接受'))
 })
 test('shutdown failure stays actionable and does not claim to have exited', async () => {
   fail = true
-  await render(); await click('控制台退出与重启菜单'); await click('退出控制台'); await click('确认退出')
+  await render(); await click('控制台退出与重启菜单'); await click('退出控制台')
   assert.ok(document.body.textContent?.includes('输出关闭未确认'))
   assert.deepEqual(phases, [])
-  assert.equal(button('确认退出').disabled, false)
+  assert.equal(button('退出控制台').disabled, false)
 })
 test('LAN browsers cannot exit or restart the host', async () => {
   await render(false); await click('控制台退出与重启菜单')
@@ -60,7 +59,7 @@ test('LAN browsers cannot exit or restart the host', async () => {
   assert.deepEqual(writes, [])
 })
 test('restart waits for a new process identity rather than an old healthy response', async () => {
-  await render(); await click('控制台退出与重启菜单'); await click('重启控制台'); await click('确认重启')
+  await render(); await click('控制台退出与重启菜单'); await click('重启控制台')
   assert.deepEqual(phases, ['restart'])
   await act(async () => {await new Promise(r => setTimeout(r, 20))})
   assert.deepEqual(phases, ['restart'])

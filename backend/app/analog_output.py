@@ -60,6 +60,12 @@ class AnalogConfig(BaseModel):
         return self
 
 
+class ManualCurrent(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    channel: int = Field(ge=1, le=4, strict=True)
+    current_ma: float = Field(ge=4, le=20, multiple_of=0.001)
+
+
 def pressure_current(mapping: AnalogMapping, pressure: float) -> tuple[float, bool]:
     if not math.isfinite(pressure) or pressure < 0 or mapping.scale == "log" and pressure <= 0:
         raise AnalogError("压力无效，不能转换为有效电流")
@@ -89,10 +95,15 @@ class AnalogOutput:
         self.enabled = False
         self.uncertain = self.journal.exists()
         self._recovery_invalid = False
+        self._manual_channels = set()
         if self.uncertain:
             try:
                 record = json.loads(self.journal.read_text(encoding="utf-8"))
                 self.config = AnalogConfig.model_validate(record["config"])
+                channels = record.get("manual_channels", [])
+                if not isinstance(channels, list) or any(type(ch) is not int or not 1 <= ch <= 4 for ch in channels):
+                    raise ValueError("手动输出恢复通道无效")
+                self._manual_channels = set(channels)
                 self.error = "上次电流输出尚未停止确认，请恢复原模块连接后停止输出"
             except (OSError, ValueError, KeyError, TypeError):
                 self._recovery_invalid = True
@@ -100,6 +111,8 @@ class AnalogOutput:
         self.rows = []
         self._task = None
         self._lock = asyncio.Lock()
+        self._wake = asyncio.Event()
+        self._stopping = False
 
     @property
     def connected(self):
@@ -108,6 +121,7 @@ class AnalogOutput:
     def snapshot(self):
         return {"config": self.config.model_dump(), "connected": self.connected,
                 "enabled": self.enabled, "unconfirmed": self.uncertain,
+                "manual_active": bool(self._manual_channels), "manual_channels": sorted(self._manual_channels),
                 "error": self.error, "outputs": self.rows}
 
     def _save(self, path, value):
@@ -118,7 +132,7 @@ class AnalogOutput:
 
     async def configure(self, config, actor):
         async with self._lock:
-            if self.enabled or self.uncertain:
+            if self.enabled or self.uncertain or self._manual_channels or self._stopping:
                 raise AnalogError("请先停止输出并确认故障电流已写入，再修改配置")
             if self.driver and any(getattr(config, key) != getattr(self.config, key) for key in ("mode", "host", "port", "unit_id", "register_base")):
                 raise AnalogError("请先断开模拟量模块，再修改连接参数")
@@ -154,11 +168,13 @@ class AnalogOutput:
                 self.driver = candidate
             if not self._recovery_invalid:
                 self.error = "上次输出未确认，请先停止输出并写入故障电流" if self.uncertain else None
-            self.event("analog_connect", "info", "模拟量模块已连接，未启用输出", actor)
+            self.event("analog_connect", "info", "模拟量模块已连接，连接过程未写入电流", actor)
             return self.snapshot()
 
     async def enable(self, actor):
         async with self._lock:
+            if self._manual_channels or self._stopping:
+                raise AnalogError("请先停止手动输出，再开始实时压力输出")
             if not self.connected or self.enabled or self.uncertain:
                 raise AnalogError("请先连接模块，并处理上次输出未确认状态")
             if self.config.register_base is None:
@@ -171,9 +187,43 @@ class AnalogOutput:
                 raise AnalogError("真实模拟量模块不能输出模拟压力，请先切换真实压力采集")
             self._save(self.journal, {"config": self.config.model_dump(), "reason": "输出已启用，尚未停止确认"})
             self.enabled = True
+            self._wake.clear()
             self.error = None
             self._task = asyncio.create_task(self._run())
             self.event("analog_enable", "warning", "已启用实时压力电流输出", actor)
+            return self.snapshot()
+
+    async def manual(self, body: ManualCurrent, actor):
+        if self._stopping:
+            raise AnalogError("停止输出正在处理，请等待确认")
+        async with self._lock:
+            if self._recovery_invalid or self.uncertain:
+                raise AnalogError(self.error or "上次电流输出未确认，请先恢复连接并停止输出")
+            if self._stopping:
+                raise AnalogError("停止输出正在处理，请等待确认")
+            if self.enabled:
+                raise AnalogError("请先停止压力跟随，再手动调节电流")
+            if not self.connected:
+                raise AnalogError("模拟量模块未连接，请先在硬件连接中连接模块")
+            if self.config.register_base is None or not self.config.current_output_confirmed:
+                raise AnalogError("请先在硬件连接中核对输出寄存器与 4–20mA 型号及接线")
+            channels = self._manual_channels | {body.channel}
+            self._save(self.journal, {"config": self.config.model_dump(), "manual_channels": sorted(channels),
+                                      "reason": "手动电流输出尚未停止确认"})
+            self._manual_channels = channels
+            try:
+                await self._write(body.channel, body.current_ma)
+            except Exception as exc:
+                self.uncertain = True
+                self.error = f"AO{body.channel} 手动输出未确认：{exc}；请检查连接后停止输出，勿重复下发。"
+                self.event("analog_fault", "error", self.error, actor)
+                raise AnalogError(self.error) from exc
+            self.error = None
+            self.rows = [row for row in self.rows if row["channel"] != body.channel] + [
+                {"channel": body.channel, "current_ma": body.current_ma,
+                 "status": "手动设定，写入应答已确认", "updated_at": time.time()}]
+            self.rows.sort(key=lambda row: row["channel"])
+            self.event("analog_manual", "warning", f"AO{body.channel} 手动设定 {body.current_ma:.3f}mA，写入应答已确认", actor)
             return self.snapshot()
 
     async def _write(self, channel, current):
@@ -215,7 +265,10 @@ class AnalogOutput:
                 async with self._lock:
                     if self.enabled:
                         await self.update_once()
-                await asyncio.sleep(self.config.update_interval_s)
+                try:
+                    await asyncio.wait_for(self._wake.wait(), timeout=self.config.update_interval_s)
+                except asyncio.TimeoutError:
+                    pass
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -225,9 +278,18 @@ class AnalogOutput:
             self.event("analog_fault", "error", self.error, "system")
 
     async def stop(self, actor):
+        if self._stopping:
+            raise AnalogError("停止输出正在处理，请勿重复提交")
+        self._stopping = True
+        try:
+            return await self._stop(actor)
+        finally:
+            self._stopping = False
+
+    async def _stop(self, actor):
         self.enabled = False
+        self._wake.set()
         if self._task:
-            self._task.cancel()
             await self._task
             self._task = None
         async with self._lock:
@@ -237,9 +299,10 @@ class AnalogOutput:
                 return self.snapshot()
             if not self.connected:
                 raise AnalogError("模块离线，不能确认故障电流已写入；请先恢复连接")
+            affected = self._manual_channels or {i + 1 for i, row in enumerate(self.config.outputs) if row.enabled}
             try:
                 for i, row in enumerate(self.config.outputs):
-                    if row.enabled:
+                    if i + 1 in affected:
                         await self._write(i + 1, row.fault_ma)
                 self.journal.unlink(missing_ok=True)
             except Exception as exc:
@@ -247,7 +310,9 @@ class AnalogOutput:
                 self.error = f"停止输出未确认：{exc}"
                 raise AnalogError(self.error) from exc
             self.rows = [{"channel": i + 1, "current_ma": row.fault_ma, "status": "已写入故障电流，实时输出已停止"}
-                         for i, row in enumerate(self.config.outputs) if row.enabled]
+                         for i, row in enumerate(self.config.outputs)
+                         if i + 1 in affected]
+            self._manual_channels.clear()
             self.uncertain = False
             self.error = None
             self.event("analog_stop", "warning", "已停止实时输出并写入配置的故障电流", actor)
@@ -272,6 +337,14 @@ def install_analog_routes(app, controller, require_read_access, require_operator
         verify_origin(request)
         try:
             return await controller.configure(body, actor)
+        except (AnalogError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/debug/analog-output")
+    async def manual(body: ManualCurrent, request: Request, actor: str = Depends(require_operator)):
+        verify_origin(request)
+        try:
+            return await controller.manual(body, actor)
         except (AnalogError, OSError) as exc:
             raise HTTPException(409, str(exc)) from exc
 

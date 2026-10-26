@@ -78,13 +78,22 @@ class LocalAccess(unittest.IsolatedAsyncioTestCase):
         from fastapi import BackgroundTasks
         from app.runtime import SystemAction
         routes = {route.path: route for route in self.main.app.routes if hasattr(route, 'dependant')}
-        for path in ('/api/system/control', '/api/analog-output/enable', '/api/analog-output/config', '/api/stage/presentation'):
+        for path in ('/api/system/control', '/api/analog-output/enable', '/api/analog-output/config', '/api/stage/presentation', '/api/debug/analog-output'):
             self.assertIn(self.main.require_operator, [dep.call for dep in routes[path].dependant.dependencies])
         for origin, host in ((None, '127.0.0.1'), ('http://example.com', '127.0.0.1'), ('http://127.0.0.1:8770', '192.168.1.2')):
             with patch.object(self.main.SYSTEM, 'prepare', new=AsyncMock()) as prepare:
                 with self.assertRaises(HTTPException):
                     await self.main.system_control(SystemAction(action='exit'), self.request(host, origin), BackgroundTasks(), 'test')
                 prepare.assert_not_awaited()
+
+    async def test_manual_analog_output_checks_origin_before_any_driver_call(self):
+        from app.analog_output import ManualCurrent
+        route = next(route for route in self.main.app.routes if getattr(route, 'path', None) == '/api/debug/analog-output')
+        for origin in (None, 'http://example.com'):
+            with patch.object(self.main.ANALOG, 'manual', new=AsyncMock()) as manual:
+                with self.assertRaises(HTTPException):
+                    await route.endpoint(ManualCurrent(channel=1, current_ma=12), self.request(origin=origin), 'test')
+                manual.assert_not_awaited()
 
     async def test_simulated_hardware_status_exposes_mapped_physical_valve_coil(self):
         engine = self.main.ENGINE

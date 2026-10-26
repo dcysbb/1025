@@ -302,63 +302,55 @@ test('controller history distinguishes verified zero from submitted optimization
   assert.deepEqual(writes, [])
 })
 
-for (const axis of ['x', 'y', 'z']) test(`${axis} Home confirms direction and homes only its own mapped channel`, async () => {
+for (const axis of ['x', 'y', 'z']) test(`${axis} Home directly uses its own inline direction and mapped axis`, async () => {
   state.connected = true
-  state.channels.forEach(row => { row.enabled = true })
+  state.channels.forEach(row => {row.enabled = true})
   await render()
-  assert.equal(container.querySelector('[aria-label="控制器工具操作轴"]'), null)
-  await act(async () => { button(`${axis.toUpperCase()} 轴 Home · 回零`).click() })
-  assert.deepEqual(writes, [])
-  assert.ok(document.querySelector('[role="dialog"]')?.textContent?.includes('尝试硬件回零'))
-  assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes(`${axis.toUpperCase()} / CH${state.config.axes[axis]}`))
-  await act(async () => { button('确认回零').click(); button('确认回零').click(); await new Promise(r => setTimeout(r, 0)) })
-  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis,operation:'home',confirmed:true,home_direction:-1}}])
+  const select = container.querySelector<HTMLSelectElement>(`[aria-label="${axis.toUpperCase()} 轴回零方向"]`)!
+  await act(async () => {select.value = '1'; select.dispatchEvent(new dom.window.Event('change', {bubbles:true}))})
+  await act(async () => {button(`${axis.toUpperCase()} 轴 Home · 回零`).click(); button(`${axis.toUpperCase()} 轴 Home · 回零`).click(); await new Promise(r=>setTimeout(r,0))})
+  assert.equal(document.querySelector('[role="dialog"]'), null)
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis,operation:'home',confirmed:true,home_direction:1}}])
 })
 
-for (const axis of ['x', 'y', 'z']) test(`${axis} optimization needs its own output enabled and confirms its mapped channel`, async () => {
+for (const axis of ['x', 'y', 'z']) test(`${axis} optimization needs its own output enabled and acts without a dialog`, async () => {
   state.connected = true
   await render()
   assert.equal(button(`${axis.toUpperCase()} 轴 Optimize · 性能优化`).disabled, true)
-  await act(async () => { root.unmount() })
+  await act(async () => root.unmount())
   root = createRoot(container)
-  state.channels.find(row => row.channel === state.config.axes[axis])!.enabled = true
+  state.channels.find(row=>row.channel===state.config.axes[axis])!.enabled = true
   await render()
-  for (const other of ['x', 'y', 'z'].filter(value => value !== axis)) assert.equal(button(`${other.toUpperCase()} 轴 Optimize · 性能优化`).disabled, true)
-  await act(async () => { button(`${axis.toUpperCase()} 轴 Optimize · 性能优化`).click() })
-  assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes(`${axis.toUpperCase()} / CH${state.config.axes[axis]}`))
-  assert.ok(document.querySelector('[role="dialog"]')?.textContent?.includes('不受点动步数上限限制'))
-  assert.deepEqual(writes, [])
-  await act(async () => { button('确认开始优化').click(); await new Promise(r => setTimeout(r, 0)) })
-  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis,operation:'optimize',confirmed:true}}])
+  for (const other of ['x','y','z'].filter(value=>value!==axis)) assert.equal(button(`${other.toUpperCase()} 轴 Optimize · 性能优化`).disabled,true)
+  await act(async () => {button(`${axis.toUpperCase()} 轴 Optimize · 性能优化`).click();await new Promise(r=>setTimeout(r,0))})
+  assert.equal(document.querySelector('[role="dialog"]'),null)
+  assert.deepEqual(writes,[{path:'/api/stage/action',body:{axis,operation:'optimize',confirmed:true}}])
 })
 
-test('parameter selection cannot retarget a channel Home confirmation', async () => {
+test('parameter selection cannot retarget a direct channel Home action', async () => {
   state.connected = true
-  state.channels.forEach(row => { row.enabled = true })
+  state.channels.forEach(row=>{row.enabled=true})
   await render()
-  await act(async () => { button('驱动参数 · 幅值、步频与加速度（全部轴逐轴编辑）').click(); button('Y 轴 Home · 回零').click() })
+  await act(async () => button('驱动参数 · 幅值、步频与加速度（全部轴逐轴编辑）').click())
   const select = container.querySelector<HTMLSelectElement>('[aria-label="驱动参数通道"]')!
-  await act(async () => { select.value = 'z'; select.dispatchEvent(new dom.window.Event('change', {bubbles: true})) })
-  assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes('Y / CH1'))
-  await act(async () => { button('确认回零').click() })
-  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'y',operation:'home',confirmed:true,home_direction:-1}}])
+  await act(async () => {select.value='z';select.dispatchEvent(new dom.window.Event('change',{bubbles:true}))})
+  await act(async () => button('Y 轴 Home · 回零').click())
+  assert.deepEqual(writes,[{path:'/api/stage/action',body:{axis:'y',operation:'home',confirmed:true,home_direction:-1}}])
 })
 
-test('changing the channel mapping revokes an open Home confirmation without sending it', async () => {
-  state.connected = true
-  state.channels.forEach(row => { row.enabled = true })
+test('changing mapping resets inline direction drafts and new actions use the current mapping', async () => {
+  state.connected=true
+  state.channels.forEach(row=>{row.enabled=true})
   await render()
-  await act(async () => button('X 轴 Home · 回零').click())
-  assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes('X / CH3'))
-  state.config.axes = {x: 1, y: 3, z: 2}
-  await act(async () => { await new Promise(r => setTimeout(r, 1100)) })
-  assert.equal(document.querySelector('.motion-presence[data-open="true"] [role="dialog"]'), null)
+  const select=container.querySelector<HTMLSelectElement>('[aria-label="X 轴回零方向"]')!
+  await act(async () => {select.value='1';select.dispatchEvent(new dom.window.Event('change',{bubbles:true}))})
+  state.config.axes={x:1,y:3,z:2}
+  await act(async () => {await new Promise(r=>setTimeout(r,1100))})
   assert.ok(container.querySelector('.stage-axis--x')?.textContent?.includes('CH1'))
-  assert.deepEqual(writes, [])
+  assert.equal(container.querySelector<HTMLSelectElement>('[aria-label="X 轴回零方向"]')!.value,'-1')
+  assert.deepEqual(writes,[])
   await act(async () => button('X 轴 Home · 回零').click())
-  assert.ok(document.querySelector('[role="dialog"] h2')?.textContent?.includes('X / CH1'))
-  await act(async () => button('确认回零').click())
-  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis:'x',operation:'home',confirmed:true,home_direction:-1}}])
+  assert.deepEqual(writes,[{path:'/api/stage/action',body:{axis:'x',operation:'home',confirmed:true,home_direction:-1}}])
 })
 
 for (const axis of ['x', 'y', 'z']) test(`${axis} output controls send only their own axis`, async () => {
@@ -634,9 +626,9 @@ test('motion unlock requires the stationary acknowledgement and never enables ou
   state.motion_pending = true
   await render()
   await act(async () => { button('连接诊断与恢复').click(); button('解除运动锁定').click() })
-  assert.equal(button('确认解除运动锁定').disabled,true)
-  await act(async () => { (document.querySelector('[role="dialog"] input[type="checkbox"]') as HTMLInputElement).click() })
-  await act(async () => { button('确认解除运动锁定').click(); await new Promise(r => setTimeout(r,0)) })
+  assert.equal(button('解除运动锁定').disabled,true)
+  await act(async () => { ([...container.querySelectorAll('label')].find(label=>label.textContent?.includes('我已现场确认位移台静止'))!.querySelector('input') as HTMLInputElement).click() })
+  await act(async () => { button('解除运动锁定').click(); await new Promise(r => setTimeout(r,0)) })
   assert.deepEqual(writes,[{path:'/api/stage/recover',body:{confirmed_stationary:true}}])
 })
 
@@ -661,7 +653,7 @@ test('stage page also allows direct connection despite a previous error without 
   assert.equal(button('X 轴正向移动').disabled, true)
   assert.equal(document.querySelector('[role="dialog"]'), null)
   await act(async () => { button('连接诊断与恢复').click(); button('解除运动锁定').click() })
-  assert.equal(button('确认解除运动锁定').disabled, true)
+  assert.equal(button('解除运动锁定').disabled, true)
 })
 
 test('read-only users cannot enable, home, optimize or change drive parameters', async () => {

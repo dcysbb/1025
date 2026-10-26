@@ -73,3 +73,13 @@ test('pressure endpoints preserve partially typed scientific notation', async ()
     assert.equal(input.value, value)
   }
 })
+
+test('hardware settings show manual output and require stopping it before changing mapping or starting pressure following', async () => {
+  Object.assign(state, {connected: true, manual_active: true})
+  state.config.register_base = 10; state.config.current_output_confirmed = true
+  await render()
+  assert.ok(document.body.textContent?.includes('手动输出中'))
+  assert.equal(button('开始实时输出').disabled, true)
+  assert.equal(button('停止实时输出').disabled, false)
+  assert.equal(document.querySelector<HTMLFieldSetElement>('fieldset')!.disabled, true)
+})

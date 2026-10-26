@@ -1,0 +1,10 @@
+.analog-manual-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; margin: 18px 0; }
+.analog-manual-card { min-width: 0; display: grid; gap: 12px; padding: 16px; background: var(--field-bg); border: 1px solid var(--line); border-radius: 14px; }
+.analog-manual-card h3 { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; margin: 0; font-size: 15px; }
+.analog-manual-card h3 small { color: var(--muted); font-weight: 400; overflow-wrap: anywhere; }
+.analog-manual-readout { display: grid; gap: 3px; }
+.analog-manual-readout strong { color: var(--accent); font: 500 21px/1.4 'Cascadia Mono',Consolas,monospace; font-variant-numeric: tabular-nums; }
+.analog-manual-readout small { color: var(--muted); font-size: 11px; }
+.analog-manual-slider { width: 100%; min-height: 32px; accent-color: var(--accent-fill); }
+.analog-manual-switch { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: 12px; }
+@media(max-width: 900px) { .analog-manual-grid { grid-template-columns: 1fr; } }

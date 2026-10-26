@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
-import { Download, Gauge, Home, Power, RefreshCw, SlidersHorizontal, Upload, WandSparkles, X } from 'lucide-react'
-import { Disclosure, Presence, Reveal } from './Motion'
-import { AXES, channelName, type Axis, type DriveParameters, type ParameterState, type StageState } from './stageClient'
+import { Download, Gauge, Home, Power, RefreshCw, SlidersHorizontal, Upload, WandSparkles } from 'lucide-react'
+import { Disclosure, Reveal } from './Motion'
+import { AXES, type Axis, type DriveParameters, type ParameterState, type StageState } from './stageClient'
 import { errorMessage } from './apiClient'
 import { makeStageProfile, parseStageProfile } from './stageProfiles'
 import StageToolHistory from './StageToolHistory'
@@ -12,7 +11,6 @@ type Props = {
   onAct: (path: string, body?: unknown, message?: string) => Promise<unknown>
   onParameters: (axis: Axis, values?: DriveParameters) => Promise<ParameterState>
   historyVersion: number
-  // Share confirmations while placing channel actions inside the workbench cards.
   children: (axisTools: (axis: Axis) => ReactNode, utilities: ReactNode) => ReactNode
 }
 type FIELDS_ITEM = {key: keyof DriveParameters; label: string; unit: string}
@@ -22,7 +20,6 @@ const FIELDS: FIELDS_ITEM[] = [
   {key: 'step_rate', label: '步频', unit: '步/秒'},
   {key: 'acceleration', label: '步频加速度', unit: '步/秒²'},
 ]
-type Confirmation = {operation: 'home' | 'optimize'; axis: Axis; channel: number; identity: string} | {operation: 'recover'; identity: string}
 
 export default function StageAdvanced({state, auth, online, busy, uncertain, onAct, onParameters, historyVersion, children}: Props) {
   const [axis, setAxis] = useState<Axis>('x')
@@ -30,11 +27,9 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
   const [draft, setDraft] = useState<Record<keyof DriveParameters, string> | null>(null)
   const [error, setError] = useState(''), [feedback, setFeedback] = useState('')
   const [paramOpen, setParamOpen] = useState(false)
-  const [confirm, setConfirm] = useState<Confirmation | null>(null)
-  const [homeDirection, setHomeDirection] = useState<-1 | 1>(-1)
+  const [homeDirections, setHomeDirections] = useState<Partial<Record<Axis, -1 | 1>>>({})
   const [stationary, setStationary] = useState(false)
   const epoch = useRef(0), parameterRef = useRef(false)
-  const dialogRef = useRef<HTMLElement>(null)
   const profileInput = useRef<HTMLInputElement>(null)
   const deviceIdentity = JSON.stringify([state.config.mode, state.config.serial_number, state.config.connection, state.config.host, state.config.port, state.config.axes, state.config.inverted, state.connected])
   const identity = JSON.stringify([axis, deviceIdentity])
@@ -46,24 +41,9 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
     return () => { epoch.current++ }
   }, [identity])
   useEffect(() => {
-    // eslint-disable-next-line react/set-state-in-effect -- Device/mapping changes revoke hardware confirmations.
-    setConfirm(null); setStationary(false)
+    // eslint-disable-next-line react/set-state-in-effect -- Device/mapping changes revoke local operation state.
+    setHomeDirections({}); setStationary(false)
   }, [deviceIdentity])
-  useEffect(() => {
-    if (!confirm) return
-    const previous = document.activeElement
-    const buttons = () => [...(dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled)') ?? [])]
-    buttons()[0]?.focus()
-    function modalKeys(event: KeyboardEvent) {
-      if (event.key === 'Escape') { event.preventDefault(); setConfirm(null); return }
-      if (event.key !== 'Tab') return
-      const items = buttons(), first = items[0], last = items.at(-1)
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
-    }
-    document.addEventListener('keydown', modalKeys)
-    return () => { document.removeEventListener('keydown', modalKeys); if (previous instanceof window.HTMLElement && previous.isConnected) previous.focus() }
-  }, [confirm])
   const row = state.channels.find(item => item.channel === state.config.axes[axis])
   const idle = state.channels.length === 3 && state.channels.every(item => item.moving === false && !item.optimizing)
   function blockedFor(targetAxis: Axis) {
@@ -79,9 +59,6 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
     void readOrApply(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- Auto-read on open/axis change only.
   }, [paramOpen, identity, canReadParameters, error])
-  const confirmRow = confirm && confirm.operation !== 'recover' ? state.channels.find(item => item.channel === confirm.channel) : null
-  const canConfirm = confirm?.identity === deviceIdentity && (confirm.operation === 'recover' ? auth && online && !busy && stationary && (state.motion_pending || state.diagnostics?.motion_locked) :
-    !blockedFor(confirm.axis) && confirm.channel === state.config.axes[confirm.axis] && confirmRow?.open_loop !== false && (confirm.operation !== 'optimize' || !!confirmRow?.enabled))
   const dirty = draft && parameters && FIELDS.some(({key}) => draft[key] !== String(parameters.values[key]))
   const invalid = !draft || !parameters || FIELDS.some(({key}) => {
     const value = Number(draft[key]), bounds = parameters.limits[key]
@@ -101,18 +78,12 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
     } catch (e) { if (mine === epoch.current) setError(errorMessage(e, apply ? '参数应用未确认，请重新读取核对' : '读取驱动参数失败')) }
     finally { parameterRef.current = false }
   }
-  async function confirmedAction() {
-    if (!confirm || !canConfirm) return
-    const {operation} = confirm
-    const channelLabel = confirm.operation === 'recover' ? '' : `${confirm.axis.toUpperCase()} / CH${confirm.channel} `
-    setConfirm(null)
-    if (operation === 'home') {
-      await onAct('/action', {axis: confirm.axis, operation, confirmed: true, home_direction: homeDirection},
-        `${channelLabel}回零请求已下发；若控制器不支持会提示仅清零计数。`)
-      return
-    }
-    await onAct(operation === 'recover' ? '/recover' : '/action', confirm.operation === 'recover' ? {confirmed_stationary: true} : {axis: confirm.axis, operation, confirmed: true},
-      operation === 'optimize' ? `${channelLabel}性能优化请求已下发，等待控制器状态；可随时全部停止。` : '运动锁定已解除。')
+  async function tool(targetAxis: Axis, operation: 'home' | 'optimize') {
+    const channel = state.config.axes[targetAxis], target = state.channels.find(item => item.channel === channel)
+    if (blockedFor(targetAxis) || !target?.enabled || target.open_loop === false) return
+    const body = {axis: targetAxis, operation, confirmed: true,
+      ...(operation === 'home' ? {home_direction: homeDirections[targetAxis] ?? state.config.home_direction?.[targetAxis] ?? -1} : {})}
+    await onAct('/action', body, `${targetAxis.toUpperCase()} / CH${channel} ${operation === 'home' ? '回零' : '性能优化'}请求已下发，可随时全部停止。`)
   }
   async function importProfile(file?: File) {
     if (!file || !parameters || !available) return
@@ -139,11 +110,12 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
     const operation = state.operation?.kind === 'optimize' && state.operation.axis === targetAxis ? state.operation : null
     return <>
         {operation && <div className="stage-optimization-progress" role="status"><WandSparkles size={19}/><div><strong>{targetAxis.toUpperCase()} / CH{operation.channel} · 性能优化{!online || !state.connected || state.error ? '结果未确认' : operation.phase === 'running' ? '进行中' : '等待控制器开始'}</strong><p>{!online || !state.connected || state.error ? '通信或状态读取异常，不能确认优化进度或停止结果。禁止继续移动或重复优化，请检查控制器状态。' : <>已等待 {Math.floor(operation.elapsed_s ?? 0)} 秒 · 通常约 1–2 分钟。请保持连接，可随时使用顶部“全部停止”。</>}</p><small>仅显示控制器状态与等待时间，不推算完成百分比。</small></div></div>}
+        <label className="field stage-home-direction">回零方向<select aria-label={`${targetAxis.toUpperCase()} 轴回零方向`} disabled={!channelAvailable} value={homeDirections[targetAxis] ?? state.config.home_direction?.[targetAxis] ?? -1} onChange={event => setHomeDirections(prior => ({...prior, [targetAxis]: Number(event.target.value) as -1 | 1}))}><option value={-1}>负向（−）</option><option value={1}>正向（+）</option></select></label>
         <div className="stage-tool-actions">
           <button className="button button--quiet" aria-label={`${targetAxis.toUpperCase()} 轴启用输出`} disabled={!channelAvailable || target?.enabled} onClick={() => void onAct('/action', {axis: targetAxis, operation:'enable'}, `${targetAxis.toUpperCase()} / CH${channel} 输出启用请求已下发。`)}><Power size={15}/>启用输出</button>
           <button className="button button--quiet" aria-label={`${targetAxis.toUpperCase()} 轴禁用输出`} disabled={!channelAvailable || !target?.enabled} onClick={() => void onAct('/action', {axis: targetAxis, operation:'disable'}, `${targetAxis.toUpperCase()} / CH${channel} 输出禁用请求已下发。`)}><Power size={15}/>禁用输出</button>
-          <button className="button button--quiet" aria-label={`${targetAxis.toUpperCase()} 轴 Home · 回零`} disabled={!channelAvailable || target?.open_loop === false || !target?.enabled} onClick={() => { setHomeDirection(state.config.home_direction?.[targetAxis] ?? -1); setConfirm({operation: 'home', axis: targetAxis, channel, identity: deviceIdentity}) }}><Home size={15}/>Home · 回零</button>
-          <button className="button button--quiet" aria-label={`${targetAxis.toUpperCase()} 轴 Optimize · 性能优化`} disabled={!channelAvailable || !target?.enabled || target?.open_loop === false} onClick={() => setConfirm({operation: 'optimize', axis: targetAxis, channel, identity: deviceIdentity})}><WandSparkles size={15}/>Optimize · 性能优化</button>
+          <button className="button button--quiet" aria-label={`${targetAxis.toUpperCase()} 轴 Home · 回零`} disabled={!channelAvailable || target?.open_loop === false || !target?.enabled} onClick={() => void tool(targetAxis, 'home')}><Home size={15}/>Home · 回零</button>
+          <button className="button button--quiet" aria-label={`${targetAxis.toUpperCase()} 轴 Optimize · 性能优化`} disabled={!channelAvailable || !target?.enabled || target?.open_loop === false} onClick={() => void tool(targetAxis, 'optimize')}><WandSparkles size={15}/>Optimize · 性能优化</button>
         </div>
         {!blocked && !target?.enabled && <p className="stage-note">回零与性能优化不可用：请先启用此通道输出。</p>}
         {!blocked && target?.open_loop === false && <p className="stage-note">回零和 Optimize 不可用：此通道不是开环模式。</p>}
@@ -169,19 +141,13 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
     <Disclosure title="连接诊断与恢复" className="stage-diagnostics">
       <div className="stage-diagnostic-grid"><span>通道：{state.diagnostics?.transport || state.config.connection?.toUpperCase() || 'TCP'}</span><span>采样耗时：{state.diagnostics?.latency_ms ?? '—'} ms</span><span>连续读取失败：{state.diagnostics?.read_failures ?? 0}</span><span>有效采样：{state.diagnostics?.sample_count ?? 0}</span></div>
       <p className="stage-note">XA 与控制台应轮流连接。关闭 XA 窗口后若仍有残留进程，也可能占用连接。读取异常暂停操作；控制动作不会自动重发。</p>
+      {(state.motion_pending || state.diagnostics?.motion_locked) && <label className="check-row"><input type="checkbox" checked={stationary} disabled={!auth || !online || busy} onChange={event => setStationary(event.target.checked)}/>我已现场确认位移台静止</label>}
       <div className="stage-tool-actions"><button className="button button--quiet" disabled={!auth || !online || busy || !state.connected} onClick={() => void onAct('/disconnect', {}, '位移台已断开。')}><Gauge size={14}/>断开控制器</button>
-      <button className="button button--quiet" disabled={!auth || !online || busy || !state.motion_pending && !state.diagnostics?.motion_locked} onClick={() => {setStationary(false);setConfirm({operation: 'recover', identity: deviceIdentity})}}>解除运动锁定</button></div>
+      <button className="button button--quiet" disabled={!auth || !online || busy || !stationary || !state.motion_pending && !state.diagnostics?.motion_locked} onClick={() => {if(stationary) void onAct('/recover', {confirmed_stationary:true}, '运动锁定已解除。')}}>解除运动锁定</button></div>
     </Disclosure>
     <StageToolHistory version={historyVersion}/>
     </div>)}
-    {createPortal(<Presence show={!!confirm}>{confirm && <div className="modal-backdrop stage-tool-modal"><section ref={dialogRef} className="login-card glass-panel" role="dialog" aria-modal="true" aria-label={confirm.operation === 'home' ? '确认回零' : confirm.operation === 'optimize' ? '确认性能优化' : '确认解除运动锁定'}>
-      <button className="icon-button modal-close" aria-label="取消控制器操作" onClick={() => setConfirm(null)}><X size={17}/></button>
-      <h2>{confirm.operation === 'recover' ? '解除运动锁定' : `${state.config.channel_names?.[String(confirm.channel)] ? `${channelName(state.config, confirm.channel)} · ` : ''}${confirm.axis.toUpperCase()} / CH${confirm.channel} ${confirm.operation === 'home' ? '回零' : '性能优化'}`}</h2>
-      <p>{confirm.operation === 'home' ? '按所选方向尝试硬件回零（寻找机械原点）。此开环位移台无位置反馈，若控制器固件不支持会立即返回并仅清零命令计数，界面会如实提示。回零会真实运动，请确认行程空间；可随时使用全部停止。' : confirm.operation === 'optimize' ? '控制器会自动驱动此通道，通常约 1–2 分钟；实际行程由控制器算法决定，不受点动步数上限限制。请确认负载、行程空间和接线，可随时使用全部停止。' : '确认位移台静止后，后台读取全部通道并确认空闲，再解除历史运动锁定；不会启用输出或重发动作。'}</p>
-      {confirm.operation === 'home' && <label className="field">回零方向<select aria-label="回零方向" value={homeDirection} onChange={event => setHomeDirection(Number(event.target.value) as -1 | 1)}><option value={-1}>负向（−）</option><option value={1}>正向（+）</option></select></label>}
-      {confirm.operation === 'recover' && <label className="check-row"><input type="checkbox" checked={stationary} onChange={event => setStationary(event.target.checked)}/>我已现场确认位移台静止</label>}
-      <div className="stage-tool-actions"><button className="button button--quiet" onClick={() => setConfirm(null)}>取消</button><button className="button button--primary" disabled={!canConfirm} onClick={() => void confirmedAction()}>{confirm.operation === 'home' ? '确认回零' : confirm.operation === 'optimize' ? '确认开始优化' : '确认解除运动锁定'}</button></div>
-    </section></div>}</Presence>, document.body)}
+
   </>
 }
 

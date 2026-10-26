@@ -41,6 +41,7 @@ function httpReason(status: number) {
   if (status === 401) return '操作员会话失效或尚未登录，请登录后重试。'
   if (status === 403) return '后台拒绝访问，请从控制台自身地址打开页面并检查操作权限。'
   if (status === 404) return '后台没有此接口，请刷新页面；如仍失败，请检查前后端版本是否一致。'
+  if (status === 405) return '后台不支持此接口的请求方式，通常是前后端版本不一致。请更新后台后刷新页面。'
   if (status === 409) return '当前设备或联锁状态不允许此操作，请核对状态和接线。'
   if (status === 422) return '配置或输入校验未通过，请检查字段范围和通道映射。'
   if (status === 429) return '请求过于频繁，请稍后再试。'

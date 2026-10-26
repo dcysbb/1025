@@ -59,11 +59,6 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
   const anyDirty = dirty([...TPG, ...IO, ...MAPPING, ...TEXT]) || stageDirty || analogDirty
   useEffect(() => { onDirtyChange?.(anyDirty) }, [anyDirty, onDirtyChange])
   useEffect(() => {
-    const warn = (event: BeforeUnloadEvent) => { if (anyDirty) { event.preventDefault(); event.returnValue = '' } }
-    window.addEventListener('beforeunload', warn)
-    return () => window.removeEventListener('beforeunload', warn)
-  }, [anyDirty])
-  useEffect(() => {
     if (!lastRead) return
     const timer = setTimeout(() => setOnline(false), Math.max(0, 3500 - (Date.now() - lastRead)))
     return () => clearTimeout(timer)

@@ -379,19 +379,19 @@ test('history reset defaults to simulation and cancellation sends no request',as
   assert.equal(select.value,'simulation')
   await click(byText('取消'))
   assert.equal(resetCalls.length,0)
-  await click(byText('重置历史'));await click(byText('确认重置'))
+  await click(byText('重置历史'));await click(byText('清除所选历史'))
   assert.deepEqual(resetCalls,[{scope:'simulation'}])
-  assert.equal(container.querySelector('[aria-labelledby="history-reset-title"]')?.closest('.motion-presence')?.getAttribute('inert'),'')
+  assert.equal(container.querySelector('[role="dialog"]'),null)
   assert.ok(container.textContent?.includes('已清除 6 条模拟记录'))
   assert.ok(container.textContent?.includes('0 条'))
 })
 
-test('all history reset is an explicit choice and failure keeps the dialog open',async()=>{
+test('all history reset is an explicit choice and failure keeps the inline controls open',async()=>{
   resetFailure=true
   await click(byText('历史数据'));await click(byText('重置历史'))
   const select=container.querySelector<HTMLSelectElement>('[aria-labelledby="history-reset-title"] select')!
   await act(async()=>{select.value='all';select.dispatchEvent(new dom.window.Event('change',{bubbles:true}))})
-  await click(byText('确认重置'))
+  await click(byText('清除所选历史'))
   assert.deepEqual(resetCalls,[{scope:'all'}])
   assert.ok(container.querySelector('[aria-labelledby="history-reset-title"]'))
   assert.ok(container.textContent?.includes('历史重置失败'))

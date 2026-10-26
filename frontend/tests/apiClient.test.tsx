@@ -11,6 +11,15 @@ beforeEach(() => {
 })
 afterEach(() => dom.window.close())
 
+test('405 explains the frontend/backend mismatch rather than blaming operator permission', async () => {
+  globalThis.fetch = async () => new Response('{"detail":"Method Not Allowed"}', {status:405})
+  await assert.rejects(apiRequest('/api/debug/analog-output', {method:'POST', body:'{}'}), error => {
+    assert.match((error as Error).message, /前后端版本不一致/)
+    assert.doesNotMatch((error as Error).message, /检查权限/)
+    return true
+  })
+})
+
 test('transport failures name the resource without inventing a hardware diagnosis', async () => {
   globalThis.fetch = async () => { throw new TypeError('Failed to fetch') }
   await assert.rejects(apiRequest('/api/events?limit=200'), error => {
