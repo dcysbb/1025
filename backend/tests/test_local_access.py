@@ -78,7 +78,7 @@ class LocalAccess(unittest.IsolatedAsyncioTestCase):
         from fastapi import BackgroundTasks
         from app.runtime import SystemAction
         routes = {route.path: route for route in self.main.app.routes if hasattr(route, 'dependant')}
-        for path in ('/api/system/control', '/api/analog-output/enable', '/api/analog-output/config', '/api/stage/presentation', '/api/debug/analog-output'):
+        for path in ('/api/system/control', '/api/analog-output/enable', '/api/analog-output/config', '/api/stage/presentation', '/api/debug/analog-output', '/api/analog-output/calibration'):
             self.assertIn(self.main.require_operator, [dep.call for dep in routes[path].dependant.dependencies])
         for origin, host in ((None, '127.0.0.1'), ('http://example.com', '127.0.0.1'), ('http://127.0.0.1:8770', '192.168.1.2')):
             with patch.object(self.main.SYSTEM, 'prepare', new=AsyncMock()) as prepare:
@@ -94,6 +94,15 @@ class LocalAccess(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(HTTPException):
                     await route.endpoint(ManualCurrent(channel=1, current_ma=12), self.request(origin=origin), 'test')
                 manual.assert_not_awaited()
+
+    async def test_analog_calibration_checks_origin_before_saving(self):
+        from app.analog_output import Calibration
+        route = next(route for route in self.main.app.routes if getattr(route, 'path', None) == '/api/analog-output/calibration')
+        for origin in (None, 'http://example.com'):
+            with patch.object(self.main.ANALOG, 'calibrate', new=AsyncMock()) as save:
+                with self.assertRaises(HTTPException):
+                    await route.endpoint(Calibration(channel=1, offset_ma=0.1), self.request(origin=origin), 'test')
+                save.assert_not_awaited()
 
     async def test_simulated_hardware_status_exposes_mapped_physical_valve_coil(self):
         engine = self.main.ENGINE

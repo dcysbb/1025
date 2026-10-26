@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check, Plug, Square, Unplug } from 'lucide-react'
 import { apiRequest, errorMessage } from './apiClient'
+import { validOffset } from './analogCalibration'
 
-type Mapping = {enabled: boolean; label: string; source_channel: number; pressure_4ma_pa: number | string | null; pressure_20ma_pa: number | string | null; scale: 'linear' | 'log'; fault_ma: number}
+type Mapping = {enabled: boolean; label: string; source_channel: number; pressure_4ma_pa: number | string | null; pressure_20ma_pa: number | string | null; scale: 'linear' | 'log'; fault_ma: number; offset_ma?: number | string}
 type Config = {mode: 'real' | 'simulation'; host: string; port: number; unit_id: number; register_base: 0 | 10 | null; current_output_confirmed: boolean; update_interval_s: number; outputs: Mapping[]}
-type State = {config: Config; connected: boolean; enabled: boolean; manual_active?: boolean; unconfirmed: boolean; error: string | null; outputs: {channel: number; current_ma: number; pressure_pa?: number | null; status: string}[]}
+type State = {config: Config; connected: boolean; enabled: boolean; manual_active?: boolean; unconfirmed: boolean; error: string | null; outputs: {channel: number; current_ma: number; target_ma?: number; offset_ma?: number; pressure_pa?: number | null; status: string}[]}
 const request = <T,>(path = '', method = 'GET', body?: unknown) => apiRequest<T>(`/api/analog-output${path}`, {method, operation: method === 'GET' ? '读取模拟量模块状态' : '模拟量模块操作', timeoutMs: 15000, body: body === undefined ? undefined : JSON.stringify(body)})
 
 export default function AnalogOutputPanel({auth, connected, onDirtyChange}: {auth: boolean; connected: boolean; onDirtyChange: (dirty: boolean) => void}) {
@@ -76,18 +77,21 @@ export default function AnalogOutputPanel({auth, connected, onDirtyChange}: {aut
           <div className="analog-endpoints">{(['pressure_4ma_pa', 'pressure_20ma_pa'] as const).map((key, k) => <label className="field" key={key}>{k ? '20mA' : '4mA'} 对应压力（Pa）<input aria-label={`AO${i + 1} ${k ? '20mA' : '4mA'} 对应压力`} type="text" inputMode="decimal" placeholder="例如 1e-6" value={row[key] ?? ''} onChange={event => mapping(i, key, event.target.value === '' ? null : event.target.value)}/></label>)}</div>
           <label className="field">AO{i + 1} 转换方式<select value={row.scale} onChange={event => mapping(i, 'scale', event.target.value)}><option value="log">对数</option><option value="linear">线性</option></select></label>
           <label className="field">AO{i + 1} 压力失效 / 停止时电流（mA）<input type="number" min={4} max={20} step={0.001} value={row.fault_ma} onChange={event => mapping(i, 'fault_ma', Number(event.target.value))}/></label>
-          <div className="analog-current"><strong>{fresh && current && !state?.unconfirmed ? `${current.current_ma.toFixed(3)} mA` : '—'}</strong><small>{state?.unconfirmed ? '输出未确认，请检查模块连接' : fresh && current ? current.status : '暂无已确认的设定值'}</small><small>寄存器设定值，非实测电流</small></div>
+          <label className="field">AO{i + 1} 校准偏移（mA）<input aria-label={`AO${i + 1} 校准偏移`} type="text" inputMode="decimal" value={row.offset_ma ?? 0} onChange={event => mapping(i, 'offset_ma', event.target.value)}/></label>
+          {!validOffset(row.offset_ma) && <p className="inline-error">偏移须为 −16 至 +16mA，最多三位小数</p>}
+          <div className="analog-current"><strong>{fresh && current && !state?.unconfirmed ? `${current.current_ma.toFixed(3)} mA` : '—'}</strong>{fresh && current?.target_ma != null && !state?.unconfirmed && <small>目标 {current.target_ma.toFixed(3)}mA · 已用偏移 {(current.offset_ma ?? 0) >= 0 ? '+' : ''}{(current.offset_ma ?? 0).toFixed(3)}mA</small>}<small>{state?.unconfirmed ? '输出未确认，请检查模块连接' : fresh && current ? current.status : '暂无已确认的设定值'}</small><small>寄存器设定值，非实测电流</small></div>
         </fieldset>
       })}</div>
       {dirty && <p className="subtle-note">有未保存的模拟量设置</p>}
       <div className="stage-actions">
-        <button className="button button--primary" disabled={!writable || !editable || !dirty} onClick={() => void act('/config', '模拟量配置已保存，未启用输出')}><Check size={15}/>{busy === '/config' ? '保存中…' : '保存模拟量设置'}</button>
+        <button className="button button--primary" disabled={!writable || !editable || !dirty || draft.outputs.some(row => !validOffset(row.offset_ma))} onClick={() => void act('/config', '模拟量配置已保存，未启用输出')}><Check size={15}/>{busy === '/config' ? '保存中…' : '保存模拟量设置'}</button>
         <button className="button button--quiet" disabled={!writable || dirty || state?.connected} onClick={() => void act('/connect', '模拟量模块已连接；连接过程未写入电流')}><Plug size={15}/>连接模拟量模块</button>
         <button className="button button--quiet" disabled={!writable || dirty || !state?.connected || state.enabled || state.manual_active || state.unconfirmed || draft.register_base == null || !draft.current_output_confirmed || !draft.outputs.some(row => row.enabled)} onClick={() => void act('/enable', '实时压力电流输出已启用')}>开始实时输出</button>
         <button className="button stage-stop" disabled={!auth || !!busy || !state?.enabled && !state?.manual_active && !state?.unconfirmed} onClick={() => void act('/stop', '实时输出已停止，已写入各通道故障电流')}><Square size={15}/>停止实时输出</button>
         <button className="button button--quiet" disabled={!writable || !state?.connected} onClick={() => void act('/disconnect', '模拟量模块已断开')}><Unplug size={15}/>断开模拟量模块</button>
       </div>
       <p className="stage-note">压力过期、无效或真空规断连时使用故障电流；超量程限幅到 4–20mA。通信中断或程序异常退出后，模块可能保持最后电流，不能据此判断压力有效。</p>
+      <p className="stage-note">下发电流＝目标电流＋校准偏移，最终限于 4–20mA；偏移也作用于故障电流和 Debug 手动调节。</p>
     </> : <p>正在读取模拟量设置…</p>}
   </section>
 }

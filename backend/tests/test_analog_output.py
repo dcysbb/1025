@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from pydantic import ValidationError
-from app.analog_output import AnalogConfig, AnalogError, AnalogMapping, AnalogOutput, ManualCurrent, pressure_current
+from app.analog_output import AnalogConfig, AnalogError, AnalogMapping, AnalogOutput, ManualCurrent, Calibration, calibrated_current, pressure_current
 from app.drivers.zs_ao import ZsAnalogClient, ModbusError
 
 
@@ -225,3 +225,69 @@ class AnalogTests(unittest.IsolatedAsyncioTestCase):
                        {'channel': 1, 'current_ma': 3.999}, {'channel': 1, 'current_ma': 21}, {'channel': 1, 'current_ma': math.nan},
                        {'channel': 1, 'current_ma': math.inf}, {'channel': 1, 'current_ma': 4.0001}):
             with self.assertRaises(ValidationError): ManualCurrent(**values)
+
+    async def test_calibration_saves_only_one_channel_without_writing_and_migrates_old_defaults(self):
+        self.controller.config = self.configured()
+        self.controller.driver = self.driver
+        before = self.controller.config.model_dump()
+        result = await self.controller.calibrate(Calibration(channel=3, offset_ma=-0.125), 'test')
+        expected = before
+        expected['outputs'][2]['offset_ma'] = -0.125
+        self.assertEqual(result['config'], expected)
+        self.driver.write_current.assert_not_awaited()
+        reloaded = AnalogOutput(Path(self.temp.name), lambda: self.sample, Mock())
+        self.assertEqual(reloaded.config.outputs[2].offset_ma, -0.125)
+        self.assertFalse(reloaded.enabled)
+        self.assertEqual(AnalogMapping().offset_ma, 0)
+
+    async def test_calibration_is_applied_once_to_manual_pressure_and_fault_outputs(self):
+        self.controller.config = self.configured()
+        mapping = self.controller.config.outputs[0]
+        mapping.offset_ma, mapping.fault_ma = 0.125, 10
+        self.controller.driver = self.driver
+        result = await self.controller.manual(ManualCurrent(channel=1, current_ma=12), 'test')
+        self.driver.write_current.assert_awaited_with(10, 12.125)
+        self.assertEqual(result['outputs'][0]['target_ma'], 12)
+        self.assertEqual(result['outputs'][0]['offset_ma'], 0.125)
+        self.assertEqual(result['outputs'][0]['current_ma'], 12.125)
+        await self.controller.stop('test')
+        self.driver.write_current.assert_awaited_with(10, 10.125)
+        await self.controller.update_once()
+        self.driver.write_current.assert_awaited_with(10, 12.125)
+        self.sample['sample_stale'] = True
+        await self.controller.update_once()
+        self.driver.write_current.assert_awaited_with(10, 10.125)
+
+    async def test_calibration_cannot_change_running_or_uncertain_outputs(self):
+        self.controller.config = self.configured()
+        self.controller.driver = self.driver
+        body = Calibration(channel=1, offset_ma=0.1)
+        await self.controller.enable('test')
+        with self.assertRaises(AnalogError): await self.controller.calibrate(body, 'test')
+        await self.controller.stop('test')
+        await self.controller.manual(ManualCurrent(channel=2, current_ma=12), 'test')
+        with self.assertRaises(AnalogError): await self.controller.calibrate(body, 'test')
+        self.controller.uncertain = True
+        with self.assertRaises(AnalogError): await self.controller.calibrate(body, 'test')
+        self.assertEqual(self.controller.config.outputs[0].offset_ma, 0)
+
+    async def test_calibration_recovery_preserves_saved_offset_on_unmapped_manual_channel(self):
+        self.controller.config = self.configured()
+        self.controller.config.outputs[3].offset_ma = -0.15
+        self.controller.config.outputs[3].fault_ma = 12
+        self.controller.driver = self.driver
+        await self.controller.manual(ManualCurrent(channel=4, current_ma=10), 'test')
+        reloaded = AnalogOutput(Path(self.temp.name), lambda: self.sample, Mock(), lambda *args, **kw: self.driver)
+        self.assertTrue(reloaded.uncertain)
+        self.assertEqual(reloaded.config.outputs[3].offset_ma, -0.15)
+        await reloaded.connect('test')
+        await reloaded.stop('test')
+        self.driver.write_current.assert_awaited_with(13, 11.85)
+
+    def test_calibration_uses_microamp_precision_and_clamps_after_addition(self):
+        for target, offset, expected, limited in [(12, 0.001, 12.001, False), (12, -0.125, 11.875, False),
+                                                   (4, -0.1, 4, True), (20, 0.1, 20, True), (4, 0.1, 4.1, False)]:
+            self.assertEqual(calibrated_current(AnalogMapping(offset_ma=offset), target), (expected, limited))
+        for value in (math.inf, math.nan, 16.001, -16.001, 0.0001):
+            with self.assertRaises(ValidationError): Calibration(channel=1, offset_ma=value)
+            with self.assertRaises(ValidationError): AnalogMapping(offset_ma=value)

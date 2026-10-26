@@ -4,12 +4,13 @@ import {afterEach, beforeEach, test} from 'node:test'
 import assert from 'node:assert/strict'
 import type {Root} from 'react-dom/client'
 import AnalogManualPanel from '../src/AnalogManualPanel'
+import {currentCommand} from '../src/analogCalibration'
 
 const initial = new JSDOM('<div/>', {url: 'http://localhost'})
 Object.assign(globalThis, {window: initial.window, document: initial.window.document})
 const {createRoot} = await import('react-dom/client')
 let dom: JSDOM, root: Root, writes: {path: string; body: unknown}[]
-let state: {config: {mode: string; host: string; port: number; unit_id: number; register_base: number | null; current_output_confirmed: boolean; outputs: {label: string; fault_ma: number}[]}; connected: boolean; enabled: boolean; manual_active: boolean; unconfirmed: boolean; error: string | null; outputs: {channel: number; current_ma: number; status: string}[]}
+let state: {config: {mode: string; host: string; port: number; unit_id: number; register_base: number | null; current_output_confirmed: boolean; outputs: {label: string; fault_ma: number; offset_ma?: number}[]}; connected: boolean; enabled: boolean; manual_active: boolean; unconfirmed: boolean; error: string | null; outputs: {channel: number; current_ma: number; status: string; target_ma?: number; offset_ma?: number}[]}
 let failRead: boolean, failWrite: boolean, holdWrite: ((response: Response) => void) | null
 beforeEach(() => {
   dom = new JSDOM('<div id="root"/>', {url: 'http://localhost'})
@@ -27,6 +28,7 @@ beforeEach(() => {
       writes.push({path, body})
       if (failWrite) throw new TypeError('Failed to fetch')
       if (path.endsWith('/stop')) {state.enabled = false; state.manual_active = false}
+      else if (path.endsWith('/calibration')) state.config.outputs[body.channel-1].offset_ma=body.offset_ma
       else {
         state.manual_active = true
         state.outputs = state.outputs.map(row => row.channel === body.channel ? {...row, current_ma: body.current_ma, status: '手动设定'} : row)
@@ -134,4 +136,57 @@ test('a poll started before a manual command cannot overwrite its response with 
   await click(button('下发 AO4'))
   await act(async () => {oldPoll!(new Response(idle)); await new Promise(r => setTimeout(r, 5))})
   assert.equal(document.querySelector('.panel-heading .status-chip')!.textContent, '手动输出中')
+})
+
+test('calibration edits never write; saving only patches its own channel and preserves other drafts', async () => {
+  await render()
+  const one=document.querySelector<HTMLInputElement>('[aria-label="AO1 校准偏移"]')!
+  const two=document.querySelector<HTMLInputElement>('[aria-label="AO2 校准偏移"]')!
+  await act(async () => {
+    for (const [node,value] of [[one,'-0.125'],[two,'0.100']] as const) {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(node,value)
+      node.dispatchEvent(new dom.window.Event('input',{bubbles:true}))
+    }
+  })
+  assert.deepEqual(writes,[])
+  await click(button('保存 AO1 偏移'))
+  assert.deepEqual(writes,[{path:'/api/analog-output/calibration',body:{channel:1,offset_ma:-0.125}}])
+  assert.equal(two.value,'0.100')
+  assert.equal(button('保存 AO1 偏移').disabled,true)
+  await fill(1,'12')
+  assert.ok(document.querySelector('.analog-manual-card')!.textContent?.includes('预计下发 11.875mA'))
+})
+
+test('saving calibration requires stopping output and invalid precision never reaches the server', async () => {
+  state.manual_active=true
+  await render()
+  const offset=document.querySelector<HTMLInputElement>('[aria-label="AO1 校准偏移"]')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(offset,'0.100')
+    offset.dispatchEvent(new dom.window.Event('input',{bubbles:true}))
+  })
+  assert.equal(button('保存 AO1 偏移').disabled,true)
+  assert.ok(document.body.textContent?.includes('请先停止输出，再保存偏移'))
+  await click(button('停止模拟量输出'))
+  assert.equal(button('保存 AO1 偏移').disabled,false)
+  for (const value of ['-', '16.001', '-16.001', '0.0001']) {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(offset,value)
+      offset.dispatchEvent(new dom.window.Event('input',{bubbles:true}))
+    })
+    assert.equal(button('保存 AO1 偏移').disabled,true)
+  }
+  assert.equal(writes.length,1)
+})
+
+test('manual re-entry uses the nominal target without accumulating compensation and shows endpoint clipping', async () => {
+  state.config.outputs[0].offset_ma=.1
+  state.outputs[0]={channel:1,current_ma:12.1,target_ma:12,offset_ma:.1,status:'手动设定'}
+  await render()
+  assert.equal(document.querySelector<HTMLInputElement>('[aria-label="AO1 电流"]')!.value,'12')
+  assert.ok(document.body.textContent?.includes('目标 12.000mA'))
+  await fill(1,'20')
+  assert.ok(document.querySelector('.analog-manual-card')!.textContent?.includes('预计下发 20.000mA（已限幅）'))
+  assert.deepEqual(currentCommand(4,-.1),{current:4,limited:true})
+  assert.deepEqual(currentCommand(12,.001),{current:12.001,limited:false})
 })

@@ -83,3 +83,16 @@ test('hardware settings show manual output and require stopping it before changi
   assert.equal(button('停止实时输出').disabled, false)
   assert.equal(document.querySelector<HTMLFieldSetElement>('fieldset')!.disabled, true)
 })
+
+test('hardware settings preserve signed calibration input and reject invalid precision before saving', async () => {
+  await render()
+  const input=document.querySelector<HTMLInputElement>('[aria-label="AO3 校准偏移"]')!
+  for (const value of ['-', '0.0001', '17']) {
+    await act(async () => {Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(input,value);input.dispatchEvent(new dom.window.Event('input',{bubbles:true}))})
+    assert.equal(input.value,value)
+    assert.equal(button('保存模拟量设置').disabled,true)
+  }
+  await act(async () => {Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(input,'-0.125');input.dispatchEvent(new dom.window.Event('input',{bubbles:true}))})
+  await act(async () => {button('保存模拟量设置').click();await new Promise(r=>setTimeout(r,5))})
+  assert.equal((writes[0].body as {outputs:{offset_ma:string}[]}).outputs[2].offset_ma,'-0.125')
+})

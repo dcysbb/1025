@@ -26,6 +26,7 @@ class AnalogMapping(BaseModel):
     pressure_20ma_pa: float | None = Field(default=None, ge=0)
     scale: Literal["linear", "log"] = "log"
     fault_ma: float = Field(default=20, ge=4, le=20)
+    offset_ma: float = Field(default=0, ge=-16, le=16, multiple_of=0.001)
 
     @model_validator(mode="after")
     def valid_range(self):
@@ -64,6 +65,18 @@ class ManualCurrent(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     channel: int = Field(ge=1, le=4, strict=True)
     current_ma: float = Field(ge=4, le=20, multiple_of=0.001)
+
+
+class Calibration(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    channel: int = Field(ge=1, le=4, strict=True)
+    offset_ma: float = Field(ge=-16, le=16, multiple_of=0.001)
+
+
+def calibrated_current(mapping: AnalogMapping, target: float) -> tuple[float, bool]:
+    raw = round(target * 1000) + round(mapping.offset_ma * 1000)
+    bounded = max(4000, min(20000, raw))
+    return bounded / 1000, raw != bounded
 
 
 def pressure_current(mapping: AnalogMapping, pressure: float) -> tuple[float, bool]:
@@ -171,6 +184,18 @@ class AnalogOutput:
             self.event("analog_connect", "info", "模拟量模块已连接，连接过程未写入电流", actor)
             return self.snapshot()
 
+    async def calibrate(self, body: Calibration, actor):
+        async with self._lock:
+            if self.enabled or self.uncertain or self._manual_channels or self._stopping:
+                raise AnalogError("请先停止模拟量输出，再保存校准偏移")
+            config = self.config.model_copy(deep=True)
+            config.outputs[body.channel - 1].offset_ma = body.offset_ma
+            self._save(self.path, config.model_dump())
+            self.config = config
+            self.error = None
+            self.event("analog_calibration", "info", f"AO{body.channel} 电流偏移已保存为 {body.offset_ma:+.3f}mA，下次下发生效", actor)
+            return self.snapshot()
+
     async def enable(self, actor):
         async with self._lock:
             if self._manual_channels or self._stopping:
@@ -212,7 +237,7 @@ class AnalogOutput:
                                       "reason": "手动电流输出尚未停止确认"})
             self._manual_channels = channels
             try:
-                await self._write(body.channel, body.current_ma)
+                written = await self._write(body.channel, body.current_ma)
             except Exception as exc:
                 self.uncertain = True
                 self.error = f"AO{body.channel} 手动输出未确认：{exc}；请检查连接后停止输出，勿重复下发。"
@@ -220,15 +245,18 @@ class AnalogOutput:
                 raise AnalogError(self.error) from exc
             self.error = None
             self.rows = [row for row in self.rows if row["channel"] != body.channel] + [
-                {"channel": body.channel, "current_ma": body.current_ma,
-                 "status": "手动设定，写入应答已确认", "updated_at": time.time()}]
+                {"channel": body.channel, **written,
+                 "status": "手动设定，写入应答已确认" + ("；校准补偿已限幅" if written["calibration_limited"] else ""), "updated_at": time.time()}]
             self.rows.sort(key=lambda row: row["channel"])
-            self.event("analog_manual", "warning", f"AO{body.channel} 手动设定 {body.current_ma:.3f}mA，写入应答已确认", actor)
+            self.event("analog_manual", "warning", f"AO{body.channel} 目标 {body.current_ma:.3f}mA，偏移 {written['offset_ma']:+.3f}mA，下发 {written['current_ma']:.3f}mA，写入应答已确认", actor)
             return self.snapshot()
 
     async def _write(self, channel, current):
+        offset = self.config.outputs[channel - 1].offset_ma
+        command, limited = calibrated_current(self.config.outputs[channel - 1], current)
         if self.config.mode == "real":
-            await self.driver.write_current(self.config.register_base + channel - 1, current)
+            await self.driver.write_current(self.config.register_base + channel - 1, command)
+        return {"target_ma": current, "offset_ma": offset, "current_ma": command, "calibration_limited": limited}
 
     async def update_once(self):
         rows = []
@@ -254,9 +282,9 @@ class AnalogOutput:
                 valid = False
             if not valid:
                 status = "压力失效，输出故障电流"
-            await self._write(i + 1, current)
-            rows.append({"channel": i + 1, "current_ma": current, "pressure_pa": value if valid else None,
-                         "status": status, "updated_at": time.time()})
+            written = await self._write(i + 1, current)
+            rows.append({"channel": i + 1, **written, "pressure_pa": value if valid else None,
+                         "status": status + ("；校准补偿已限幅" if written["calibration_limited"] else ""), "updated_at": time.time()})
         self.rows = rows
 
     async def _run(self):
@@ -300,18 +328,18 @@ class AnalogOutput:
             if not self.connected:
                 raise AnalogError("模块离线，不能确认故障电流已写入；请先恢复连接")
             affected = self._manual_channels or {i + 1 for i, row in enumerate(self.config.outputs) if row.enabled}
+            stopped_rows = []
             try:
                 for i, row in enumerate(self.config.outputs):
                     if i + 1 in affected:
-                        await self._write(i + 1, row.fault_ma)
+                        written = await self._write(i + 1, row.fault_ma)
+                        stopped_rows.append({"channel": i + 1, **written, "status": "已写入故障电流，输出已停止" + ("；校准补偿已限幅" if written["calibration_limited"] else "")})
                 self.journal.unlink(missing_ok=True)
             except Exception as exc:
                 self.uncertain = True
                 self.error = f"停止输出未确认：{exc}"
                 raise AnalogError(self.error) from exc
-            self.rows = [{"channel": i + 1, "current_ma": row.fault_ma, "status": "已写入故障电流，实时输出已停止"}
-                         for i, row in enumerate(self.config.outputs)
-                         if i + 1 in affected]
+            self.rows = stopped_rows
             self._manual_channels.clear()
             self.uncertain = False
             self.error = None
@@ -345,6 +373,14 @@ def install_analog_routes(app, controller, require_read_access, require_operator
         verify_origin(request)
         try:
             return await controller.manual(body, actor)
+        except (AnalogError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.patch("/api/analog-output/calibration")
+    async def calibrate(body: Calibration, request: Request, actor: str = Depends(require_operator)):
+        verify_origin(request)
+        try:
+            return await controller.calibrate(body, actor)
         except (AnalogError, OSError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
