@@ -56,7 +56,10 @@ class StageConfig(BaseModel):
     @model_validator(mode="after")
     def mapping_is_permutation(self):
         if self.host:
-            self.host = str(ipaddress.IPv4Address(self.host))
+            try:
+                self.host = str(ipaddress.IPv4Address(self.host))
+            except ValueError as exc:
+                raise ValueError("位移台 IP 地址须为有效 IPv4 地址") from exc
         if set(self.axes) != {"x", "y", "z"} or sorted(self.axes.values()) != [1, 2, 3]:
             raise ValueError("XYZ 必须分别映射到 CH1、CH2、CH3，不能重复")
         if set(self.inverted) != {"x", "y", "z"}:
@@ -756,8 +759,6 @@ class StageController:
             return self.snapshot()
 
     async def recover(self, confirmed_stationary, actor):
-        if not confirmed_stationary:
-            raise StageError("请先现场确认位移台已静止，再解除运动锁定；连接和状态读取无需此确认")
         if self.connected and not self._uncertain:
             raise StageError("连接仍有效，没有需要解除的运动锁定")
         if self._recovering or self._connecting or self._move_admitting or self._stopping_count or self._disconnecting_count:
@@ -773,9 +774,10 @@ class StageController:
             if not self.connected:
                 await self.connect(actor, _recovery=True)
             async with self._lock:
+                await self._call(self.driver.stop)
                 self.channels = await self._call(self.driver.status)
                 if not self._idle(self.channels):
-                    raise StageError("控制器尚未报告全部通道空闲，请停止后再解除运动锁定")
+                    raise StageError("停止后控制器尚未报告全部通道空闲，运动锁定保留")
                 self._clear_recovery()
                 self._uncertain = self.motion_pending = self._must_stop = False
                 self._jogging = None
@@ -783,7 +785,7 @@ class StageController:
                 self.operation = None
                 self._motion_deadline = 0
                 self._last_sample = time.monotonic()
-                self.event("stage_recovery", "warning", "现场确认静止且状态读回空闲，运动锁定已解除；未启用输出或重发动作", actor)
+                self.event("stage_recovery", "warning", "已发送停止且状态读回空闲，运动锁定已解除", actor)
                 return self.snapshot()
         except StageError:
             # A refused unlock is not a failed connection. Keep the readable
@@ -865,8 +867,6 @@ class StageController:
     async def control(self, command: StageAction, actor):
         if self._recovering or self._connecting or self._move_admitting or self.motion_pending or self._stopping_count or self._disconnecting_count:
             raise StageError("请等待当前操作或发送全部停止")
-        if command.operation in ("zero", "optimize", "home") and not command.confirmed:
-            raise StageError("请确认开环计数清零、自动优化或回零的操作说明")
         self._move_admitting = True
         invoked = False
         epoch = self._stop_epoch

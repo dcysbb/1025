@@ -1,5 +1,6 @@
+import HelpTooltip from './HelpTooltip'
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import { ArrowLeftRight, Check, GripVertical, Keyboard, Pencil, RefreshCw, X } from 'lucide-react'
+import { Check, GripVertical, Keyboard, Pencil, RefreshCw, X } from 'lucide-react'
 import { AXES, channelName, orderedAxes, stageApi, type Axis, type StagePresentation, type StageState } from './stageClient'
 import { errorMessage } from './apiClient'
 
@@ -262,7 +263,7 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
 
   return <>
     <section id="stage-manual" tabIndex={-1} className="content-panel glass-panel stage-workbench">
-      <div className="panel-heading"><div><h2>位移台精细控制</h2><p className="stage-note">单击步进 · 按住连续 · 全部停止随时可用 · 单次上限 {config.max_steps} 步</p></div><button className="button button--quiet" disabled={!canArrange} aria-pressed={arranging} onClick={() => {
+      <div className="panel-heading"><div><h2>位移台精细控制</h2><HelpTooltip label="点动说明">单击步进，按住连续，单次上限 {config.max_steps} 步；全部停止随时可用。</HelpTooltip></div><button className="button button--quiet" disabled={!canArrange} aria-pressed={arranging} onClick={() => {
         disableKeys(); for (const id of [...holds.current.keys()]) releaseHold(id, false)
         setArranging(value => !value); setNaming(null); setPresentationError('')
       }}><GripVertical size={15}/>{arranging ? '完成整理' : '整理面板'}</button></div>
@@ -304,7 +305,7 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
             {arranging && <div className="stage-layout-tools"><button className="icon-button stage-drag-handle" aria-label={`拖动排列 CH${channel}`} title="拖动排列；方向键调整" disabled={!canArrange} {...dragHandlers(channel)}><GripVertical size={18}/></button><span>CH{channel}</span><button className="button button--quiet" disabled={!canArrange} aria-label={`命名 CH${channel}`} onClick={() => {setNaming(channel); setNameDraft(name ?? ''); setPresentationError('')}}><Pencil size={14}/>命名</button></div>}
             <div className="stage-axis-title"><strong className={name ? 'stage-custom-name' : ''}>{name || axis.toUpperCase()}</strong><span className="stage-axis-channel">{name ? `${axis.toUpperCase()} · ` : ''}CH{channel} · {config.inverted[axis] ? '方向反转' : '标准方向'}</span><span className={`stage-axis-status ${status === '空闲' ? 'stage-axis-status--ready' : ''}`}>{status}</span></div>
             {arranging && naming === channel && <form className="stage-name-editor" onSubmit={event => { event.preventDefault(); void savePresentation({channel_names: {[String(channel)]: nameDraft.trim()}}) }}><input autoFocus maxLength={32} aria-label={`CH${channel} 名称`} placeholder={`CH${channel} 名称`} value={nameDraft} disabled={presentationBusy} onChange={event => setNameDraft(event.target.value)}/><button className="button button--primary" disabled={presentationBusy}>{presentationBusy ? '保存中…' : '保存名称'}</button><button type="button" className="icon-button" aria-label="取消命名" disabled={presentationBusy} onClick={() => setNaming(null)}><X size={15}/></button></form>}
-            <dl className="stage-axis-details"><div><dt>识别型号</dt><dd>{row?.stage || '未识别'}</dd></div><div><dt>输出使能</dt><dd>{!known || !row ? '未知' : row.enabled ? '已使能' : '未使能'}</dd></div><div><dt>开环命令计数</dt><dd><b>{known && row?.command_count != null ? row.command_count : '—'}</b><small>非实测位置</small></dd></div><div><dt>优化状态</dt><dd>{!known || state.error || uncertain ? '状态未知' : optimizing ? '进行中 / 等待确认' : row?.optimized ? '控制器已返回优化标志' : '未返回优化标志'}</dd></div></dl>
+            <dl className="stage-axis-details"><div><dt>识别型号</dt><dd>{row?.stage || '未识别'}</dd></div><div><dt>输出使能</dt><dd>{!known || !row ? '未知' : row.enabled ? '已使能' : '未使能'}</dd></div><div><dt>开环计数</dt><dd><b>{known && row?.command_count != null ? row.command_count : '—'}</b><HelpTooltip label="开环计数说明">控制器命令计数不代表实测位置。</HelpTooltip></dd></div><div><dt>优化状态</dt><dd>{!known || state.error || uncertain ? '状态未知' : optimizing ? '进行中 / 等待确认' : row?.optimized ? '控制器已返回优化标志' : '未返回优化标志'}</dd></div></dl>
             <label className="field stage-step-field">单次步数<input aria-label={`${axis.toUpperCase()} 轴点动步数`} type="number" inputMode="numeric" min={1} max={config.max_steps} step={1} value={step(axis)} onChange={event => setStep(axis, event.target.value)}/></label>
             <div className="stage-step-presets" aria-label={`${axis.toUpperCase()} 轴快捷步长`}>{presets.map(value => <button key={value} type="button" aria-label={`${axis.toUpperCase()} 轴 ${value} 步`} aria-pressed={step(axis) === String(value)} disabled={value > config.max_steps} onClick={() => setStep(axis, String(value))}>{value}</button>)}</div>
             <div className="stage-axis-buttons">{([-1, 1] as const).map(direction => <button key={direction} className={`button button--quiet stage-jog-button ${joggingHere(axis, direction) ? 'stage-jog-button--active' : ''}`} aria-describedby={`stage-reason-${axis}`}
@@ -317,7 +318,7 @@ export default function StageWorkbench({ state, auth, connected, online, busy, s
           </article>
         })}</div>
       </div>
-      <p className="stage-note stage-workbench-note"><ArrowLeftRight size={15}/>PD1V/M 无位置反馈；实际位移随负载和驱动设置变化。“已下发”不代表实测到位。Home 尝试硬件回零（不支持时仅清零计数）；Optimize 会自动运动，不受单次点动步数上限限制。</p>
+      <HelpTooltip label="开环与回零说明">PD1V/M 无位置反馈；实际位移随负载和驱动设置变化。Home 尝试硬件回零，不支持时仅清零计数；Optimize 会自动运动，不受点动上限限制。</HelpTooltip>
       {advanced}
     </section>
     <section id="stage-movement-history" tabIndex={-1} className="content-panel glass-panel stage-movement-history">

@@ -27,8 +27,13 @@ beforeEach(() => {
       const body = JSON.parse(String(options.body ?? '{}')); writes.push({ path, body })
       if (failure) return new Response(JSON.stringify({ detail: 'DAM 与真空规必须使用不同串口' }), { status: 422 })
       if (path === '/api/config') config = { ...config, ...body.config }
+      if (path.endsWith('/apply-connect')) {
+        if(path.includes('/stage/')) return new Response(JSON.stringify({ok:true,config_saved:true,state:{...stage,connected:true}}))
+        config={...config,...body.config};return new Response(JSON.stringify({ok:true,config_saved:true,state:{}}))
+      }
       if (path.startsWith('/api/debug/relays/')) outputs[Number(path.split('/').at(-1))] = body.enabled
     }
+    if(path==='/api/analog-output')return new Response(JSON.stringify({config:{mode:'simulation',host:'192.168.0.7',port:8234,unit_id:1,register_base:10,current_output_confirmed:false,update_interval_s:.5,outputs:Array.from({length:4},()=>({enabled:false,label:'',source_channel:1,pressure_4ma_pa:null,pressure_20ma_pa:null,scale:'log',fault_ma:20,offset_ma:0}))},connected:true,enabled:false,unconfirmed:false,error:null,outputs:[]}))
     const data = path.includes('/debug/relays') ? {mode:system.mode,interlock:system.interlock,outputs,valve_output:config.open_output,valve_open_on_energized:config.valve_open_on_energized??true,remaining_s:{}} : path.includes('/stage') ? stage : path.includes('/ports') ? { ports: detectedPorts } : path.includes('/hardware/status') ? { tpg: { connected: true, error: null }, io: { connected: true, error: null, inputs: Array(8).fill(false), outputs } } : { config }
     return new Response(JSON.stringify(data))
   }
@@ -66,23 +71,23 @@ test('network failure names hardware reads, pauses writes and permits a read-onl
   await render()
   assert.ok(container.textContent?.includes('读取硬件连接配置失败'))
   assert.ok(container.textContent?.includes('读取真空规与 I/O 控制器状态失败'))
-  assert.ok(container.textContent?.includes('设备是否在线尚未确认'))
+  assert.ok(container.textContent?.includes('TPG / I/O 状态未确认'))
   assert.equal(container.textContent?.includes('Failed to fetch'), false)
   assert.deepEqual(writes, [])
   offline = false
   await click('重新读取硬件配置')
   assert.equal(container.textContent?.includes('读取硬件连接配置失败'), false)
-  assert.equal(button('连接真空规').disabled, false)
+  assert.equal(button('应用并重新连接真空规').disabled, false)
   assert.deepEqual(writes, [])
 })
 test('transport switches preserve hidden fields and saves only that device', async () => {
   await render(); await change(field('真空规连接方式'), 'usb')
   assert.equal(field('真空规串口').value, 'COM3')
-  assert.equal(button('连接真空规').disabled, true)
+  assert.equal(button('应用并重新连接真空规').disabled, false)
   await change(field('真空规连接方式'), 'tcp')
   assert.equal(field('真空规 IP 地址').value, '192.168.1.2')
-  await change(field('真空规 TCP 端口'), '8001'); await click('保存真空规')
-  assert.deepEqual(Object.keys(writes[0].body.config as object).sort(), ['tpg_connection', 'tpg_serial_port', 'tpg_baudrate', 'tpg_host', 'tpg_port'].sort())
+  await change(field('真空规 TCP 端口'), '8001'); await click('应用并重新连接真空规')
+  assert.deepEqual(Object.keys(writes[0].body.config as object).sort(), ['tpg_port'])
   assert.equal(writes.length, 1)
 })
 test('terminal caption edits survive tab switches and save no valve or pressure fields', async () => {
@@ -95,8 +100,8 @@ test('terminal caption edits survive tab switches and save no valve or pressure 
   assert.ok(container.textContent?.includes('已保存'))
 })
 test('independent IO connection never connects gauge or moves stage', async () => {
-  await render(); await click('连接I/O')
-  assert.deepEqual(writes.map(x => x.path), ['/api/devices/connect-io'])
+  await render(); await click('应用并重新连接I/O')
+  assert.deepEqual(writes.map(x => x.path), ['/api/devices/io/apply-connect'])
 })
 
 test('stage connects directly regardless of vacuum interlock or previous motion uncertainty', async () => {
@@ -112,17 +117,17 @@ test('stage connects directly regardless of vacuum interlock or previous motion 
     return original(url, options)
   }
   await render()
-  assert.equal(button('连接控制器').disabled, false)
-  await click('连接控制器')
-  assert.deepEqual(writes, [{path:'/api/stage/connect',body:{}}])
+  assert.equal(button('应用并连接控制器').disabled, false)
+  await click('应用并连接控制器')
+  assert.deepEqual(writes, [{path:'/api/devices/stage/apply-connect',body:{config:{}}}])
   assert.equal(document.querySelector('[role="dialog"]'), null)
-  assert.ok(container.textContent?.includes('控制器已连接，运动锁定仍保留'))
+  assert.ok(container.textContent?.includes('参数已应用，位移台已连接'))
 })
 
 test('serial suggestions load automatically and do not restrict manual connection parameters', async () => {
   detectedPorts = [{device:'COM9',description:'CP210x USB bridge'}]
   await render()
-  assert.ok(container.textContent?.includes('系统识别到：COM9'))
+  assert.ok(button('系统串口列表'))
   assert.equal(container.querySelector('datalist option')?.getAttribute('value'),'COM9')
   assert.equal(container.querySelector('input[readonly]'),null)
   await change(field('DAM 串口'),'com12')
@@ -130,12 +135,12 @@ test('serial suggestions load automatically and do not restrict manual connectio
   await change(field('DAM 设备地址'),'7')
   assert.equal(field('DAM 串口').value,'COM12')
   assert.deepEqual(writes,[])
-  await click('保存I/O')
+  await click('应用并重新连接I/O')
   const values=writes[0].body.config as Record<string,unknown>
   assert.equal(values.dam_serial_port,'COM12')
   assert.equal(values.dam_baudrate,19200)
   assert.equal(values.dam_unit_id,7)
-  assert.deepEqual(writes.map(row=>row.path),['/api/config'])
+  assert.deepEqual(writes.map(row=>row.path),['/api/devices/io/apply-connect'])
 })
 
 test('baud menus contain device-supported rates and save numeric values independently', async () => {
@@ -152,12 +157,12 @@ test('baud menus contain device-supported rates and save numeric values independ
   assert.equal(field('真空规波特率').value,'115200')
   await change(field('DAM 波特率'),'38400')
   assert.deepEqual(writes,[])
-  await click('保存I/O')
+  await click('应用并重新连接I/O')
   assert.equal((writes[0].body.config as Record<string,unknown>).dam_baudrate,38400)
   assert.equal(field('真空规波特率').value,'115200')
-  await click('保存真空规')
+  await click('应用并重新连接真空规')
   assert.equal((writes[1].body.config as Record<string,unknown>).tpg_baudrate,115200)
-  assert.deepEqual(writes.map(row=>row.path),['/api/config','/api/config'])
+  assert.deepEqual(writes.map(row=>row.path),['/api/devices/io/apply-connect','/api/devices/tpg/apply-connect'])
 })
 
 test('loaded connection drafts remain editable during a status outage while writes stay disabled', async () => {
@@ -170,8 +175,8 @@ test('loaded connection drafts remain editable during a status outage while writ
   assert.equal(field('DAM 串口').matches(':disabled'),false)
   await change(field('DAM 串口'),'COM12')
   assert.equal(field('DAM 串口').value,'COM12')
-  assert.equal(button('保存I/O').disabled,true)
-  assert.equal(button('连接I/O').disabled,true)
+  assert.equal(button('应用并连接I/O').disabled,true)
+  assert.equal(button('应用并连接I/O').disabled,true)
   assert.deepEqual(writes,[])
   await act(async()=>root.render(<HardwarePanel auth={false} connected/>))
   assert.equal(field('DAM 串口').matches(':disabled'),true)
@@ -184,23 +189,20 @@ test('an invalid serial list reports its own error without crashing or blocking 
   await render()
   assert.ok(container.textContent?.includes('后台返回的列表格式异常'))
   await change(field('DAM 串口'),'COM12')
-  assert.equal(button('保存I/O').disabled,false)
+  assert.equal(button('应用并重新连接I/O').disabled,false)
   assert.deepEqual(writes,[])
 })
 test('errors retain unsaved draft and unauthenticated controls cannot write', async () => {
-  await render(); await change(field('DAM 串口'), 'COM3'); failure = true; await click('保存I/O')
+  await render(); await change(field('DAM 串口'), 'COM3'); failure = true; await click('应用并重新连接I/O')
   assert.equal(field('DAM 串口').value, 'COM3')
   assert.ok(container.textContent?.includes('必须使用不同串口'))
   await act(async () => root.render(<HardwarePanel auth={false} connected />))
-  assert.equal(button('保存I/O').disabled, true)
-  assert.equal(button('连接真空规').disabled, true)
+  assert.equal(button('应用并重新连接I/O').disabled, true)
+  assert.equal(button('应用并重新连接真空规').disabled, true)
 })
 
 function terminalSelect(label: string) { const node = container.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`); assert.ok(node,label); return node }
-async function acknowledge() {
-  const input = [...container.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find(node => node.parentElement?.textContent?.includes('启用普通输出手动控制'))!
-  await act(async () => { if (!input.checked) input.click() })
-}
+async function acknowledge() {assert.equal(container.textContent?.includes('已核对接线、负载和线圈电压'),false)}
 
 test('terminal assignments edit the actual shared valve mapping and save only mapping fields', async () => {
   await render(); await click('DAM 端子')
@@ -264,9 +266,9 @@ test('required closed feedback and the single valve output cannot be silently un
   assert.deepEqual(writes,[])
 })
 
-test('ordinary output controls require acknowledgement and route one finite request to the selected relay', async () => {
+test('ordinary output controls need no acknowledgement and route one finite request to the selected relay', async () => {
   await render(); await click('DAM 端子')
-  assert.equal(button('吸合 OUT2').disabled,true)
+  assert.equal(button('吸合 OUT2').disabled,false)
   await acknowledge()
   assert.equal(button('吸合 OUT2').disabled,false)
   await act(async () => { button('吸合 OUT2').click(); button('吸合 OUT2').click(); await new Promise(resolve=>setTimeout(resolve,0)) })
@@ -359,4 +361,51 @@ test('a pre-command output poll cannot overwrite a confirmed relay result',async
   await act(async()=>{finish!(new Response(JSON.stringify({mode:'simulation',interlock:'disarmed',valve_output:0,outputs:Array(8).fill(false),remaining_s:{}})));await new Promise(resolve=>setTimeout(resolve,0))})
   assert.equal(container.querySelectorAll('.terminal-output-card')[1].querySelector('.terminal-level')?.textContent,'吸合')
   assert.equal(writes.length,1)
+})
+
+
+test('device connections contain four cards and allow connected analog IP editing',async()=>{
+  await render()
+  const cards=container.querySelectorAll('#hardware-devices .hardware-card')
+  assert.equal(cards.length,4)
+  for(const name of ['TPG366','I/O 控制器','PDXC3','ZS-AO-4-RJ45']) assert.ok([...cards].some(card=>card.querySelector('h2')?.textContent?.includes(name)))
+  const ip=field('模拟量模块 IP 地址')
+  assert.equal(ip.matches(':disabled'),false)
+  await change(ip,'192.168.0.8')
+  await click('模拟量输出')
+  assert.equal(container.querySelector('#hardware-analog input[placeholder="192.168.0.7"]'),null)
+  assert.equal(container.textContent?.includes('已核对模块为'),false)
+  await click('设备连接')
+  assert.equal(field('模拟量模块 IP 地址').value,'192.168.0.8')
+  assert.deepEqual(writes,[])
+})
+
+test('analog connection and mapping saves do not overwrite each other or lose drafts',async()=>{
+  const normal=globalThis.fetch
+  const analog=await (await normal('/api/analog-output',{method:'GET'})).json()
+  globalThis.fetch=async(url,options)=>{
+    const path=String(url)
+    if(path==='/api/devices/analog/apply-connect') {
+      const body=JSON.parse(String(options?.body));writes.push({path,body})
+      Object.assign(analog.config,body.config)
+      return new Response(JSON.stringify({ok:true,config_saved:true,state:analog}))
+    }
+    if(path==='/api/analog-output/config'&&options?.method==='PATCH') {
+      const body=JSON.parse(String(options.body));writes.push({path,body})
+      for(const {channel,...fields} of body.outputs) Object.assign(analog.config.outputs[channel-1],fields)
+      return new Response(JSON.stringify(analog))
+    }
+    if(path==='/api/analog-output')return new Response(JSON.stringify(analog))
+    return normal(url,options)
+  }
+  await render();await change(field('模拟量模块 IP 地址'),'192.168.0.8')
+  await click('模拟量输出')
+  await change(container.querySelector<HTMLInputElement>('[aria-label="AO2 校准偏移"]')!,'0.125')
+  await click('设备连接');await click('应用并重新连接模拟量模块')
+  assert.deepEqual(writes[0],{path:'/api/devices/analog/apply-connect',body:{config:{host:'192.168.0.8'}}})
+  await click('模拟量输出')
+  assert.equal(container.querySelector<HTMLInputElement>('[aria-label="AO2 校准偏移"]')!.value,'0.125')
+  await click('保存模拟量设置')
+  assert.deepEqual(writes[1],{path:'/api/analog-output/config',body:{outputs:[{channel:2,offset_ma:'0.125'}]}})
+  assert.equal(analog.config.host,'192.168.0.8')
 })

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Check, Send, Square } from 'lucide-react'
 import { apiRequest, errorMessage } from './apiClient'
 import { currentCommand, validOffset } from './analogCalibration'
+import HelpTooltip from './HelpTooltip'
 
 type AnalogState = {
   config: {mode: 'real' | 'simulation'; host: string; port: number; unit_id: number; register_base: number | null; current_output_confirmed: boolean; outputs: {label: string; fault_ma: number; offset_ma?: number}[]}
@@ -58,7 +59,7 @@ export default function AnalogManualPanel({auth, connected}: {auth: boolean; con
     const timer = setTimeout(() => setFresh(false), Math.max(0, 3500 - (Date.now() - lastRead)))
     return () => clearTimeout(timer)
   }, [lastRead])
-  const reason = !auth ? '需要操作员权限' : commandUnconfirmed ? '上次操作结果未确认，请检查连接并停止输出' : !connected ? '后台未连接' : !fresh ? '模块状态已过期，等待读取恢复' : !state?.connected ? '请在硬件连接 → 模拟量输出连接模块' : state.unconfirmed ? '输出未确认，请检查连接并停止输出' : state.enabled ? '压力跟随运行中，请先切换为手动调节' : state.config.register_base == null || !state.config.current_output_confirmed ? '请在硬件连接中核对输出寄存器及 4–20mA 型号和接线' : stopping ? '正在停止输出' : busy ? '正在下发，请等待应答' : ''
+  const reason = !auth ? '需要操作员权限' : commandUnconfirmed ? '上次操作结果未确认，请检查连接并停止输出' : !connected ? '后台未连接' : !fresh ? '模块状态已过期，等待读取恢复' : !state?.connected ? '请在硬件连接 → 设备连接中连接模拟量模块' : state.unconfirmed ? '输出未确认，请检查连接并停止输出' : state.enabled ? '压力跟随运行中，请先切换为手动调节' : state.config.register_base == null ? '请在设备连接中设置模拟量输出寄存器' : stopping ? '正在停止输出' : busy ? '正在下发，请等待应答' : ''
   const calibrationReason = !auth || !connected || !fresh || commandUnconfirmed || state?.enabled || state?.manual_active || state?.unconfirmed || stopping || !!busy
   async function act(path: string, body: unknown, label: string, stop = false, method = 'POST') {
     if (!auth || stopPending.current || !stop && (pending.current || (method === 'PATCH' ? calibrationReason : reason))) return
@@ -86,7 +87,7 @@ export default function AnalogManualPanel({auth, connected}: {auth: boolean; con
   const stopAvailable = auth && (state?.enabled || state?.manual_active || state?.unconfirmed || commandUnconfirmed || !!busy)
   const status = !fresh ? '状态未确认' : state?.unconfirmed ? '输出未确认' : !state?.connected ? '未连接' : state.enabled ? '压力跟随中' : state.manual_active ? '手动输出中' : '已连接 · 待机'
   return <section className="content-panel glass-panel analog-manual">
-    <div className="panel-heading"><div><h2>四路模拟量手动调节</h2><p className="stage-note">ZS-AO-4-RJ45 · {state?.config.mode === 'simulation' ? '模拟设备' : '真实设备'} · 4–20mA</p></div><span className={`status-chip ${fresh && state?.connected && !state.unconfirmed ? 'status-chip--ok' : 'status-chip--muted'}`}>{status}</span></div>
+    <div className="panel-heading"><div><h2>四路模拟量手动调节 <HelpTooltip label="手动电流说明">ZS-AO-4-RJ45，4–20mA。下发时保存当前通道偏移，设定值不代表实测电流；停止会写入所控制通道的故障电流，不会恢复压力跟随。</HelpTooltip></h2><span className="mode-badge">{state?.config.mode === 'simulation' ? '模拟设备' : '真实设备'}</span></div><span className={`status-chip ${fresh && state?.connected && !state.unconfirmed ? 'status-chip--ok' : 'status-chip--muted'}`}>{status}</span></div>
     {readError && <p className="inline-error" role="alert">{readError}</p>}{state?.error && <p className="inline-error" role="alert">{state.error}</p>}{error && <p className="inline-error" role="alert">{error}</p>}{message && <p className="stage-message" role="status">{message}</p>}
     {state?.enabled && <div className="analog-manual-switch"><span>停止压力跟随并写入故障电流后，可独立设置各通道。</span><button className="button button--quiet" disabled={!auth || !connected || !fresh || stopping} onClick={() => void act('/api/analog-output/stop', {}, '切换为手动调节', true)}>{stopping ? '切换中…' : '切换为手动调节'}</button></div>}
     <div className="analog-manual-grid">{[1, 2, 3, 4].map((channel, index) => {
@@ -96,7 +97,7 @@ export default function AnalogManualPanel({auth, connected}: {auth: boolean; con
       const update = (value: string) => setValues(prior => prior.map((v, i) => i === index ? value : v))
       return <article className="analog-manual-card" key={channel}>
         <h3>AO{channel}{state?.config.outputs[index]?.label && <small>{state.config.outputs[index].label}</small>}</h3>
-        <div className="analog-manual-readout"><strong>{fresh && !state?.unconfirmed && row ? `${row.current_ma.toFixed(3)} mA` : '—'}</strong><small>下发设定值 · 非实测电流</small>{fresh && row?.target_ma != null && !state?.unconfirmed && <small>目标 {row.target_ma.toFixed(3)}mA · 已用偏移 {(row.offset_ma ?? 0) >= 0 ? '+' : ''}{(row.offset_ma ?? 0).toFixed(3)}mA{row.calibration_limited ? ' · 补偿已限幅' : ''}</small>}</div>
+        <div className="analog-manual-readout"><strong>{fresh && !state?.unconfirmed && row ? `${row.current_ma.toFixed(3)} mA` : '—'}</strong><small>设定电流</small>{fresh && row?.target_ma != null && !state?.unconfirmed && <small>目标 {row.target_ma.toFixed(3)}mA · 已用偏移 {(row.offset_ma ?? 0) >= 0 ? '+' : ''}{(row.offset_ma ?? 0).toFixed(3)}mA{row.calibration_limited ? ' · 补偿已限幅' : ''}</small>}</div>
         <label className="field">目标电流（mA）<input aria-label={`AO${channel} 电流`} type="number" min={4} max={20} step={0.001} disabled={!auth || !!busy || stopping} value={values[index]} onChange={event => update(event.target.value)}/></label>
         <input className="analog-manual-slider" aria-label={`AO${channel} 电流滑块`} type="range" min={4} max={20} step={0.001} value={valid ? Number(values[index]) : 4} disabled={!auth || !!busy || stopping} onChange={event => update(event.target.value)}/>
         <div className="filter-buttons">{[4, 12, 20].map(value => <button className="button button--quiet" disabled={!auth || !!busy || stopping} key={value} onClick={() => update(String(value))}>{value}mA</button>)}</div>
@@ -111,6 +112,6 @@ export default function AnalogManualPanel({auth, connected}: {auth: boolean; con
       </article>
     })}</div>
     {reason && <p className="subtle-note" role="status">{reason}</p>}
-    <div className="stage-actions"><button className="button stage-stop" disabled={!stopAvailable || stopping} onClick={() => void act('/api/analog-output/stop', {}, '停止模拟量输出', true)}><Square size={15}/>{stopping ? '停止中…' : '停止模拟量输出'}</button><span className="stage-note">停止时写入各通道配置的故障电流；不会恢复压力跟随。</span></div>
+    <div className="stage-actions"><button className="button stage-stop" disabled={!stopAvailable || stopping} onClick={() => void act('/api/analog-output/stop', {}, '停止模拟量输出', true)}><Square size={15}/>{stopping ? '停止中…' : '停止模拟量输出'}</button></div>
   </section>
 }

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Power, RefreshCw, Square } from 'lucide-react'
 import type { HardwareConfig } from './HardwarePanel'
 import { ApiError, apiRequest, errorMessage } from './apiClient'
 import { outputTerminals } from './terminalDefinitions'
 import { Disclosure } from './Motion'
+import HelpTooltip from './HelpTooltip'
 
 export type TerminalSystemState = {
   mode: 'real' | 'simulation'; interlock: string; valve: string; pressure_ok: boolean
@@ -24,7 +25,7 @@ export default function TerminalWorkbench({ draft, saved, active, auth, connecte
   const identity = JSON.stringify([saved.mode, saved.io_device, saved.dam_serial_port, saved.dam_baudrate, saved.dam_unit_id, saved.open_output, saved.valve_open_on_energized])
   const [readIdentity, setReadIdentity] = useState('')
   const [awaitingRead, setAwaitingRead] = useState(false)
-  const [acknowledged, setAcknowledged] = useState(false), [timed, setTimed] = useState(false), [duration, setDuration] = useState('10')
+  const [timed, setTimed] = useState(false), [duration, setDuration] = useState('10')
   const [starting, setStarting] = useState<number | null>(null), [releasing, setReleasing] = useState<number | null>(null)
   const [uncertain, setUncertain] = useState<number[]>([]), [feedback, setFeedback] = useState<Record<number, { error?: string; message?: string }>>({})
   const [reload, setReload] = useState(0)
@@ -32,14 +33,6 @@ export default function TerminalWorkbench({ draft, saved, active, auth, connecte
   const mounted = useRef(true)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; onBusyChange(false) } }, [onBusyChange])
   const usable = active && auth && connected && saved.io_device === 'dam0808d'
-  const revoke = useCallback(() => setAcknowledged(false), [])
-  useEffect(() => {
-    // eslint-disable-next-line react/set-state-in-effect -- Revoke manual authority when the device, routing or freshness changes.
-    revoke()
-    const hide = () => { if (document.visibilityState !== 'visible') revoke() }
-    document.addEventListener('visibilitychange', hide)
-    return () => document.removeEventListener('visibilitychange', hide)
-  }, [active, auth, connected, online, fresh, routingDirty, saved.mode, saved.open_output, saved.valve_open_on_energized, saved.dam_serial_port, systemState?.interlock, revoke])
   useEffect(() => {
     if (!lastRead) return
     const timer = setTimeout(() => setFresh(false), Math.max(0, 3500 - (Date.now() - lastRead)))
@@ -80,7 +73,6 @@ export default function TerminalWorkbench({ draft, saved, active, auth, connecte
     } else {
       if (systemState.interlock !== 'disarmed' || relays?.interlock !== 'disarmed') return '普通输出仅在联锁未启用时允许手动吸合'
       if (!systemState.history_recording) return '审计记录不可用，禁止手动吸合'
-      if (!acknowledged) return '请先勾选普通输出手动控制确认'
       if (timed && (!Number.isFinite(Number(duration)) || Number(duration) < 1 || Number(duration) > 60)) return '自动释放时间必须为 1–60 秒'
     }
     return ''
@@ -114,7 +106,6 @@ export default function TerminalWorkbench({ draft, saved, active, auth, connecte
         const ambiguous = !(error instanceof ApiError) || error.kind !== 'http' || (error.status ?? 500) >= 500
         if (ambiguous) setUncertain(prior => [...new Set([...prior, channel])])
         setFeedback(prior => ({ ...prior, [channel]: { error: `${errorMessage(error, '输出控制失败')}${ambiguous ? ' 请勿重复吸合；先释放此输出或关闭插板阀，并核对接线与反馈。' : ''}` } }))
-        revoke()
       }
     } finally {
       generation.current++
@@ -128,13 +119,12 @@ export default function TerminalWorkbench({ draft, saved, active, auth, connecte
   }
   const editable = auth && connected && online && !configurationBusy && starting === null && releasing === null
   return <div className="terminal-workbench">
-    <div className="panel-heading"><div><h2>DAM0808D 端子工作台</h2><p>功能分配直接应用于现有阀门映射；普通输出接入实际继电器控制。</p></div><span className="mode-badge" data-mode={saved.mode}>{saved.mode === 'simulation' ? '模拟 I/O' : '真实 DAM'}</span></div>
+    <div className="panel-heading"><div><h2>DAM0808D 端子工作台 <HelpTooltip label="端子控制说明">功能分配保存后生效。普通继电器可直接控制；阀控通道开阀仍需满足压力联锁和阀位条件。</HelpTooltip></h2></div><span className="mode-badge" data-mode={saved.mode}>{saved.mode === 'simulation' ? '模拟 I/O' : '真实 DAM'}</span></div>
     <nav className="terminal-section-links" aria-label="端子工作台区域"><a href="#dam-output-controls">输出控制 · 8 路</a><a href="#dam-input-assignments">输入分配 · 8 路</a><a href="#dam-physical-wiring">物理接线图</a></nav>
     {saved.io_device !== 'dam0808d' && <p className="inline-error">当前生效的 I/O 为 ADAM6050；DAM 操作已禁用。请到“设备连接”选择并保存 DAM0808D。</p>}
-    <div className="terminal-assignment-notice"><b>{routingDirty ? '功能或连接更改尚未生效' : `当前阀控：OUT${saved.open_output + 1} / DO${saved.open_output} · 关闭反馈 IN${saved.valve_closed_di + 1}${saved.valve_open_di === null ? ' · 未安装打开反馈' : ` · 打开反馈 IN${saved.valve_open_di + 1}`}`}</b><p>选择功能后须保存才生效。保存功能分配会关阀、清除手动输出并撤销受影响的现场验证；已启用联锁将锁存。</p>{mappingActions}</div>
+    <div className="terminal-assignment-notice"><b>{routingDirty ? '功能或连接更改尚未生效' : `当前阀控：OUT${saved.open_output + 1} / DO${saved.open_output} · 关闭反馈 IN${saved.valve_closed_di + 1}${saved.valve_open_di === null ? ' · 未安装打开反馈' : ` · 打开反馈 IN${saved.valve_open_di + 1}`}`}</b><HelpTooltip label="功能分配保存说明">保存功能分配时关阀并清除手动输出；已启用联锁将锁存。</HelpTooltip>{mappingActions}</div>
     <div className="terminal-manual-toolbar">
-      <label><input type="checkbox" checked={acknowledged} disabled={!usable || !online || configurationBusy || routingDirty || systemState?.interlock !== 'disarmed'} onChange={event => setAcknowledged(event.target.checked)}/>启用普通输出手动控制：已核对接线、负载和线圈电压</label>
-      <p>普通继电器手动吸合绕过压力保护，仅在联锁未启用时可用。阀控通道使用正常联锁开/关阀接口。</p>
+
       <div><label><input type="checkbox" checked={timed} onChange={event => setTimed(event.target.checked)}/>普通输出定时释放</label>{timed && <label className="field">自动释放时间（秒）<input type="number" aria-label="普通输出自动释放秒数" min={1} max={60} value={duration} onChange={event => setDuration(event.target.value)}/></label>}<button className="button button--quiet" onClick={() => setReload(value => value + 1)} disabled={!usable}><RefreshCw size={14}/>刷新输出状态</button></div>
     </div>
     {usable && readError && <p className="inline-error" role="alert">{readError} 输出显示可能已过期，吸合暂停；可尝试释放当前输出。</p>}
@@ -162,7 +152,7 @@ export default function TerminalWorkbench({ draft, saved, active, auth, connecte
         {feedback[index]?.error && <p className="inline-error" role="alert">{feedback[index].error}</p>}{feedback[index]?.message && <p className="hardware-message" role="status">{feedback[index].message}</p>}
       </article>
     })}</div>
-    <h3 id="dam-input-assignments">输入监测与分配 · IN1–IN8</h3><p className="terminal-help">输入端读取外部电平，不能像继电器一样输出。选择功能会把对应反馈从原输入移到当前输入；关闭到位为必需项，请先分配到其他输入再取消原分配。</p>
+    <h3 id="dam-input-assignments">输入监测与分配 · IN1–IN8</h3><HelpTooltip label="端子操作说明">输入端读取外部电平，不能像继电器一样输出。选择功能会把对应反馈从原输入移到当前输入；关闭到位为必需项，请先分配到其他输入再取消原分配。</HelpTooltip>
     <div className="hardware-table-wrap"><table className="hardware-table terminal-input-table"><thead><tr><th>输入 / 端子</th><th>实际电平</th><th>控制功能</th><th>有效电平 / 反馈</th><th>名称</th><th>用途备注</th></tr></thead><tbody>{Array.from({ length: 8 }, (_, index) => {
       const role = draft.valve_closed_di === index ? 'closed' : draft.valve_open_di === index ? 'open' : 'monitor'
       const polarity = role === 'closed' ? draft.valve_closed_active_high : draft.valve_open_active_high

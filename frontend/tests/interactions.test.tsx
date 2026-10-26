@@ -245,13 +245,12 @@ test('all five pages render without exceptions',async()=>{
   }
 })
 
-test('debug relay controls require acknowledgement and send the selected channel',async()=>{
+test('debug relay controls need no acknowledgement and send the selected channel',async()=>{
   await click(byText('Debug'))
   assert.ok(container.textContent?.includes('DAM0808D 手动控制'))
   const on=byLabel('开启 OUT1')
-  assert.equal(on.disabled,true)
-  const checkbox=[...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(x=>x.parentElement?.textContent?.includes('已确认设备可以动作'))!
-  await click(checkbox)
+  assert.equal(on.disabled,false)
+  assert.equal(container.textContent?.includes('已确认设备可以动作'),false)
   assert.equal(byLabel('开启 OUT1').disabled,false)
   await click(byLabel('开启 OUT1'))
   assert.deepEqual(debugCalls,[{channel:0,enabled:true,duration_s:0}])
@@ -264,10 +263,9 @@ test('debug timed shutoff is opt-in',async()=>{
   await click(byText('Debug'))
   const checkboxes=[...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
   const timer=checkboxes.find(x=>x.parentElement?.textContent?.includes('定时关闭'))!
-  const confirm=checkboxes.find(x=>x.parentElement?.textContent?.includes('已确认设备可以动作'))!
   assert.equal(timer.checked,false)
   assert.equal(container.querySelector<HTMLInputElement>('input[type="number"]')?.disabled,true)
-  await click(timer);await click(confirm)
+  await click(timer)
   const duration=container.querySelector<HTMLInputElement>('input[type="number"]')!
   assert.equal(duration.disabled,false)
   await click(byLabel('开启 OUT1'))
@@ -278,7 +276,7 @@ test('debug timed shutoff is opt-in',async()=>{
   assert.equal(debugCalls.length,1)
 })
 
-test('reverse valve debug requires acknowledgement for release-open while energize-close remains available',async()=>{
+test('reverse valve debug directly requests release-open while energize-close remains available',async()=>{
   const original=globalThis.fetch
   globalThis.fetch=async(url,options)=>{
     const response=await original(url,options)
@@ -287,12 +285,10 @@ test('reverse valve debug requires acknowledgement for release-open while energi
   }
   await click(byText('Debug'))
   assert.equal(byLabel('开启 OUT1').disabled,false)
-  assert.equal(byLabel('关闭 OUT1').disabled,true)
+  assert.equal(byLabel('关闭 OUT1').disabled,false)
   assert.ok(container.textContent?.includes('吸合（关阀）'))
   assert.ok(container.textContent?.includes('释放（开阀）'))
   await click(byLabel('开启 OUT1'))
-  const acknowledgement=[...container.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find(node=>node.parentElement?.textContent?.includes('已确认设备可以动作'))!
-  await click(acknowledgement)
   assert.equal(byLabel('关闭 OUT1').disabled,false)
   await click(byLabel('关闭 OUT1'))
   await act(async()=>Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify({...status,interlock:'fault'})}))
@@ -354,7 +350,7 @@ test('hardware navigation owns connections and valve mapping',async()=>{
   const select=[...container.querySelectorAll<HTMLSelectElement>('select')].find(x=>x.querySelector('option[value="usb"]'))!
   await act(async()=>{select.value='usb';select.dispatchEvent(new dom.window.Event('change',{bubbles:true}))})
   assert.ok(container.textContent?.includes('真空规波特率'))
-  assert.ok(byText('连接真空规'))
+  assert.ok(byText('应用并重新连接真空规'))
   await click(byText('插板阀映射'))
   assert.ok(container.textContent?.includes('关闭到位输入'))
   assert.ok(container.textContent?.includes('打开到位输入'))

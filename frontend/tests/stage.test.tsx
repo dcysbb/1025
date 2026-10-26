@@ -45,6 +45,7 @@ beforeEach(() => {
         if (presentation.card_order) state.config.card_order = presentation.card_order
         if (presentation.channel_names) state.config.channel_names = {...state.config.channel_names, ...presentation.channel_names}
       }
+      if (path.endsWith('/apply-connect')) return new Response(JSON.stringify({ok:!rejectConnection,config_saved:!rejectConnection,connected:!rejectConnection,phase:rejectConnection ? 'connect':'complete',error:rejectConnection ? '未找到设备':null,state}))
       if (path.endsWith('/connect') && rejectConnection) return new Response(JSON.stringify({ detail: '未找到设备' }), { status: 409 })
     }
     return new Response(JSON.stringify(path.startsWith('/api/events') ? {events: movementEvents} : state))
@@ -84,7 +85,7 @@ test('each axis has one combined card for jog, output, Home, Optimize, quick par
     const card = workbench.querySelector(`[aria-label="${axis} 轴 CH${channel} 控制卡片"]`)!
     for (const label of [`${axis} 轴正向移动`, `${axis} 轴反向移动`, `${axis} 轴启用输出`, `${axis} 轴禁用输出`, `${axis} 轴 Home · 回零`, `${axis} 轴 Optimize · 性能优化`]) assert.ok(card.querySelector(`[aria-label="${label}"]`), label)
     assert.equal(card.querySelectorAll('.stage-axis-details').length, 1)
-    assert.ok(card.querySelector('.stage-axis-details')?.textContent?.includes(`${channel * 100}非实测位置`))
+    assert.ok(card.querySelector('.stage-axis-details')?.textContent?.includes(`${channel * 100}`))
   }
   assert.deepEqual(writes, [])
 })
@@ -192,7 +193,7 @@ test('failed real connection remains real and does not silently simulate', async
   state.channels = []
   rejectConnection = true
   await render(true, true)
-  await act(async () => { button('连接控制器').click(); await new Promise(r => setTimeout(r, 0)) })
+  await act(async () => { button('应用并连接控制器').click(); await new Promise(r => setTimeout(r, 0)) })
   assert.ok(container.textContent?.includes('未找到设备'))
   assert.equal(container.querySelector('[aria-label="X 轴正向移动"]'), null)
   assert.equal(container.querySelector('.stage-simulation'), null)
@@ -310,7 +311,7 @@ for (const axis of ['x', 'y', 'z']) test(`${axis} Home directly uses its own inl
   await act(async () => {select.value = '1'; select.dispatchEvent(new dom.window.Event('change', {bubbles:true}))})
   await act(async () => {button(`${axis.toUpperCase()} 轴 Home · 回零`).click(); button(`${axis.toUpperCase()} 轴 Home · 回零`).click(); await new Promise(r=>setTimeout(r,0))})
   assert.equal(document.querySelector('[role="dialog"]'), null)
-  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis,operation:'home',confirmed:true,home_direction:1}}])
+  assert.deepEqual(writes, [{path:'/api/stage/action',body:{axis,operation:'home',home_direction:1}}])
 })
 
 for (const axis of ['x', 'y', 'z']) test(`${axis} optimization needs its own output enabled and acts without a dialog`, async () => {
@@ -324,7 +325,7 @@ for (const axis of ['x', 'y', 'z']) test(`${axis} optimization needs its own out
   for (const other of ['x','y','z'].filter(value=>value!==axis)) assert.equal(button(`${other.toUpperCase()} 轴 Optimize · 性能优化`).disabled,true)
   await act(async () => {button(`${axis.toUpperCase()} 轴 Optimize · 性能优化`).click();await new Promise(r=>setTimeout(r,0))})
   assert.equal(document.querySelector('[role="dialog"]'),null)
-  assert.deepEqual(writes,[{path:'/api/stage/action',body:{axis,operation:'optimize',confirmed:true}}])
+  assert.deepEqual(writes,[{path:'/api/stage/action',body:{axis,operation:'optimize'}}])
 })
 
 test('parameter selection cannot retarget a direct channel Home action', async () => {
@@ -335,7 +336,7 @@ test('parameter selection cannot retarget a direct channel Home action', async (
   const select = container.querySelector<HTMLSelectElement>('[aria-label="驱动参数通道"]')!
   await act(async () => {select.value='z';select.dispatchEvent(new dom.window.Event('change',{bubbles:true}))})
   await act(async () => button('Y 轴 Home · 回零').click())
-  assert.deepEqual(writes,[{path:'/api/stage/action',body:{axis:'y',operation:'home',confirmed:true,home_direction:-1}}])
+  assert.deepEqual(writes,[{path:'/api/stage/action',body:{axis:'y',operation:'home',home_direction:-1}}])
 })
 
 test('changing mapping resets inline direction drafts and new actions use the current mapping', async () => {
@@ -350,7 +351,7 @@ test('changing mapping resets inline direction drafts and new actions use the cu
   assert.equal(container.querySelector<HTMLSelectElement>('[aria-label="X 轴回零方向"]')!.value,'-1')
   assert.deepEqual(writes,[])
   await act(async () => button('X 轴 Home · 回零').click())
-  assert.deepEqual(writes,[{path:'/api/stage/action',body:{axis:'x',operation:'home',confirmed:true,home_direction:-1}}])
+  assert.deepEqual(writes,[{path:'/api/stage/action',body:{axis:'x',operation:'home',home_direction:-1}}])
 })
 
 for (const axis of ['x', 'y', 'z']) test(`${axis} output controls send only their own axis`, async () => {
@@ -620,27 +621,22 @@ test('step presets are editable, validated and saved server-side while connected
   assert.ok(container.textContent?.includes('快捷步数不能重复'))
 })
 
-test('motion unlock requires the stationary acknowledgement and never enables output', async () => {
-  state.connected = false
-  state.error = '通信超时，停止未确认'
-  state.motion_pending = true
+test('motion recovery acts directly without acknowledgement and never enables output', async () => {
+  state.connected=false;state.error='通信超时，停止未确认';state.motion_pending=true
   await render()
-  await act(async () => { button('连接诊断与恢复').click(); button('解除运动锁定').click() })
-  assert.equal(button('解除运动锁定').disabled,true)
-  await act(async () => { ([...container.querySelectorAll('label')].find(label=>label.textContent?.includes('我已现场确认位移台静止'))!.querySelector('input') as HTMLInputElement).click() })
-  await act(async () => { button('解除运动锁定').click(); await new Promise(r => setTimeout(r,0)) })
-  assert.deepEqual(writes,[{path:'/api/stage/recover',body:{confirmed_stationary:true}}])
+  await act(async()=>{button('连接诊断与恢复').click()})
+  assert.equal(button('停止并恢复').disabled,false)
+  await act(async()=>{button('停止并恢复').click();await new Promise(r=>setTimeout(r,0))})
+  assert.deepEqual(writes,[{path:'/api/stage/recover',body:{}}])
+  assert.equal(container.textContent?.includes('我已现场确认'),false)
 })
 
-test('hardware connection directly connects with a previous motion lock and no confirmation dialog', async () => {
-  state.error = '上次停止未确认'
-  state.motion_pending = true
-  state.channels = []
-  await render(true, true)
-  assert.equal(button('连接控制器').disabled, false)
-  await act(async () => { button('连接控制器').click(); button('连接控制器').click(); await new Promise(r => setTimeout(r,0)) })
-  assert.deepEqual(writes, [{path:'/api/stage/connect',body:{}}])
-  assert.equal(document.querySelector('[role="dialog"]'), null)
+test('hardware connection applies configuration with a previous motion lock without a dialog', async()=>{
+  state.error='上次停止未确认';state.motion_pending=true;state.channels=[]
+  await render(true,true)
+  await act(async()=>{button('应用并连接控制器').click();button('应用并连接控制器').click();await new Promise(r=>setTimeout(r,0))})
+  assert.deepEqual(writes,[{path:'/api/devices/stage/apply-connect',body:{config:{}}}])
+  assert.equal(document.querySelector('[role="dialog"]'),null)
 })
 
 test('stage page also allows direct connection despite a previous error without unlocking motion', async () => {
@@ -652,8 +648,8 @@ test('stage page also allows direct connection despite a previous error without 
   assert.deepEqual(writes, [{path:'/api/stage/connect',body:{}}])
   assert.equal(button('X 轴正向移动').disabled, true)
   assert.equal(document.querySelector('[role="dialog"]'), null)
-  await act(async () => { button('连接诊断与恢复').click(); button('解除运动锁定').click() })
-  assert.equal(button('解除运动锁定').disabled, true)
+  await act(async () => { button('连接诊断与恢复').click(); button('停止并恢复').click() })
+  assert.equal(button('停止并恢复').disabled, false)
 })
 
 test('read-only users cannot enable, home, optimize or change drive parameters', async () => {

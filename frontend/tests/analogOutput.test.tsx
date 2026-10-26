@@ -24,7 +24,12 @@ beforeEach(() => {
     if (options?.method !== 'GET') {
       const body = JSON.parse(String(options?.body))
       writes.push({path, body})
-      if (path.endsWith('/config')) state.config = body
+      if (path.endsWith('/config')) {
+        const {outputs,...fields}=body
+        Object.assign(state.config,fields)
+        if(outputs) for(const {channel,...fields} of outputs) Object.assign((state.config.outputs as object[])[channel-1],fields)
+      }
+      if(path.endsWith('/apply-connect')) {Object.assign(state.config,body.config);state.connected=true;return new Response(JSON.stringify({ok:true,config_saved:true,connected:true,phase:'complete',state}))}
       if (path.endsWith('/connect')) state.connected = true
       if (path.endsWith('/enable')) state.enabled = true
     }
@@ -42,12 +47,12 @@ async function fill(label: string, value: string) {
 test('opening analog settings enumerates mappings and never connects or enables', async () => {
   await render()
   assert.equal(document.querySelectorAll('.analog-mapping').length, 4)
-  assert.ok(document.body.textContent?.includes('起始地址不一致'))
+  assert.ok(document.body.textContent?.includes('输出寄存器尚未设置'))
   assert.equal(button('开始实时输出').disabled, true)
   assert.deepEqual(writes, [])
 })
 test('saving analog settings has its own endpoint and never enables output', async () => {
-  await render(); await fill('模拟量模块 IP 地址', '192.168.0.7')
+  await render(); await fill('AO1 校准偏移', '0.125')
   assert.equal(dirty, true)
   await act(async () => {button('保存模拟量设置').click(); await new Promise(r => setTimeout(r, 5))})
   assert.equal(writes.length, 1); assert.equal(writes[0].path, '/api/analog-output/config')
@@ -55,14 +60,14 @@ test('saving analog settings has its own endpoint and never enables output', asy
 })
 test('connect is independent and does not send an enable or current command', async () => {
   await render()
-  await act(async () => {button('连接模拟量模块').click(); await new Promise(r => setTimeout(r, 5))})
-  assert.deepEqual(writes, [{path: '/api/analog-output/connect', body: {}}])
+  await act(async () => {button('应用并连接模拟量模块').click(); await new Promise(r => setTimeout(r, 5))})
+  assert.deepEqual(writes, [{path: '/api/devices/analog/apply-connect', body: {config:{}}}])
   assert.equal(button('开始实时输出').disabled, true)
 })
 test('read-only users cannot save, connect or enable output', async () => {
   await render(false)
   assert.equal(button('保存模拟量设置').disabled, true)
-  assert.equal(button('连接模拟量模块').disabled, true)
+  assert.equal(button('应用并连接模拟量模块').disabled, true)
   assert.equal(button('开始实时输出').disabled, true)
 })
 
@@ -82,7 +87,7 @@ test('hardware settings show manual output and require stopping it before changi
   assert.ok(document.body.textContent?.includes('手动输出中'))
   assert.equal(button('开始实时输出').disabled, true)
   assert.equal(button('停止实时输出').disabled, false)
-  assert.equal(document.querySelector<HTMLFieldSetElement>('fieldset')!.disabled, true)
+  assert.equal(document.querySelector<HTMLFieldSetElement>('.analog-mapping')!.disabled, true)
 })
 
 test('hardware settings preserve signed calibration input and reject invalid precision before saving', async () => {
@@ -95,7 +100,7 @@ test('hardware settings preserve signed calibration input and reject invalid pre
   }
   await act(async () => {Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value')!.set!.call(input,'-0.125');input.dispatchEvent(new dom.window.Event('input',{bubbles:true}))})
   await act(async () => {button('保存模拟量设置').click();await new Promise(r=>setTimeout(r,5))})
-  assert.equal((writes[0].body as {outputs:{offset_ma:string}[]}).outputs[2].offset_ma,'-0.125')
+  assert.equal((writes[0].body as {outputs:{offset_ma:string}[]}).outputs[0].offset_ma,'-0.125')
 })
 
 

@@ -144,3 +144,46 @@ class LocalAccess(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException):
                 await routes['/api/stage/parameters/{axis}','PUT'].endpoint('x', StageParameters(forward_amplitude=100,reverse_amplitude=100,step_rate=5000,acceleration=1000), request, 'test')
             parameters.assert_not_called()
+
+
+    async def test_connection_routes_require_operator_and_origin(self):
+        from app.device_connections import ConnectionChange
+        routes = {route.path: route for route in self.main.app.routes if hasattr(route, 'dependant')}
+        for path in ('/api/devices/{device}/apply-connect', '/api/devices/{device}/cancel', '/api/devices/{device}/disconnect'):
+            self.assertIn(self.main.require_operator, [dep.call for dep in routes[path].dependant.dependencies])
+        endpoint = routes['/api/devices/{device}/apply-connect'].endpoint
+        with patch.object(self.main.CONNECTIONS, 'apply', new=AsyncMock()) as apply:
+            for origin in (None, 'http://example.com'):
+                with self.assertRaises(HTTPException):
+                    await endpoint('analog', ConnectionChange(config={}), self.request(origin=origin), 'test')
+            apply.assert_not_awaited()
+        route = next(route for route in self.main.app.routes if getattr(route,'path',None)=='/api/analog-output/config' and 'PATCH' in route.methods)
+        self.assertIn(self.main.require_operator,[dep.call for dep in route.dependant.dependencies])
+        with patch.object(self.main.ANALOG, 'patch_config', new=AsyncMock()) as update:
+            with self.assertRaises(HTTPException):
+                await route.endpoint({},self.request(),'test')
+            update.assert_not_awaited()
+
+    async def test_pending_connection_blocks_old_writes_and_only_valid_stops_cancel(self):
+        import asyncio
+        from starlette.responses import JSONResponse
+        event = asyncio.Event()
+        self.main.CONNECTIONS.pending['analog'] = event
+        def request(path, origin='http://127.0.0.1:8770'):
+            scope = dict(self.request(origin=origin).scope)
+            scope['path'] = path
+            return Request(scope)
+        try:
+            next_call = AsyncMock(return_value=JSONResponse({}))
+            response = await self.main.security_headers(request('/api/debug/analog-output'),next_call)
+            self.assertEqual(response.status_code,409)
+            next_call.assert_not_awaited()
+            response = await self.main.security_headers(request('/api/analog-output/stop','http://evil.invalid'),next_call)
+            self.assertEqual(response.status_code,403)
+            self.assertFalse(event.is_set())
+            response = await self.main.security_headers(request('/api/analog-output/stop'),next_call)
+            self.assertEqual(response.status_code,200)
+            self.assertTrue(event.is_set())
+            next_call.assert_awaited_once()
+        finally:
+            self.main.CONNECTIONS.pending.pop('analog',None)

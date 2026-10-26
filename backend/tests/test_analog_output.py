@@ -154,10 +154,13 @@ class AnalogTests(unittest.IsolatedAsyncioTestCase):
         self.controller.enabled = True
         with self.assertRaisesRegex(AnalogError, '压力跟随'): await self.controller.manual(body, 'test')
         self.controller.enabled = False
-        for update in ({'register_base': None}, {'current_output_confirmed': False}):
+        for update in ({'register_base': None},):
             self.controller.config = self.configured().model_copy(update=update)
             with self.assertRaisesRegex(AnalogError, '核对'): await self.controller.manual(body, 'test')
         self.driver.write_current.assert_not_awaited()
+        self.controller.config = self.configured().model_copy(update={'current_output_confirmed': False})
+        await self.controller.manual(body, 'test')
+        self.driver.write_current.assert_awaited_once_with(10, 12)
 
     async def test_manual_failure_retains_exact_recovery_channels_including_unmapped_output(self):
         self.controller.config = self.configured()

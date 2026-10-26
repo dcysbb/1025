@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .drivers.zs_ao import ZsAnalogClient
 
@@ -47,7 +47,7 @@ class AnalogConfig(BaseModel):
     host: str = ""
     port: int = Field(default=8234, ge=1, le=65535, strict=True)
     unit_id: int = Field(default=1, ge=1, le=255, strict=True)
-    register_base: Literal[0, 10] | None = None
+    register_base: Literal[0, 10] | None = 10
     current_output_confirmed: bool = False
     update_interval_s: float = Field(default=0.5, ge=0.2, le=10)
     outputs: list[AnalogMapping] = Field(default_factory=lambda: [AnalogMapping() for _ in range(4)])
@@ -55,7 +55,10 @@ class AnalogConfig(BaseModel):
     @model_validator(mode="after")
     def valid_outputs(self):
         if self.host:
-            self.host = str(ipaddress.IPv4Address(self.host))
+            try:
+                self.host = str(ipaddress.IPv4Address(self.host))
+            except ValueError as exc:
+                raise ValueError("模拟量模块 IP 地址须为有效 IPv4 地址") from exc
         if len(self.outputs) != 4:
             raise ValueError("ZS-AO-4-RJ45 必须配置四路输出")
         return self
@@ -102,7 +105,8 @@ class AnalogOutput:
         self.error = None
         try:
             if self.path.exists():
-                self.config = AnalogConfig.model_validate_json(self.path.read_text(encoding="utf-8"))
+                values = json.loads(self.path.read_text(encoding="utf-8"))
+                self.config = AnalogConfig.model_validate({"register_base": None, **values})
         except (OSError, ValueError) as exc:
             self.error = f"模拟量配置读取失败：{exc}"
         self.driver = None
@@ -113,7 +117,7 @@ class AnalogOutput:
         if self.uncertain:
             try:
                 record = json.loads(self.journal.read_text(encoding="utf-8"))
-                self.config = AnalogConfig.model_validate(record["config"])
+                self.config = AnalogConfig.model_validate({"register_base": None, **record["config"]})
                 channels = record.get("manual_channels", [])
                 if not isinstance(channels, list) or any(type(ch) is not int or not 1 <= ch <= 4 for ch in channels):
                     raise ValueError("手动输出恢复通道无效")
@@ -144,18 +148,44 @@ class AnalogOutput:
         temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
         temp.replace(path)
 
+    @staticmethod
+    def merged_config(config, changes):
+        values = config.model_dump()
+        changes = dict(changes)
+        if "outputs" in changes:
+            outputs = changes.pop("outputs")
+            if not isinstance(outputs, list):
+                raise ValueError("outputs 必须是带 channel 的通道修改列表")
+            seen = set()
+            for row in outputs:
+                if not isinstance(row, dict):
+                    raise ValueError("输出修改必须包含 channel")
+                channel = row.get("channel")
+                if type(channel) is not int or not 1 <= channel <= 4 or channel in seen:
+                    raise ValueError("输出通道须为不重复的 1–4")
+                seen.add(channel)
+                values["outputs"][channel - 1].update({key: value for key, value in row.items() if key != "channel"})
+        return AnalogConfig.model_validate({**values, **changes})
+
+    def _configure_locked(self, config, actor):
+        if self.enabled or self.uncertain or self._manual_channels or self._stopping:
+            raise AnalogError("请先停止输出并确认故障电流已写入，再修改配置")
+        if self.driver and any(getattr(config, key) != getattr(self.config, key) for key in ("mode", "host", "port", "unit_id", "register_base")):
+            raise AnalogError("请先断开模拟量模块，再修改连接参数")
+        self._save(self.path, config.model_dump())
+        self.config = config
+        self.error = None
+        self.rows = []
+        self.event("analog_config", "info", "模拟量配置已保存，输出未启用", actor)
+        return self.snapshot()
+
     async def configure(self, config, actor):
         async with self._lock:
-            if self.enabled or self.uncertain or self._manual_channels or self._stopping:
-                raise AnalogError("请先停止输出并确认故障电流已写入，再修改配置")
-            if self.driver and any(getattr(config, key) != getattr(self.config, key) for key in ("mode", "host", "port", "unit_id", "register_base")):
-                raise AnalogError("请先断开模拟量模块，再修改连接参数")
-            self._save(self.path, config.model_dump())
-            self.config = config
-            self.error = None
-            self.rows = []
-            self.event("analog_config", "info", "模拟量连接与压力映射已保存，输出未启用", actor)
-            return self.snapshot()
+            return self._configure_locked(config, actor)
+
+    async def patch_config(self, changes, actor):
+        async with self._lock:
+            return self._configure_locked(self.merged_config(self.config, changes), actor)
 
     async def connect(self, actor):
         async with self._lock:
@@ -205,8 +235,6 @@ class AnalogOutput:
                 raise AnalogError("请先连接模块，并处理上次输出未确认状态")
             if self.config.register_base is None:
                 raise AnalogError("厂家寄存器表与示例不一致，请先核对并设置起始地址")
-            if not self.config.current_output_confirmed:
-                raise AnalogError("请确认现场模块为 4–20mA 电流输出型号及接线")
             if not any(row.enabled for row in self.config.outputs):
                 raise AnalogError("请至少启用一路压力映射")
             if self.config.mode == "real" and self.pressure_status()["mode"] != "real":
@@ -231,7 +259,7 @@ class AnalogOutput:
                 raise AnalogError("请先停止压力跟随，再手动调节电流")
             if not self.connected:
                 raise AnalogError("模拟量模块未连接，请先在硬件连接中连接模块")
-            if self.config.register_base is None or not self.config.current_output_confirmed:
+            if self.config.register_base is None:
                 raise AnalogError("请先在硬件连接中核对输出寄存器与 4–20mA 型号及接线")
             if body.offset_ma is not None and body.offset_ma != self.config.outputs[body.channel - 1].offset_ma:
                 config = self.config.model_copy(deep=True)
@@ -371,6 +399,18 @@ def install_analog_routes(app, controller, require_read_access, require_operator
         verify_origin(request)
         try:
             return await controller.configure(body, actor)
+        except (AnalogError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.patch("/api/analog-output/config")
+    async def patch_config(body: dict, request: Request, actor: str = Depends(require_operator)):
+        verify_origin(request)
+        try:
+            return await controller.patch_config(body, actor)
+        except ValidationError as exc:
+            raise HTTPException(422, exc.errors(include_url=False, include_context=False, include_input=False)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         except (AnalogError, OSError) as exc:
             raise HTTPException(409, str(exc)) from exc
 

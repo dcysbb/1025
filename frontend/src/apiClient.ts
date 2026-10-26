@@ -54,7 +54,7 @@ function validationReason(detail: unknown) {
   if (!Array.isArray(detail)) return ''
   return detail.slice(0, 5).map(issue => {
     if (!issue || typeof issue !== 'object') return ''
-    const fields = Array.isArray(issue.loc) ? issue.loc.filter((part: unknown) => part !== 'body').join('.') : '输入字段'
+    const fields = (Array.isArray(issue.loc) ? issue.loc.filter((part: unknown) => part !== 'body').join('.') : '') || '输入字段'
     return `${fields}：${typeof issue.msg === 'string' ? issue.msg : '取值不符合要求'}`
   }).filter(Boolean).join('；')
 }

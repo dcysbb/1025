@@ -83,7 +83,7 @@ test('permissions, missing register and unconfirmed state disable manual output 
   state.config.register_base = null
   await render()
   assert.equal(button('下发 AO1').disabled, true)
-  assert.ok(document.body.textContent?.includes('核对输出寄存器'))
+  assert.ok(document.body.textContent?.includes('设置模拟量输出寄存器'))
 })
 test('request failure explains uncertainty and does not automatically retry a write', async () => {
   await render()

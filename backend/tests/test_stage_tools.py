@@ -38,9 +38,7 @@ class StageToolsTests(unittest.IsolatedAsyncioTestCase):
         driver = self.stage.driver
         driver.counts = {1: 12, 2: 34, 3: 56}
         driver.move = Mock()
-        with self.assertRaises(StageError):
-            await self.stage.control(StageAction(axis='y', operation='zero'), 'test')
-        await self.stage.control(StageAction(axis='y', operation='zero', confirmed=True), 'test')
+        await self.stage.control(StageAction(axis='y', operation='zero'), 'test')
         self.assertEqual(driver.counts, {1: 12, 2: 0, 3: 56})
         driver.move.assert_not_called()
 
@@ -71,7 +69,7 @@ class StageToolsTests(unittest.IsolatedAsyncioTestCase):
         restarted = StageController(Path(self.temp.name), Mock())
         self.assertTrue(restarted.motion_pending)
         self.assertTrue(restarted.snapshot()['diagnostics']['recovery_required'])
-        for action in (restarted.configure(StageConfig(mode='simulation'), 'test'), restarted.disconnect('test'), restarted.recover(False, 'test')):
+        for action in (restarted.configure(StageConfig(mode='simulation'), 'test'), restarted.disconnect('test')):
             with self.assertRaises(StageError):
                 await action
         journal = restarted.recovery_path.read_bytes()
@@ -82,7 +80,7 @@ class StageToolsTests(unittest.IsolatedAsyncioTestCase):
         await restarted._poll_once()
         with self.assertRaises(StageError):
             await restarted.move(StageMove(axis='x', direction=1, steps=1), 'test')
-        await restarted.recover(True, 'test')
+        await restarted.recover(False, 'test')
         self.assertFalse(restarted.recovery_path.exists())
         self.assertFalse(restarted.motion_pending)
         await restarted.disconnect('test')
@@ -120,7 +118,7 @@ class StageToolsTests(unittest.IsolatedAsyncioTestCase):
         await self.stage.recover(True, 'test')
         self.assertIs(self.stage.driver, driver)
         driver.close.assert_not_called()
-        driver.stop.assert_not_called()
+        driver.stop.assert_called_once()
         self.assertFalse(self.stage.snapshot()['diagnostics']['motion_locked'])
 
     async def test_failed_direct_reconnect_keeps_journal_and_releases_failed_driver(self):
@@ -172,7 +170,7 @@ class StageToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.stage.connected)
         self.assertTrue(self.stage.snapshot()['diagnostics']['motion_locked'])
         self.assertEqual(self.stage.recovery_path.read_bytes(), journal)
-        self.stage.driver.stop.assert_not_called()
+        self.stage.driver.stop.assert_called_once()
 
     async def test_parallel_connection_is_rejected_without_queuing_moves_or_configuration(self):
         await self.stage.disconnect('test')
@@ -241,9 +239,7 @@ class StageToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('stopped', results)
         self.assertNotIn('completed', results)
 
-    async def test_optimize_requires_confirmation_and_enable_then_stop_cancels_it(self):
-        with self.assertRaises(StageError):
-            await self.stage.control(StageAction(axis='x', operation='optimize'), 'test')
+    async def test_optimize_requires_enabled_output_without_manual_confirmation_and_stop_cancels_it(self):
         self.stage.driver.enabled[1] = False
         with self.assertRaisesRegex(StageError, '先启用'):
             await self.stage.control(StageAction(axis='x', operation='optimize', confirmed=True), 'test')
@@ -333,10 +329,8 @@ class StageToolsTests(unittest.IsolatedAsyncioTestCase):
             await self.stage._poll_once()
         self.assertFalse(self.stage.connected)
         self.assertTrue(self.stage.snapshot()['diagnostics']['recovery_required'])
-        with self.assertRaises(StageError):
-            await self.stage.recover(False, 'test')
         self.stage.driver.close = Mock(side_effect=OSError('dead session'))
-        result = await self.stage.recover(True, 'test')
+        result = await self.stage.recover(False, 'test')
         self.assertTrue(result['connected'])
         self.assertFalse(result['motion_pending'])
         self.assertEqual(self.stage.driver.counts[1], 0)

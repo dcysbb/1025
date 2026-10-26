@@ -1,4 +1,5 @@
 import './App.css'
+import './HelpTooltip.css'
 import './HardwarePanel.css'
 import './StagePanel.css'
 import { StrictMode } from 'react'

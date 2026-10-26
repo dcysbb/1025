@@ -76,7 +76,12 @@ class ConfigurationStore:
 
     def update(self, config: AppConfig) -> int:
         with self._lock:
+            previous, version = self._config, self._version
             self._config = config
             self._version += 1
-            self.save()
+            try:
+                self.save()
+            except Exception:
+                self._config, self._version = previous, version
+                raise
             return self._version

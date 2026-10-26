@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Check, Plug, RefreshCw } from 'lucide-react'
 import StagePanel from './StagePanel'
 import AnalogOutputPanel from './AnalogOutputPanel'
@@ -6,6 +6,8 @@ import { Disclosure } from './Motion'
 import { apiRequest, errorMessage } from './apiClient'
 import TerminalWorkbench, { type TerminalSystemState } from './TerminalWorkbench'
 import { outputTerminals } from './terminalDefinitions'
+import HelpTooltip from './HelpTooltip'
+import { applyConnection, changedFields, connectionMessage } from './deviceConnections'
 
 type TerminalText = 'dam_input_labels' | 'dam_output_labels' | 'dam_input_notes' | 'dam_output_notes'
 export type HardwareConfig = {
@@ -49,6 +51,9 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [stageDirty, setStageDirty] = useState(false)
   const [analogDirty, setAnalogDirty] = useState(false)
+  const [analogHost, setAnalogHost] = useState<HTMLDivElement | null>(null)
+  const [cancelling, setCancelling] = useState('')
+  const command = useRef(false), sequence = useRef(0)
   const writable = auth && connected && online && !busy && !terminalBusy && !errors.load
   const editable = auth && !busy && !terminalBusy && !errors.load
   const editReason = !auth ? '需要操作员权限才能修改；本机访问会自动取得本机操作权限。'
@@ -70,7 +75,8 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
       if (!cancelled) { setSaved(normalize(data.config)); setDraft(normalize(data.config)); setErrors(prior => ({ ...prior, load: '' })) }
     }).catch(error => { if (!cancelled) setErrors(prior => ({ ...prior, load: errorMessage(error, '读取硬件连接配置失败') })) })
     async function poll() {
-      try { const next = await request<HardwareStatus>('/hardware/status'); if (!cancelled) { setState(next); setOnline(true); setLastRead(Date.now()); setErrors(prior => ({ ...prior, status: '' })) } }
+      const epoch = sequence.current
+      try { const next = await request<HardwareStatus>('/hardware/status'); if (!cancelled && epoch === sequence.current && !command.current) { setState(next); setOnline(true); setLastRead(Date.now()); setErrors(prior => ({ ...prior, status: '' })) } }
       catch (error) { if (!cancelled) { setOnline(false); setErrors(prior => ({ ...prior, status: errorMessage(error, '读取真空规与 I/O 控制器状态失败') })) } }
       finally { if (!cancelled) timer = setTimeout(poll, 2000) }
     }
@@ -90,10 +96,13 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
   }
   const patch = <K extends keyof HardwareConfig>(key: K, value: HardwareConfig[K]) => setDraft(prior => prior && ({ ...prior, [key]: value }))
   async function run(section: string, action: () => Promise<void>, message: string) {
+    if (command.current) return
+    command.current = true
+    const epoch = ++sequence.current
     setBusy(section); setErrors(prior => ({ ...prior, [section]: '' })); setMessages(prior => ({ ...prior, [section]: '' }))
-    try { await action(); setMessages(prior => ({ ...prior, [section]: message })) }
-    catch (error) { setErrors(prior => ({ ...prior, [section]: error instanceof Error ? error.message : '操作失败' })) }
-    finally { setBusy('') }
+    try { await action(); if (epoch === sequence.current) setMessages(prior => ({ ...prior, [section]: message })) }
+    catch (error) { if (epoch === sequence.current) setErrors(prior => ({ ...prior, [section]: error instanceof Error ? error.message : '操作失败' })) }
+    finally { command.current = false; setBusy('') }
   }
   function save(section: string, keys: (keyof HardwareConfig)[]) {
     if (!draft) return
@@ -107,12 +116,36 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
     }, '已保存')
   }
   const notice = (id: string) => <>{errors[id] && <p className="inline-error" role="alert">{errors[id]}</p>}{messages[id] && <p role="status" className="hardware-message">{messages[id]}</p>}</>
-  const actions = (id: string, keys: (keyof HardwareConfig)[], path?: string, saveLabel?: string) => <div className="hardware-actions">
-    <span className="subtle-note">{dirty(keys) ? '有未保存的更改' : '已保存'}{id !== 'terminals' && dirty(keys) ? ' · 应用配置将关阀并撤销现场验证' : ''}</span>
+  const mappingActions = (id: string, keys: (keyof HardwareConfig)[], path?: string, saveLabel?: string) => <div className="hardware-actions">
+    <span className="subtle-note">{dirty(keys) ? '有未保存的更改' : '已保存'}</span>
     <button className="button button--quiet" disabled={!dirty(keys) || !!busy || terminalBusy} onClick={() => setDraft(prior => prior && saved && ({ ...prior, ...Object.fromEntries(keys.map(key => [key, saved[key]])) }))}>放弃更改</button>
     <button className="button button--primary" aria-label={saveLabel ?? `保存${id === 'tpg' ? '真空规' : id === 'io' ? 'I/O' : id === 'valve' ? '阀门映射' : '端子定义'}`} disabled={!writable || !dirty(keys) || id === 'valve' && (dirty(IO) || draft?.valve_closed_di === draft?.valve_open_di)} onClick={() => save(id, keys)}><Check size={15} />{saveLabel ?? '保存'}</button>
     {path && <button className="button" disabled={!writable || dirty(keys) || (id === 'io' && state?.io.manual_reset_required)} onClick={() => void run(id, async () => { await request(path, 'POST', {}); setState(await request('/hardware/status')) }, '设备连接成功')}><Plug size={15} />连接{id === 'tpg' ? '真空规' : 'I/O'}</button>}
   </div>
+  const actions = (id: string, keys: (keyof HardwareConfig)[], path?: string, saveLabel?: string) => {
+    if (id !== 'tpg' && id !== 'io') return mappingActions(id, keys, path, saveLabel)
+    const deviceConnected = !!state?.[id].connected
+    return <div className="hardware-actions"><span className="subtle-note">{dirty(keys) ? '有未保存的连接参数' : '已保存'}</span>
+      <button className="button button--quiet" disabled={!dirty(keys) || !!busy || terminalBusy} onClick={() => setDraft(prior => prior && saved ? {...prior,...Object.fromEntries(keys.map(key => [key,saved[key]]))} : prior)}>放弃更改</button>
+      <button className="button button--primary" disabled={!writable || !!cancelling} onClick={() => void run(id, async () => {
+        if (!draft) return
+        const result = await applyConnection(id, changedFields(saved,draft,keys))
+        if (result.config_saved) {
+          const next = normalize((await request<{config:HardwareConfig}>('/config')).config)
+          setSaved(next); setDraft(prior => prior ? {...prior,...Object.fromEntries(keys.map(key=>[key,next[key]]))} : prior)
+        }
+        setState(await request('/hardware/status'))
+        if (!result.ok) throw new Error(connectionMessage(result))
+      }, '参数已应用，设备已连接')}><Plug size={15}/>{busy === id ? '应用中…' : `应用并${deviceConnected ? '重新' : ''}连接${id === 'tpg' ? '真空规' : 'I/O'}`}</button>
+      <button className="button button--quiet" disabled={!writable || !deviceConnected} onClick={() => void run(id, async () => {await request(`/devices/${id}/disconnect`,'POST',{});setState(await request('/hardware/status'))},'设备已断开')}>断开{id === 'tpg' ? '真空规' : 'I/O'}</button>
+      {busy === id && <button className="button stage-stop" disabled={!auth || cancelling === id} onClick={async () => {
+        sequence.current++; setCancelling(id)
+        try {await request(`/devices/${id}/cancel`,'POST',{});setMessages(prior=>({...prior,[id]:'已停止，后续连接已取消'}))}
+        catch(error) {setErrors(prior=>({...prior,[id]:errorMessage(error,'停止未确认')}))}
+        finally {setCancelling('')}
+      }}>停止并取消</button>}
+    </div>
+  }
   const status = (id: 'tpg' | 'io') => <><span className={`status-chip ${online && state?.[id].connected ? 'status-chip--ok' : 'status-chip--muted'}`}>{online ? state?.[id].connected ? '在线' : '未连接' : '状态未知'}</span>{state?.[id].error && <p className="inline-error">{state[id].error}</p>}</>
   const serialField = (key: 'tpg_serial_port' | 'dam_serial_port', label: string) => <label className="field">{label}<input list="hardware-com-ports" value={draft?.[key] ?? ''} placeholder="输入 COM 口，或从列表选择" onChange={event => patch(key, event.target.value.trim().toUpperCase())} /></label>
   const baudField = (key: 'tpg_baudrate' | 'dam_baudrate', label: string) => <label className="field">{label}<select value={draft?.[key]} onChange={event => patch(key, Number(event.target.value))}>{(key === 'tpg_baudrate' ? [9600, 19200, 38400, 57600, 115200] : [2400, 4800, 9600, 19200, 38400]).map(rate => <option key={rate} value={rate}>{rate}</option>)}</select></label>
@@ -123,13 +156,13 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
     <div className="hardware-tabs" role="tablist" aria-label="硬件配置">
       {([['devices', '设备连接'], ['terminals', 'DAM 端子'], ['valve', '插板阀映射'], ['analog', '模拟量输出']] as const).map(([id, title]) => <button role="tab" aria-selected={tab === id} aria-controls={`hardware-${id}`} id={`hardware-tab-${id}`} key={id} className={`button ${tab === id ? 'button--primary' : 'button--quiet'}`} onClick={() => setTab(id)}>{title}</button>)}
     </div>
-    <div role="tabpanel" aria-labelledby="hardware-tab-analog" id="hardware-analog" hidden={tab !== 'analog'}><AnalogOutputPanel auth={auth} connected={connected} onDirtyChange={setAnalogDirty}/></div>
-    {notice('load')}{errors.load && <button className="button button--quiet" onClick={() => setLoadVersion(value => value + 1)}>重新读取硬件配置</button>}{(!connected || !online) && <p className="inline-error" role="alert">{errors.status || '正在读取后台与硬件状态…'} 保存和连接已暂停；设备是否在线尚未确认，正在自动重试读取。</p>}
+    <div role="tabpanel" aria-labelledby="hardware-tab-analog" id="hardware-analog" hidden={tab !== 'analog'}><AnalogOutputPanel auth={auth} connected={connected} onDirtyChange={setAnalogDirty} connectionHost={analogHost} onOpenConnection={() => {setTab('devices'); requestAnimationFrame(() => document.getElementById('analog-connection-card')?.scrollIntoView({block:'start'}))}}/></div>
+    {notice('load')}{errors.load && <button className="button button--quiet" onClick={() => setLoadVersion(value => value + 1)}>重新读取硬件配置</button>}{(!connected || !online) && <p className="inline-error" role="alert">{errors.status || '正在读取后台与硬件状态…'} TPG / I/O 状态未确认，正在重试读取。</p>}
     {!draft ? <p>正在读取硬件配置…</p> : <>
       <datalist id="hardware-com-ports">{ports.map(port => <option key={port.device} value={port.device}>{port.description}</option>)}</datalist>
       <div role="tabpanel" aria-labelledby="hardware-tab-devices" id="hardware-devices" hidden={tab !== 'devices'}>
         {editReason && <p className="inline-error" role="status">{editReason}</p>}
-        <div className="hardware-tools"><span>{portsLoading ? '正在枚举系统串口…' : ports.length ? `系统识别到：${ports.map(port => `${port.device} · ${port.description}`).join('；')}` : '未识别到串口'}</span><button className="button button--quiet" onClick={() => void refreshPorts()} disabled={!auth || !connected || portsLoading}><RefreshCw size={15} />{portsLoading ? '正在刷新…' : '刷新串口列表'}</button></div>{notice('ports')}
+        <div className="hardware-tools"><span><HelpTooltip label="系统串口列表">{portsLoading ? '正在枚举系统串口…' : ports.length ? `系统识别到：${ports.map(port => `${port.device} · ${port.description}`).join('；')}` : '未识别到串口'}</HelpTooltip>串口设备</span><button className="button button--quiet" onClick={() => void refreshPorts()} disabled={!auth || !connected || portsLoading}><RefreshCw size={15} />{portsLoading ? '正在刷新…' : '刷新串口列表'}</button></div>{notice('ports')}
         <section className="content-panel glass-panel hardware-card"><div className="panel-heading"><h2>TPG366 真空规</h2>{status('tpg')}</div>
           <fieldset disabled={!editable}><div className="settings-grid">
             <label className="field">真空规连接方式<select value={draft.tpg_connection} onChange={event => patch('tpg_connection', event.target.value as 'usb' | 'tcp')}><option value="usb">USB 串口</option><option value="tcp">以太网 TCP</option></select></label>
@@ -143,6 +176,7 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
           {state?.io.manual_reset_required && <p className="inline-error">I/O 重连已锁存，请在联锁控制中人工复位。</p>}
         </section>
         <StagePanel auth={auth} connected={connected} configuration onDirtyChange={setStageDirty} />
+        <div ref={setAnalogHost}/>
       </div>
       <div role="tabpanel" aria-labelledby="hardware-tab-terminals" id="hardware-terminals" hidden={tab !== 'terminals'}>
         <section className="content-panel glass-panel">
@@ -157,12 +191,12 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
             <div className="terminal-strip terminal-strip--inputs">{Array.from({ length: 18 }, (_, i) => <div className="terminal-chip" key={i}><b>{i + 1}</b><small>{i >= 9 && i <= 16 ? `IN${i - 8} (DI${i - 9})` : FIXED.find(row => row[0] === i + 1)?.[1]}</small></div>)}</div>
           </div>
           <Disclosure className="terminal-fixed" title="电源与通信端子（固定定义）"><table className="hardware-table"><thead><tr><th>物理端子</th><th>标识</th><th>功能</th></tr></thead><tbody>{FIXED.map(([pin, label, description]) => <tr key={pin}><td>{pin}</td><td>{label}</td><td>{description}</td></tr>)}</tbody></table></Disclosure>
-          <p className="terminal-help">IN1 对应机身 DI1、软件 DI0。固定电气定义不可修改；功能分配、名称和备注在上方工作台编辑。</p>
+          <HelpTooltip label="端子编号说明">IN1 对应机身 DI1、软件 DI0。固定电气定义不可修改；名称与功能在端子工作台编辑。</HelpTooltip>
           </Disclosure></div>
         </section>
       </div>
       <div role="tabpanel" aria-labelledby="hardware-tab-valve" id="hardware-valve" hidden={tab !== 'valve'}>
-        <section className="content-panel glass-panel"><div className="panel-heading"><h2>插板阀映射</h2><span>{draft.io_device.toUpperCase()}</span></div>
+        <section className="content-panel glass-panel"><div className="panel-heading"><h2>插板阀映射 <HelpTooltip label="阀门映射说明">单路输出控制电磁阀；实际阀门位置以到位反馈为准。修改映射时执行关阀并保留联锁锁存。</HelpTooltip></h2><span>{draft.io_device.toUpperCase()}</span></div>
           <fieldset disabled={!writable}><div className="settings-grid">
             {(['valve_closed_di', 'valve_open_di', 'open_output'] as const).map(key => <label className="field" key={key}>{key === 'valve_closed_di' ? '关闭到位输入' : key === 'valve_open_di' ? '打开到位输入' : '电磁阀控制输出'}<select value={draft[key] ?? ''} onChange={event => patch(key, event.target.value === '' ? null as never : Number(event.target.value))}>
               {key === 'valve_open_di' && <option value="">未安装</option>}{Array.from({ length: draft.io_device === 'dam0808d' ? 8 : key === 'open_output' ? 6 : 12 }, (_, i) => <option value={i} key={i}>{draft.io_device === 'dam0808d' ? `${key === 'open_output' ? 'OUT' : 'IN'}${i + 1} / ` : ''}{key === 'open_output' ? 'DO' : 'DI'}{i}{draft.io_device === 'dam0808d' && draft[key === 'open_output' ? 'dam_output_labels' : 'dam_input_labels'][i] ? ` · ${draft[key === 'open_output' ? 'dam_output_labels' : 'dam_input_labels'][i]}` : ''}</option>)}</select></label>)}
@@ -170,7 +204,6 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
             <label className="field">开关映射<select value={String(draft.valve_open_on_energized)} onChange={event => patch('valve_open_on_energized', event.target.value === 'true')}><option value="true">吸合开阀 / 释放关阀</option><option value="false">吸合关阀 / 释放开阀</option></select></label>
           </div></fieldset>
           <div className="valve-truth"><div><b>继电器吸合</b><span>{draft.valve_open_on_energized ? '开阀请求' : '关阀请求'}</span></div><div><b>继电器释放</b><span>{draft.valve_open_on_energized ? '关阀请求' : '开阀请求'}</span></div></div>
-          <p>单路输出控制电磁阀；实际阀门位置以到位反馈为准。</p>
           {draft.valve_closed_di === draft.valve_open_di && <p className="inline-error">打开与关闭到位必须使用不同输入。</p>}
           {actions('valve', MAPPING)}{notice('valve')}
         </section>

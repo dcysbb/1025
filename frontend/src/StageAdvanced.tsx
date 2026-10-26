@@ -5,6 +5,7 @@ import { AXES, type Axis, type DriveParameters, type ParameterState, type StageS
 import { errorMessage } from './apiClient'
 import { makeStageProfile, parseStageProfile } from './stageProfiles'
 import StageToolHistory from './StageToolHistory'
+import HelpTooltip from './HelpTooltip'
 
 type Props = {
   state: StageState; auth: boolean; online: boolean; busy: boolean; uncertain: boolean
@@ -28,7 +29,6 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
   const [error, setError] = useState(''), [feedback, setFeedback] = useState('')
   const [paramOpen, setParamOpen] = useState(false)
   const [homeDirections, setHomeDirections] = useState<Partial<Record<Axis, -1 | 1>>>({})
-  const [stationary, setStationary] = useState(false)
   const epoch = useRef(0), parameterRef = useRef(false)
   const profileInput = useRef<HTMLInputElement>(null)
   const deviceIdentity = JSON.stringify([state.config.mode, state.config.serial_number, state.config.connection, state.config.host, state.config.port, state.config.axes, state.config.inverted, state.connected])
@@ -42,7 +42,7 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
   }, [identity])
   useEffect(() => {
     // eslint-disable-next-line react/set-state-in-effect -- Device/mapping changes revoke local operation state.
-    setHomeDirections({}); setStationary(false)
+    setHomeDirections({})
   }, [deviceIdentity])
   const row = state.channels.find(item => item.channel === state.config.axes[axis])
   const idle = state.channels.length === 3 && state.channels.every(item => item.moving === false && !item.optimizing)
@@ -81,7 +81,7 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
   async function tool(targetAxis: Axis, operation: 'home' | 'optimize') {
     const channel = state.config.axes[targetAxis], target = state.channels.find(item => item.channel === channel)
     if (blockedFor(targetAxis) || !target?.enabled || target.open_loop === false) return
-    const body = {axis: targetAxis, operation, confirmed: true,
+    const body = {axis: targetAxis, operation,
       ...(operation === 'home' ? {home_direction: homeDirections[targetAxis] ?? state.config.home_direction?.[targetAxis] ?? -1} : {})}
     await onAct('/action', body, `${targetAxis.toUpperCase()} / CH${channel} ${operation === 'home' ? '回零' : '性能优化'}请求已下发，可随时全部停止。`)
   }
@@ -109,7 +109,7 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
     const blocked = blockedFor(targetAxis), channelAvailable = !blocked
     const operation = state.operation?.kind === 'optimize' && state.operation.axis === targetAxis ? state.operation : null
     return <>
-        {operation && <div className="stage-optimization-progress" role="status"><WandSparkles size={19}/><div><strong>{targetAxis.toUpperCase()} / CH{operation.channel} · 性能优化{!online || !state.connected || state.error ? '结果未确认' : operation.phase === 'running' ? '进行中' : '等待控制器开始'}</strong><p>{!online || !state.connected || state.error ? '通信或状态读取异常，不能确认优化进度或停止结果。禁止继续移动或重复优化，请检查控制器状态。' : <>已等待 {Math.floor(operation.elapsed_s ?? 0)} 秒 · 通常约 1–2 分钟。请保持连接，可随时使用顶部“全部停止”。</>}</p><small>仅显示控制器状态与等待时间，不推算完成百分比。</small></div></div>}
+        {operation && <div className="stage-optimization-progress" role="status"><WandSparkles size={19}/><div><strong>{targetAxis.toUpperCase()} / CH{operation.channel} · 性能优化{!online || !state.connected || state.error ? '结果未确认' : operation.phase === 'running' ? '进行中' : '等待控制器开始'}</strong><p>{!online || !state.connected || state.error ? '通信或状态读取异常，不能确认优化进度或停止结果。禁止继续移动或重复优化，请检查控制器状态。' : <>已等待 {Math.floor(operation.elapsed_s ?? 0)} 秒 · 通常约 1–2 分钟。请保持连接，可随时使用顶部“全部停止”。</>}</p><HelpTooltip label="优化进度说明">仅显示控制器状态与等待时间，不推算完成百分比。</HelpTooltip></div></div>}
         <label className="field stage-home-direction">回零方向<select aria-label={`${targetAxis.toUpperCase()} 轴回零方向`} disabled={!channelAvailable} value={homeDirections[targetAxis] ?? state.config.home_direction?.[targetAxis] ?? -1} onChange={event => setHomeDirections(prior => ({...prior, [targetAxis]: Number(event.target.value) as -1 | 1}))}><option value={-1}>负向（−）</option><option value={1}>正向（+）</option></select></label>
         <div className="stage-tool-actions">
           <button className="button button--quiet" aria-label={`${targetAxis.toUpperCase()} 轴启用输出`} disabled={!channelAvailable || target?.enabled} onClick={() => void onAct('/action', {axis: targetAxis, operation:'enable'}, `${targetAxis.toUpperCase()} / CH${channel} 输出启用请求已下发。`)}><Power size={15}/>启用输出</button>
@@ -132,18 +132,17 @@ export default function StageAdvanced({state, auth, online, busy, uncertain, onA
       <label className="field stage-tool-axis">参数通道<select aria-label="驱动参数通道" value={axis} disabled={busy} onChange={event => setAxis(event.target.value as Axis)}>{AXES.map(value => <option key={value} value={value}>{value.toUpperCase()} / CH{state.config.axes[value]}</option>)}</select></label>
       <div className="stage-parameter-actions"><button className="button button--quiet" disabled={!canReadParameters} onClick={() => void readOrApply()}><RefreshCw size={14}/>重新读取</button>{dirty && <span className="subtle-note">有未应用的参数</span>}</div>
       <div className="stage-parameter-actions"><button className="button button--quiet" disabled={!parameters || !available} onClick={exportProfile}><Download size={14}/>导出已读参数</button><button className="button button--quiet" disabled={!parameters || !available} onClick={() => profileInput.current?.click()}><Upload size={14}/>导入参数预览</button><input ref={profileInput} aria-label="导入 PDXC3 驱动参数文件" type="file" accept=".json,application/json" hidden onChange={event => { void importProfile(event.target.files?.[0]); event.target.value = '' }}/></div>
-      {draft && parameters ? <div className="stage-parameter-grid">{FIELDS.map(({key,label,unit}) => <label className="field" key={key}>{label}（{unit}）<input type="number" aria-label={label} value={draft[key]} disabled={!available} min={parameters.limits[key].min ?? undefined} max={parameters.limits[key].max ?? undefined} step={1} onChange={event => setDraft({...draft,[key]:event.target.value})}/><small>控制器范围：{parameters.limits[key].min ?? '—'}–{parameters.limits[key].max ?? '—'}</small></label>)}</div> : <p className="stage-note">{canReadParameters ? '正在读取当前轴参数…' : '通道就绪且空闲后自动读取；也可点击“重新读取”。'}</p>}
+      {draft && parameters ? <div className="stage-parameter-grid">{FIELDS.map(({key,label,unit}) => <label className="field" key={key}>{label}（{unit}）<input type="number" aria-label={label} value={draft[key]} disabled={!available} min={parameters.limits[key].min ?? undefined} max={parameters.limits[key].max ?? undefined} step={1} onChange={event => setDraft({...draft,[key]:event.target.value})}/><HelpTooltip label={`${label}范围`}>控制器范围：{parameters.limits[key].min ?? '—'}–{parameters.limits[key].max ?? '—'}</HelpTooltip></label>)}</div> : <p className="stage-note">{canReadParameters ? '正在读取当前轴参数…' : '通道就绪且空闲后自动读取；也可点击“重新读取”。'}</p>}
       {draft && <div className="stage-parameter-actions"><button className="button button--primary" disabled={!available || invalid || !dirty} onClick={() => void readOrApply(true)}>应用驱动参数</button>{invalid && <span className="inline-error">参数必须为控制器范围内的整数。</span>}</div>}
-      <p className="stage-note">参数应用于当前轴并保存到现场配置，重连后自动恢复。导入只填入预览，核对后再应用。不会自动点动或优化。应用失败时请重新读取，确认是否部分生效。</p>
+      <HelpTooltip label="控制器操作说明">参数应用于当前轴并保存到现场配置，重连后自动恢复。导入只填入预览，核对后再应用。不会自动点动或优化。应用失败时请重新读取，确认是否部分生效。</HelpTooltip>
       {error && <p className="inline-error" role="alert">{error}</p>}{feedback && <p className="stage-message" role="status">{feedback}</p>}
       </Reveal>
     </div>
     <Disclosure title="连接诊断与恢复" className="stage-diagnostics">
       <div className="stage-diagnostic-grid"><span>通道：{state.diagnostics?.transport || state.config.connection?.toUpperCase() || 'TCP'}</span><span>采样耗时：{state.diagnostics?.latency_ms ?? '—'} ms</span><span>连续读取失败：{state.diagnostics?.read_failures ?? 0}</span><span>有效采样：{state.diagnostics?.sample_count ?? 0}</span></div>
-      <p className="stage-note">XA 与控制台应轮流连接。关闭 XA 窗口后若仍有残留进程，也可能占用连接。读取异常暂停操作；控制动作不会自动重发。</p>
-      {(state.motion_pending || state.diagnostics?.motion_locked) && <label className="check-row"><input type="checkbox" checked={stationary} disabled={!auth || !online || busy} onChange={event => setStationary(event.target.checked)}/>我已现场确认位移台静止</label>}
+      <HelpTooltip label="控制器操作说明">XA 与控制台应轮流连接。关闭 XA 窗口后若仍有残留进程，也可能占用连接。读取异常暂停操作；控制动作不会自动重发。</HelpTooltip>
       <div className="stage-tool-actions"><button className="button button--quiet" disabled={!auth || !online || busy || !state.connected} onClick={() => void onAct('/disconnect', {}, '位移台已断开。')}><Gauge size={14}/>断开控制器</button>
-      <button className="button button--quiet" disabled={!auth || !online || busy || !stationary || !state.motion_pending && !state.diagnostics?.motion_locked} onClick={() => {if(stationary) void onAct('/recover', {confirmed_stationary:true}, '运动锁定已解除。')}}>解除运动锁定</button></div>
+      <button className="button button--quiet" disabled={!auth || !online || busy || !state.motion_pending && !state.diagnostics?.motion_locked} onClick={() => {void onAct('/recover', {}, '已停止并恢复控制。')}}>停止并恢复</button></div>
     </Disclosure>
     <StageToolHistory version={historyVersion}/>
     </div>)}

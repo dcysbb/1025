@@ -72,3 +72,8 @@
 .analog-current strong { font: 500 20px/1.4 'Cascadia Mono', Consolas, monospace; color: var(--accent); }
 .analog-current small { color: var(--muted); font-size: 11px; }
 @media(max-width: 900px) { .analog-mapping-grid { grid-template-columns: 1fr; } }
+
+.stage-config-advanced {grid-column:1 / -1;min-width:0;}.stage-config-advanced .motion-reveal__content {display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;padding-top:16px;}
+.hardware-panel .stage-panel.hardware-card {padding:22px;}.hardware-panel .stage-panel.hardware-card>.stage-header {padding:0;box-shadow:none;border:0;position:static;}
+#analog-connection-card {scroll-margin-top:20px;}
+@media(max-width:760px){.hardware-panel .stage-panel.hardware-card{padding:16px}.stage-config-advanced .motion-reveal__content{grid-template-columns:minmax(0,1fr)}}

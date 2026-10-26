@@ -316,7 +316,7 @@ class InterlockEngine:
         if self.mode == "real":
             if now - self._last_io_read > self.config.stale_timeout_s:
                 raise InterlockError("I/O 数据已超时，禁止开阀")
-            if not self.config.fail_closed_confirmed or self._tpg_error or self._io_error:
+            if self._tpg_error or self._io_error:
                 raise InterlockError("硬件配置或反馈未通过校验")
 
     def _validate_arm(self) -> None:
@@ -333,8 +333,6 @@ class InterlockEngine:
         if self.interlock == "tripped":
             raise InterlockError("联锁已触发，须在压力恢复并保持后人工复位")
         if self.mode == "real":
-            if not self.config.fail_closed_confirmed:
-                raise InterlockError("尚未确认电磁阀断电后插板阀关闭，真实联锁不能启用")
             tpg_address = self.config.tpg_serial_port if self.config.tpg_connection == "usb" else self.config.tpg_host
             if not tpg_address or not (self.config.dam_serial_port if self.config.io_device == "dam0808d" else self.config.adam_host):
                 raise InterlockError("请先设置真空规与 I/O 控制器连接地址")
@@ -381,8 +379,6 @@ class InterlockEngine:
         if self.mode == "real" and (not self._tpg_connected or not self._adam_connected):
             return "真空规与 I/O 控制器必须在线才能复位"
         if self.mode == "real":
-            if not self.config.fail_closed_confirmed:
-                return "尚未确认电磁阀断电后插板阀关闭"
             if time.monotonic() - self._last_io_read > self.config.stale_timeout_s:
                 return "I/O 数据已超时，不能复位联锁"
             if self._tpg_error or self._io_error:
@@ -652,7 +648,7 @@ class InterlockEngine:
         if remaining > 0:
             raise InterlockError(f"真空恢复稳定时间不足，还需 {remaining:.1f} 秒")
         if self.mode == "real":
-            if not self.adam or not self.config.fail_closed_confirmed:
+            if not self.adam:
                 raise InterlockError("真实硬件没有就绪")
             await self._write_valve_request(False)
             await self._poll_io()

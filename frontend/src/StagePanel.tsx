@@ -4,6 +4,9 @@ import StageWorkbench from './StageWorkbench'
 import StageAdvanced from './StageAdvanced'
 import { AXES, StageRequestError, stageApi, type Axis, type StageConfig, type StageState, type StagePresentation, type DriveParameters, type ParameterState } from './stageClient'
 import { errorMessage } from './apiClient'
+import { Disclosure } from './Motion'
+import HelpTooltip from './HelpTooltip'
+import { applyConnection, changedFields, connectionMessage } from './deviceConnections'
 
 function request<T>(path = '', method = 'GET', body?: unknown) {
   return stageApi<T>(`/api/stage${path}`, method, body, path === '/connect' || path === '/recover' ? 45000 : method === 'GET' ? 5000 : 20000)
@@ -99,7 +102,13 @@ export default function StagePanel({ auth, connected, configuration = false, onD
     else setBusy(true)
     setError(''); setMessage('')
     try {
-      const next = await request<StageState>(path, path === '/config' ? 'PUT' : 'POST', body ?? {})
+      let next: StageState
+      if (path === '/apply-connect' && draft && state) {
+        const result = await applyConnection<StageState>('stage', changedFields(state.config,draft,['mode','connection','serial_number','host','port','axes','inverted','home_direction','max_steps']))
+        if (mounted.current && mine === actionId.current && result.config_saved) setDraft(structuredClone(result.state.config))
+        if (!result.ok) throw new Error(connectionMessage(result))
+        next = result.state
+      } else next = await request<StageState>(path, path === '/config' ? 'PUT' : 'POST', body ?? {})
       if (mounted.current && mine === actionId.current) {
         accept(next)
         if (path === '/config') setDraft(structuredClone(next.config))
@@ -192,9 +201,9 @@ export default function StagePanel({ auth, connected, configuration = false, onD
     }, 250)
   }
 
-  return <div ref={panelRef} className="page-content stage-panel">
-    <section ref={headerRef} className="content-panel glass-panel stage-header">
-      <div><h2>PD1V/M 位移台 <span className="stage-model">PDXC3</span></h2><p>开环步数控制 · 不提供实测位置</p></div>
+  return <div ref={panelRef} className={`page-content stage-panel ${configuration ? 'content-panel glass-panel hardware-card' : ''}`}>
+    <section ref={headerRef} className={configuration ? "stage-header" : "content-panel glass-panel stage-header"}>
+      <div><h2>PDXC3 位移台 <HelpTooltip label="位移台控制说明">PD1V/M 开环步数控制，不提供实测位置。连接只建立通信；应用连接参数时先停止，重连后不自动运动或启用输出。</HelpTooltip></h2></div>
       <div className="stage-actions">
         <span className="mode-badge" data-mode={state?.config.mode}>{state?.config.mode === 'simulation' ? '模拟设备' : '真实设备'}</span>
         <span className={`stage-state ${state?.connected && online ? 'stage-state--on' : ''}`}>
@@ -213,11 +222,10 @@ export default function StagePanel({ auth, connected, configuration = false, onD
     {state?.error && <div className="inline-error" role="alert">{state.error}</div>}
     {message && <p className="stage-message" role="status">{message}</p>}
     {!auth && <p>登录后可配置和控制位移台。</p>}
-    {state?.config.mode === 'simulation' && <div className="stage-simulation">模拟模式：按钮只改变模拟数据。</div>}
-    {configuration && <section className="content-panel glass-panel">
-      <div className="panel-heading"><h2>连接与轴映射</h2></div>
+
+    {configuration && <section className="stage-connection-config">
       {!draft ? <p>{online ? '正在读取配置…' : '等待后台连接…'}</p> : <>
-        <fieldset disabled={!writable || busy || !!state?.connected || !!state?.channels.length} className="stage-config">
+        <fieldset disabled={!auth || busy || stopping} className="stage-config">
           <label className="field">连接模式<select value={draft.mode} onChange={e => setDraft({ ...draft, mode: e.target.value as StageConfig['mode'] })}>
             <option value="real">真实设备</option><option value="simulation">模拟设备</option>
           </select></label>
@@ -230,7 +238,7 @@ export default function StagePanel({ auth, connected, configuration = false, onD
           <label className="field">网络端口<input type="number" min={1} max={65535} value={draft.port}
             onChange={e => setDraft({ ...draft, port: Number(e.target.value) })} /></label>
           </>}
-          <label className="field">单次步数上限<input type="number" min={1} max={100000} value={draft.max_steps}
+          <Disclosure title="轴映射与方向" className="stage-config-advanced"><label className="field">单次步数上限<input type="number" min={1} max={100000} value={draft.max_steps}
             onChange={e => setDraft({ ...draft, max_steps: Number(e.target.value) })} /></label>
           {AXES.map(axis => <div className="stage-mapping" key={axis}>
             <label className="field">{axis.toUpperCase()} 轴<select aria-label={`${axis.toUpperCase()} 轴通道`} value={draft.axes[axis]}
@@ -244,15 +252,13 @@ export default function StagePanel({ auth, connected, configuration = false, onD
               <option value={-1}>负向（−）</option>
               <option value={1}>正向（+）</option>
             </select></label>
-          </div>)}
+          </div>)}</Disclosure>
         </fieldset>
         {dirty && <p className="subtle-note">有未保存的更改</p>}
         {!validMapping && <p className="inline-error">XYZ 不能使用重复通道。</p>}
         <div className="stage-actions">
-          <button className="button button--quiet" disabled={!writable || busy || state?.connected || !dirty || !validMapping}
-            onClick={() => void act('/config', draft, '配置已保存')}>保存位移台配置</button>
-          <button className="button button--primary" disabled={!writable || busy || state?.connected || !!dirty}
-            onClick={() => void act('/connect', undefined, '位移台已连接')}><Plug size={15} />{busy ? '处理中…' : '连接控制器'}</button>
+          <button className="button button--primary" disabled={!writable || busy || stopping || !validMapping}
+            onClick={() => void act('/apply-connect', undefined, '参数已应用，位移台已连接')}><Plug size={15} />{busy ? '应用中…' : state?.connected ? '应用并重新连接控制器' : '应用并连接控制器'}</button>
           <button className="button button--quiet" disabled={!writable || busy || !state?.connected && !state?.error}
             onClick={() => void act('/disconnect', undefined, '位移台已断开')}><Unplug size={15} />断开</button>
         </div>

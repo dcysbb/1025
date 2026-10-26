@@ -93,12 +93,13 @@ class SoftwareInterlock(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.e.interlock, 'fault')
         self.assertEqual(self.e.snapshot()['valve'], 'fault')
 
-    async def test_unconfirmed_valve_cannot_arm_but_can_deenergize(self):
+    async def test_legacy_confirmation_does_not_block_arm_or_close(self):
         self.e.config.fail_closed_confirmed = False
-        with self.assertRaisesRegex(InterlockError, '断电'):
-            await self.e.arm()
+        await self.e.arm()
+        self.assertEqual(self.e.interlock, 'armed')
+        self.assertFalse(self.e.config.fail_closed_confirmed)
         await self.e.close_valve()
-        self.e.adam.write_output.assert_awaited_once_with(0, False)
+        self.e.adam.write_output.assert_awaited_with(0, False)
 
     async def test_arm_rechecks_closed_feedback_after_reading_devices(self):
         self.e.adam.read_inputs.return_value = [False] * 8
