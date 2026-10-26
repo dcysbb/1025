@@ -103,7 +103,7 @@ def launch() -> int:
     except Exception as exc:
         message = str(exc)
         if os.name == "nt":
-            ctypes.windll.user32.MessageBoxW(None, message, "真空联锁控制台启动失败", 0x10)
+            ctypes.windll.user32.MessageBoxW(None, message, "1025控制台启动失败", 0x10)
         else:
             print(message, file=sys.stderr)
         return 1

@@ -111,4 +111,4 @@ class DesktopLauncherTests(unittest.TestCase):
              patch.object(desktop.os, 'name', 'nt'), \
              patch.object(desktop.ctypes, 'windll', create=True) as native:
             self.assertEqual(desktop.launch(), 1)
-        native.user32.MessageBoxW.assert_called_once_with(None, 'backend failure', '真空联锁控制台启动失败', 0x10)
+        native.user32.MessageBoxW.assert_called_once_with(None, 'backend failure', '1025控制台启动失败', 0x10)

@@ -167,7 +167,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="真空联锁控制台",
+    title="1025控制台",
     version=VERSION,
     docs_url=None,
     redoc_url=None,

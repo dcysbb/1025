@@ -15,12 +15,12 @@ $shortcutFolders = @(
     [Environment]::GetFolderPath('Programs')
 )
 foreach ($folder in $shortcutFolders) {
-    $path = Join-Path $folder '真空联锁控制台.lnk'
+    $path = Join-Path $folder '1025控制台.lnk'
     $shortcut = $shell.CreateShortcut($path)
     $shortcut.TargetPath = $icon
     $shortcut.Arguments = '--open-browser'
     $shortcut.WorkingDirectory = $packageRoot
-    $shortcut.Description = '启动后台并打开真空联锁控制台；不会自动启用联锁。'
+    $shortcut.Description = '启动后台并打开1025控制台；不会自动启用联锁。'
     $shortcut.WindowStyle = 7
     if (Test-Path -LiteralPath $icon) { $shortcut.IconLocation = $icon + ',0' }
     $shortcut.Save()

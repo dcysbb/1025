@@ -1,4 +1,4 @@
-#define AppName "Vacuum Interlock"
+#define AppName "1025控制台"
 #define AppVersion "0.2.0"
 [Setup]
 AppId={{447C89B3-FD6F-48A1-88AA-5A4B4B973C4D}
@@ -21,8 +21,8 @@ Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 [Tasks]
 Name: "service"; Description: "Install the background Windows service (starts after manual configuration)"; Flags: unchecked
 [Icons]
-Name: "{group}\Open Control Panel"; Filename: "{app}\VacuumInterlock.exe"; Parameters: "--open-browser"; WorkingDir: "{app}"
-Name: "{autodesktop}\真空联锁控制台"; Filename: "{app}\VacuumInterlock.exe"; Parameters: "--open-browser"; WorkingDir: "{app}"
+Name: "{group}\1025控制台"; Filename: "{app}\VacuumInterlock.exe"; Parameters: "--open-browser"; WorkingDir: "{app}"
+Name: "{autodesktop}\1025控制台"; Filename: "{app}\VacuumInterlock.exe"; Parameters: "--open-browser"; WorkingDir: "{app}"
 Name: "{group}\Documentation"; Filename: "{app}\README.md"
 [Run]
 Filename: "{app}\service\VacuumInterlockService.exe"; Parameters: "--startup auto install"; Tasks: service; Flags: runhidden waituntilterminated
