@@ -13,7 +13,7 @@ from uuid import uuid4
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .drivers.lbtek import LbtekDriver
+from .drivers.lbtek import LbtekDriver, model_catalog
 
 
 class LbtekConfig(BaseModel):
@@ -23,12 +23,15 @@ class LbtekConfig(BaseModel):
     max_distance: float = Field(default=10, gt=0, le=1000)
     names: list[str] = Field(default_factory=lambda: ["", "", ""], min_length=3, max_length=3)
     units: list[Literal["mm", "°"]] = Field(default_factory=lambda: ["mm"] * 3, min_length=3, max_length=3)
+    models: list[str | None] = Field(default_factory=lambda: [None] * 3, min_length=3, max_length=3)
 
     @model_validator(mode="after")
     def validate_names(self):
         self.names = [name.strip() for name in self.names]
         if any(len(n) > 32 or any(ord(c) < 32 for c in n) for n in self.names):
             raise ValueError("通道名称最多 32 个字符，不能包含控制字符")
+        if any(n is not None and (len(n) > 80 or not n or any(ord(c) < 32 for c in n)) for n in self.models):
+            raise ValueError("位移台型号名称无效")
         return self
 
 
@@ -168,6 +171,10 @@ class LbtekController:
         self._epoch = 0
         self._poll_task = None
         self.instance = uuid4().hex
+        try:
+            self.catalog = model_catalog()
+        except (OSError, ValueError, KeyError):
+            self.catalog = {}
 
     def snapshot(self):
         age = None if self.sample_at is None else time.monotonic() - self.sample_at
@@ -218,6 +225,7 @@ class LbtekController:
             raise RuntimeError("请先断开 LBTEK，再保存连接参数")
         if self.uncertain and config != self.config:
             raise RuntimeError("旧目标运动未确认，请先连接并停止恢复，再更换连接参数")
+        config = self.validate_config(config)
         temp = self.path.with_suffix(".json.tmp")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp.write_text(config.model_dump_json(indent=2), encoding="utf-8")
@@ -228,7 +236,16 @@ class LbtekController:
         self.event("lbtek_config", "info", "LBTEK 配置已保存", actor)
         return self.snapshot()
 
+    def validate_config(self, config):
+        for index, model in enumerate(config.models):
+            if model:
+                if model not in self.catalog:
+                    raise ValueError(f"官方型号表中未找到 {model}，请检查 SDK 安装")
+                config.units[index] = self.catalog[model]["unit"]
+        return config
+
     async def connect(self, actor="system"):
+        self.uncertain = self.uncertain or self.recovery.exists()
         if self.config_error:
             raise RuntimeError(self.config_error + "；请在硬件连接中修正后应用")
         if self._busy or self._stopping:
@@ -268,6 +285,11 @@ class LbtekController:
         if len(rows) != 3 or [row["channel"] for row in rows] != [1, 2, 3]:
             raise RuntimeError("LBTEK 返回的通道状态不完整")
         self.channels = rows
+        for row in rows:
+            model = self.config.models[row["channel"] - 1]
+            metadata = self.catalog.get(model) if model else None
+            row.update(model=model, home_supported=metadata["home_supported"] if metadata else self.config.mode == "simulation",
+                       model_limits=metadata)
         self.sample_at = time.monotonic()
         self.hardware = {key: data.get(key) for key in ("usb_port", "axis_base", "rocker_enabled")}
         if not self.uncertain:
@@ -340,8 +362,12 @@ class LbtekController:
                     raise ValueError(f"单次位移不能超过 {self.config.max_distance:g} {self.config.units[command.channel - 1]}")
                 if op != "home" and ((direction > 0 and row["limit_right"]) or (direction < 0 and row["limit_left"])):
                     raise RuntimeError("目标方向已触发限位，请向相反方向退回")
-                if op == "home" and not row["home_sensor"]:
-                    raise RuntimeError("该通道未报告可用的原点传感器")
+                metadata = row.get("model_limits")
+                target = row["position"] + value if op == "relative" else value
+                if op in {"relative", "absolute"} and metadata and not metadata["min_position"] <= target <= metadata["max_position"]:
+                    raise ValueError(f"目标超出 {row['model']} 行程：{metadata['min_position']:g}–{metadata['max_position']:g} {metadata['unit']}")
+                if op == "home" and not row.get("home_supported"):
+                    raise RuntimeError("请先在硬件连接中记录支持回零的实际位移台型号")
                 self._journal()
                 if epoch != self._epoch:
                     self._clear_journal()
@@ -443,7 +469,10 @@ class LbtekController:
         epoch = self._epoch
         try:
             async with self._lock:
-                self._ready(values.channel)
+                row = self._ready(values.channel)
+                limits = row.get("model_limits")
+                if limits and (values.speed > limits["max_speed"] or values.acceleration > limits["max_acceleration"]):
+                    raise ValueError(f"{row['model']} 速度上限 {limits['max_speed']:g}，加速度上限 {limits['max_acceleration']:g}")
                 if epoch != self._epoch:
                     raise RuntimeError("已请求停止，参数未下发")
                 try:
@@ -481,6 +510,10 @@ def install_lbtek_routes(app, controller, require_read_access, require_operator,
     @app.get("/api/lbtek-stage", dependencies=[Depends(require_read_access)])
     async def state():
         return controller.snapshot()
+
+    @app.get("/api/lbtek-stage/models", dependencies=[Depends(require_read_access)])
+    async def models():
+        return {"models": list(controller.catalog.values())}
 
     @app.get("/api/lbtek-stage/devices", dependencies=[Depends(require_read_access)])
     async def devices():

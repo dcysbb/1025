@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes as c
+import json
 import math
 import multiprocessing
 import os
@@ -21,6 +22,15 @@ def sdk_directory():
     return Path(override) if override else Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2])) / "vendor" / "lbtek"
 
 
+def model_catalog():
+    data = json.loads((sdk_directory() / "deviceModelsParam").read_text(encoding="utf-8-sig"))
+    return {row["name"]: {"name": row["name"], "unit": row["unitString"],
+                           "min_position": row["minPos"], "max_position": row["maxPos"],
+                           "max_speed": row["maxSpeed"], "max_acceleration": row["maxAcc"],
+                           "home_supported": "Z" in row.get("optOrder", "")}
+            for row in data["MoverModels"]}
+
+
 class NativeLbtek:
     def __init__(self, usb_port=None):
         self.selected_port = usb_port
@@ -28,6 +38,23 @@ class NativeLbtek:
         self.dll = None
         self.base = None
         self.directory_handle = None
+        self.owner_handle = None
+        self.kernel = None
+
+    def _claim_owner(self, port):
+        self.kernel = c.WinDLL("kernel32", use_last_error=True)
+        self.kernel.CreateMutexW.argtypes = [c.c_void_p, c.c_bool, c.c_wchar_p]
+        self.kernel.CreateMutexW.restype = c.c_void_p
+        for name in ("ReleaseMutex", "CloseHandle"):
+            getattr(self.kernel, name).argtypes = [c.c_void_p]
+            getattr(self.kernel, name).restype = c.c_bool
+        handle = self.kernel.CreateMutexW(None, True, f"Local\\1025-LBTEK-USB-{port}")
+        if not handle:
+            raise OSError("无法建立 LBTEK 独占会话")
+        if c.get_last_error() == 183:
+            self.kernel.CloseHandle(handle)
+            raise RuntimeError("LBTEK 已由另一个 1025 控制台会话连接，请先在原入口断开设备")
+        self.owner_handle = handle
 
     def load(self):
         directory = sdk_directory().resolve()
@@ -87,6 +114,7 @@ class NativeLbtek:
             raise RuntimeError(f"未发现指定的 LBTEK USB 设备端口 {self.selected_port}，请刷新设备列表")
         else:
             port = self.selected_port
+        self._claim_owner(port)
         self.checked("addDev", port)
         try:
             self.checked("openLBDevice", port)
@@ -186,6 +214,10 @@ class NativeLbtek:
                 self.dll = None
                 if self.directory_handle:
                     self.directory_handle.close()
+                if self.owner_handle:
+                    self.kernel.ReleaseMutex(self.owner_handle)
+                    self.kernel.CloseHandle(self.owner_handle)
+                    self.owner_handle = None
 
 
 def _serve(pipe, config):

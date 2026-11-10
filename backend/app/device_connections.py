@@ -17,7 +17,7 @@ FIELDS = {
     "io": {"io_device", "dam_serial_port", "dam_baudrate", "dam_unit_id", "adam_host", "adam_port", "adam_unit_id"},
     "stage": {"mode", "connection", "serial_number", "host", "port", "axes", "inverted", "home_direction", "max_steps"},
     "analog": {"mode", "host", "port", "unit_id", "register_base"},
-    "lbtek": {"mode", "usb_port", "max_distance", "names", "units"},
+    "lbtek": {"mode", "usb_port", "max_distance", "names", "units", "models"},
 }
 
 
@@ -58,7 +58,8 @@ class DeviceConnections:
         if device in ("tpg", "io"):
             return AppConfig.model_validate({**self.engine.config.model_dump(), **changes})
         controller, model = (self.stage, StageConfig) if device == "stage" else (self.lbtek, LbtekConfig) if device == "lbtek" else (self.analog, AnalogConfig)
-        return model.model_validate({**controller.config.model_dump(), **changes})
+        candidate = model.model_validate({**controller.config.model_dump(), **changes})
+        return controller.validate_config(candidate) if device == "lbtek" else candidate
 
     async def stop(self, device, actor):
         self.cancel(device)

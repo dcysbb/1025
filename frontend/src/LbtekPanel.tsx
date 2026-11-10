@@ -5,8 +5,8 @@ import { applyConnection, changedFields, connectionMessage } from './deviceConne
 import { Disclosure } from './Motion'
 import HelpTooltip from './HelpTooltip'
 
-export type LbtekConfig = { mode:'real'|'simulation'; usb_port:number|null; max_distance:number; names:string[]; units:('mm'|'°')[] }
-export type LbtekChannel = { channel:number; can_run:boolean; stopped:boolean; enabled:boolean; home:boolean; limit_left:boolean; limit_right:boolean; home_sensor:boolean; position:number; speed:number; acceleration:number }
+export type LbtekConfig = { mode:'real'|'simulation'; usb_port:number|null; max_distance:number; names:string[]; units:('mm'|'°')[];models?:(string|null)[] }
+export type LbtekChannel = { channel:number; can_run:boolean; stopped:boolean; enabled:boolean; home:boolean; limit_left:boolean; limit_right:boolean; home_sensor:boolean;home_supported?:boolean; model?:string|null; position:number; speed:number; acceleration:number }
 type RecordItem = { timestamp:string; channel:number; operation:string; value:number|null; mode:string; result:string; reason:string|null }
 export type LbtekState = { config:LbtekConfig; connected:boolean; channels:LbtekChannel[]; error:string|null; stale:boolean; motion_pending:number[]; uncertain:boolean; busy:boolean; lease_id:string|null; usb_port?:number; axis_base?:number; rocker_enabled:boolean; records:RecordItem[] }
 const request = <T,>(path:string, body?:unknown) => apiRequest<T>(`/api/lbtek-stage${path}`, { method:body === undefined ? 'GET' : 'POST', body:body === undefined ? undefined : JSON.stringify(body), operation:'LBTEK 位移台操作', timeoutMs:25000 })
@@ -22,11 +22,13 @@ export default function LbtekPanel({auth,connected,configuration=false,onDirtyCh
   const [holding,setHolding] = useState<{channel:number;direction:number}|null>(null)
   const moving = useRef(false)
   const [ports,setPorts] = useState<number[]>([]), [scanning,setScanning] = useState(false)
+  const [models,setModels] = useState<{name:string;unit:'mm'|'°'}[]>([]), [modelError,setModelError] = useState('')
   const command = useRef(false), epoch = useRef(0), mounted = useRef(true), lastRead = useRef(0), baseline = useRef<LbtekConfig|null>(null)
   const hold = useRef<{timer?:ReturnType<typeof setTimeout>; started:boolean; token:string; channel:number}|null>(null)
   const leaseTimer = useRef<ReturnType<typeof setInterval>|null>(null)
   const dirty = !!draft && JSON.stringify(draft) !== JSON.stringify(saved)
   useEffect(()=>{onDirtyChange?.(dirty)},[dirty,onDirtyChange])
+  useEffect(()=>{if(!configuration)return;let cancelled=false;void request<{models:typeof models}>('/models').then(result=>{if(!Array.isArray(result.models))throw new Error('后台返回的 LBTEK 型号表格式异常');if(!cancelled){setModels(result.models);setModelError('')}}).catch(e=>{if(!cancelled)setModelError(errorMessage(e,'读取 LBTEK 型号表失败'))});return()=>{cancelled=true}},[configuration])
   const accept = useCallback((next:LbtekState)=>{
     if(!validState(next))throw new Error('LBTEK 状态格式异常，请检查后台版本')
     setState(next);setFresh(true);lastRead.current=Date.now();setReadError('');moving.current=!!next.motion_pending.length
@@ -116,15 +118,16 @@ export default function LbtekPanel({auth,connected,configuration=false,onDirtyCh
       <div className="panel-heading"><div><h2>LBTEK EM-CS5-3</h2><span className="stage-model">三通道步进控制器 · USB</span></div><span className={`stage-state ${fresh&&state?.connected?'stage-state--on':''}`}>{!fresh?'状态待读取':state?.connected?'已连接':'未连接'}{state?.config.mode==='simulation'?' · 模拟':''}</span></div>
       {readError&&<p className="inline-error" role="alert">{readError}</p>}
       {state?.error&&<p className="inline-error" role="alert">{state.error}</p>}
+      {configuration&&modelError&&<p className="inline-error" role="alert">{modelError}</p>}
       {configuration&&draft&&<>
         <fieldset className="lbtek-config" disabled={!auth||busy}>
           <label className="field">LBTEK 运行模式<select value={draft.mode} onChange={e=>patch('mode',e.target.value as LbtekConfig['mode'])}><option value="real">真实设备</option><option value="simulation">模拟模式</option></select></label>
           <label className="field">LBTEK USB 设备<select value={draft.usb_port??''} onChange={e=>patch('usb_port',e.target.value===''?null:Number(e.target.value))}><option value="">自动选择唯一设备</option>{[...new Set([...ports,...(draft.usb_port===null?[]:[draft.usb_port])])].map(port=><option value={port} key={port}>USB 设备端口 {port}</option>)}</select></label>
           <label className="field">LBTEK 单次位移上限<input type="number" min="0.000001" max="1000" step="any" value={draft.max_distance} onChange={e=>patch('max_distance',Number(e.target.value))}/></label>
         </fieldset>
-        <Disclosure title="通道名称与单位"><HelpTooltip label="LBTEK 通道单位">单位应与实际位移台一致。直线台使用 mm，旋转台使用 °；此设置只改变标签，不转换 SDK 数值。单次位移上限按各轴单位计算。</HelpTooltip><div className="lbtek-config">{[1,2,3].map(ch=><div key={ch}><label className="field">CH{ch} 名称<input disabled={!auth||busy} maxLength={32} value={draft.names[ch-1]} onChange={e=>patch('names',draft.names.map((v,i)=>i===ch-1?e.target.value:v))}/></label><label className="field">CH{ch} 单位<select disabled={!auth||busy} value={draft.units[ch-1]} onChange={e=>patch('units',draft.units.map((v,i)=>i===ch-1?e.target.value as 'mm'|'°':v))}><option>mm</option><option>°</option></select></label></div>)}</div></Disclosure>
+        <Disclosure title="通道名称、台型与单位"><HelpTooltip label="LBTEK 台型与单位">记录实际台型后，按官方型号表显示单位、校验行程及速度上限并开放支持的回零。记录台型不会向控制器写入电机参数或自动运动。未记录时不开放回零；单位标签本身不换算 SDK 数值。</HelpTooltip><div className="lbtek-config">{[1,2,3].map(ch=><div key={ch}><label className="field">CH{ch} 名称<input disabled={!auth||busy} maxLength={32} value={draft.names[ch-1]} onChange={e=>patch('names',draft.names.map((v,i)=>i===ch-1?e.target.value:v))}/></label><label className="field">CH{ch} 台型记录<select aria-label={`CH${ch} 台型记录`} disabled={!auth||busy} value={draft.models?.[ch-1]??''} onChange={e=>{const name=e.target.value;setDraft(prior=>prior&&({...prior,models:(prior.models??[null,null,null]).map((v,i)=>i===ch-1?name||null:v),units:prior.units.map((v,i)=>i===ch-1?(models.find(m=>m.name===name)?.unit??v):v)}))}}><option value="">未记录</option>{models.map(m=><option value={m.name} key={m.name}>{m.name}</option>)}</select></label><label className="field">CH{ch} 单位<select disabled={!auth||busy||!!draft.models?.[ch-1]} value={draft.units[ch-1]} onChange={e=>patch('units',draft.units.map((v,i)=>i===ch-1?e.target.value as 'mm'|'°':v))}><option>mm</option><option>°</option></select></label></div>)}</div></Disclosure>
         <div className="hardware-actions"><span className="subtle-note">{dirty?'有未保存的更改':'已保存'}</span><button className="button button--quiet" disabled={!auth||!connected||busy||scanning} onClick={()=>void scan()}><RefreshCw size={15}/>{scanning?'正在刷新…':'刷新 LBTEK 设备'}</button>
-          <button className="button button--primary" disabled={!auth||!connected||!fresh||busy||stopping||!Number.isFinite(draft.max_distance)||draft.max_distance<=0||draft.max_distance>1000} onClick={()=>void run(async()=>{const result=await applyConnection<LbtekState>('lbtek',changedFields(baseline.current,draft,['mode','usb_port','max_distance','names','units']));if(result.config_saved){baseline.current=result.state.config;setSaved(result.state.config);setDraft(result.state.config)}if(!result.ok)throw new Error(connectionMessage(result));return result.state},'配置已保存，LBTEK 已连接')}><Plug size={15}/>{busy?'应用中…':`应用并${state?.connected?'重新':''}连接 LBTEK`}</button>
+          <button className="button button--primary" disabled={!auth||!connected||!fresh||busy||stopping||!Number.isFinite(draft.max_distance)||draft.max_distance<=0||draft.max_distance>1000} onClick={()=>void run(async()=>{const result=await applyConnection<LbtekState>('lbtek',changedFields(baseline.current,draft,['mode','usb_port','max_distance','names','units','models']));if(result.config_saved){baseline.current=result.state.config;setSaved(result.state.config);setDraft(result.state.config)}if(!result.ok)throw new Error(connectionMessage(result));return result.state},'配置已保存，LBTEK 已连接')}><Plug size={15}/>{busy?'应用中…':`应用并${state?.connected?'重新':''}连接 LBTEK`}</button>
           <button className="button button--quiet" disabled={!auth||!connected||busy||!state?.connected} onClick={()=>void run(()=>apiRequest('/api/devices/lbtek/disconnect',{method:'POST',body:'{}'}),'LBTEK 已断开')}>断开 LBTEK</button>
           <button className="button stage-stop" disabled={!auth||!connected||stopping} onClick={()=>void stop()}>停止 / 取消连接</button></div>
       </>}
@@ -150,12 +153,13 @@ export default function LbtekPanel({auth,connected,configuration=false,onDirtyCh
 
 function AxisCard({channel,config,row,reason,onAction,onStop,stopDisabled,onParameters,holdingDirection,onBegin,onEnd,onCancel}:{channel:number;config?:LbtekConfig;row?:LbtekChannel;reason:string;onAction:(channel:number,operation:string,value?:number)=>Promise<void>;onStop:()=>void;stopDisabled:boolean;onParameters:(speed:number,acceleration:number)=>Promise<boolean>;holdingDirection?:number;onBegin:(channel:number,direction:number)=>void;onEnd:(channel:number,direction:number,step:number)=>void;onCancel:()=>void}){
   const unit=config?.units[channel-1]??'mm'
+  const homeSupported=row?.home_supported??row?.home_sensor??false
   const storage=`lbtek-step:${config?.mode}:${config?.usb_port??'auto'}:${channel}:${unit}`
   const [step,setStep]=useState(()=>{try{return localStorage.getItem(storage)??'0.01'}catch{return '0.01'}})
   const [presets,setPresets]=useState<string[]>(()=>{try{const p=JSON.parse(localStorage.getItem(`${storage}:presets`)??'null');if(Array.isArray(p)&&p.length===4&&p.every(v=>typeof v==='string'))return p}catch{}return ['0.001','0.01','0.1','1']})
   const [target,setTarget]=useState('0')
   const [parameterDraft,setParameterDraft]=useState<{speed:string;acceleration:string}|null>(null)
-  const speed=parameterDraft?.speed??String(row?.speed??''), acceleration=parameterDraft?.acceleration??String(row?.acceleration??'')
+  const speed=parameterDraft?.speed??(row?String(Number(row.speed.toPrecision(12))):''), acceleration=parameterDraft?.acceleration??(row?String(Number(row.acceleration.toPrecision(12))):'')
   useEffect(()=>{try{localStorage.setItem(storage,step);localStorage.setItem(`${storage}:presets`,JSON.stringify(presets))}catch{}},[storage,step,presets])
   const n=Number(step), max=config?.max_distance??10
   const stepError=!step.trim()||!Number.isFinite(n)||n<=0?'输入大于零的位移量':n>max?`单次位移上限 ${max} ${unit}`:''
@@ -164,9 +168,9 @@ function AxisCard({channel,config,row,reason,onAction,onStop,stopDisabled,onPara
   const paramError=!speed.trim()||!acceleration.trim()||!Number.isFinite(Number(speed))||!Number.isFinite(Number(acceleration))||Number(speed)<=0||Number(speed)>1000||Number(acceleration)<=0||Number(acceleration)>10000
   const targetError=!target.trim()||!Number.isFinite(Number(target))||row&&Math.abs(Number(target)-row.position)>max
   return <section className="glass-panel lbtek-axis" aria-label={`LBTEK CH${channel} 控制`}>
-    <div className="lbtek-axis-heading"><div><strong>CH{channel}</strong>{config?.names[channel-1]&&<h3>{config.names[channel-1]}</h3>}</div><span className="subtle-note">{row?row.stopped?'静止':'运动中':'未读取'}</span></div>
+    <div className="lbtek-axis-heading"><div><strong>CH{channel}</strong>{config?.names[channel-1]&&<h3>{config.names[channel-1]}</h3>}{(row?.model||config?.models?.[channel-1])&&<span className="lbtek-model">{row?.model||config?.models?.[channel-1]}</span>}</div><span className="subtle-note">{row?row.stopped?'静止':'运动中':'未读取'}</span></div>
     <div className="lbtek-position"><span>开环坐标 <HelpTooltip label={`CH${channel} 开环坐标`}>控制器计算的位置，不能代表编码器实测位移。Home 使用该通道实际原点传感器回零；连接不执行 Home。</HelpTooltip></span><b>{number(row?.position)} <small>{unit}</small></b></div>
-    <div className="lbtek-indicators"><span>{!row?'原点待读取':!row.home_sensor?'原点传感器不可用':row.home?'在原点':'未在原点'}</span><span className={row?.limit_left?'lbtek-warning':''}>负限位{!row?'待读取':row.limit_left?'已触发':'未触发'}</span><span className={row?.limit_right?'lbtek-warning':''}>正限位{!row?'待读取':row.limit_right?'已触发':'未触发'}</span></div>
+    <div className="lbtek-indicators"><span>{!row?'原点待读取':!homeSupported?'台型 / 回零能力未确认':row.home?'在原点':'未在原点'}</span><span className={row?.limit_left?'lbtek-warning':''}>负限位{!row?'待读取':row.limit_left?'已触发':'未触发'}</span><span className={row?.limit_right?'lbtek-warning':''}>正限位{!row?'待读取':row.limit_right?'已触发':'未触发'}</span></div>
     <label className="field">CH{channel} 单次位移（{unit}）<input aria-label={`CH${channel} 单次位移（${unit}）`} inputMode="decimal" type="number" step="any" min="0" max={max} value={step} onChange={e=>setStep(e.target.value)}/></label>
     <div className="lbtek-presets">{presets.map((p,i)=><button key={i} className={`button button--quiet ${step===p?'lbtek-selected':''}`} disabled={!p.trim()||!Number.isFinite(Number(p))||Number(p)<=0||Number(p)>max} onClick={()=>setStep(p)}>{p}</button>)}</div>
     <span className="lbtek-gesture-label">点按 / 按住 <HelpTooltip label={`CH${channel} 点按与按住`}>点按移动一次，按住超过 180ms 连续移动，松开停止。单次位移上限只限制点按和绝对定位，不限制按住运行的总行程。</HelpTooltip></span>
@@ -176,8 +180,8 @@ function AxisCard({channel,config,row,reason,onAction,onStop,stopDisabled,onPara
       onClick={e=>{if(e.detail===0)void onAction(channel,'relative',dir*n)}}>{dir<0?<ArrowLeft size={20}/>:<ArrowRight size={20}/>} {dir<0?'−':'＋'}</button>)}</div>
     {(reason||stepError||motionReason)&&<p className="lbtek-reason" role="status">{reason||stepError||motionReason}</p>}
     <div className="lbtek-parameters"><label className="field">速度（{unit}/s）<input aria-label={`CH${channel} 速度`} type="number" step="any" value={speed} onChange={e=>{setParameterDraft({speed:e.target.value,acceleration})}}/></label><label className="field">加速度（{unit}/s²）<input aria-label={`CH${channel} 加速度`} type="number" step="any" value={acceleration} onChange={e=>{setParameterDraft({speed,acceleration:e.target.value})}}/></label></div>
-    <div className="hardware-actions"><button className="button button--quiet" disabled={!!reason||paramError||!parameterDraft} onClick={()=>{const submitted=parameterDraft;void onParameters(Number(speed),Number(acceleration)).then(ok=>{if(ok)setParameterDraft(current=>current===submitted?null:current)})}}>应用 CH{channel} 参数</button><button className="button button--quiet" disabled={!!reason||limitConflict||!row?.home_sensor} onClick={()=>void onAction(channel,'home')}><Home size={15}/>CH{channel} 回零</button><button className="button stage-stop" disabled={stopDisabled} onClick={onStop}><Square size={15}/>停止</button></div>
-    {!row?.home_sensor&&row&&<p className="lbtek-reason">未报告可用的原点传感器，回零不可用</p>}
+    <div className="hardware-actions"><button className="button button--quiet" disabled={!!reason||paramError||!parameterDraft} onClick={()=>{const submitted=parameterDraft;void onParameters(Number(speed),Number(acceleration)).then(ok=>{if(ok)setParameterDraft(current=>current===submitted?null:current)})}}>应用 CH{channel} 参数</button><button className="button button--quiet" disabled={!!reason||limitConflict||!homeSupported} onClick={()=>void onAction(channel,'home')}><Home size={15}/>CH{channel} 回零</button><button className="button stage-stop" disabled={stopDisabled} onClick={onStop}><Square size={15}/>停止</button></div>
+    {!homeSupported&&row&&<p className="lbtek-reason">请先在硬件连接记录支持回零的实际台型</p>}
     <Disclosure title="绝对定位与快捷位移"><label className="field">CH{channel} 目标坐标（{unit}）<input type="number" step="any" value={target} onChange={e=>setTarget(e.target.value)}/></label><button className="button" disabled={!!reason||!!motionReason||!!targetError} onClick={()=>void onAction(channel,'absolute',Number(target))}>移动到目标</button><div className="lbtek-preset-editor">{presets.map((p,i)=><label className="field" key={i}>快捷 {i+1}<input aria-label={`CH${channel} 快捷 ${i+1}`} type="number" min="0" max={max} step="any" value={p} onChange={e=>setPresets(prior=>prior.map((v,j)=>j===i?e.target.value:v))}/></label>)}</div>{targetError&&<p className="lbtek-reason">请输入有效坐标，且与当前位置距离不超过 {max} {unit}</p>}</Disclosure>
   </section>
 }

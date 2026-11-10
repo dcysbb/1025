@@ -38,6 +38,7 @@ class LbtekTests(unittest.IsolatedAsyncioTestCase):
         self.factory = Mock(return_value=self.driver)
         self.event = Mock()
         self.controller = LbtekController(self.root, self.event, self.factory)
+        self.controller.catalog['EM-LSS65-13C1'] = dict(name='EM-LSS65-13C1',unit='mm',min_position=-6.5,max_position=6.5,max_speed=20,max_acceleration=20,home_supported=True)
 
     async def asyncTearDown(self):
         self.driver.fail = None
@@ -46,6 +47,7 @@ class LbtekTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def connect(self):
+        self.controller.config.models = ['EM-LSS65-13C1'] * 3
         await self.controller.connect('test')
 
     def action(self, op='relative', channel=1, value=.01, **kwargs):
@@ -190,8 +192,8 @@ class LbtekTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, '摇杆'):
             await self.controller.action(self.action(), 'test')
         await self.controller.rocker(False, 'test')
-        self.controller.channels[1]['home_sensor'] = False
-        with self.assertRaisesRegex(RuntimeError, '原点传感器'):
+        self.controller.channels[1]['home_supported'] = False
+        with self.assertRaisesRegex(RuntimeError, '支持回零'):
             await self.controller.action(self.action('home', 2, None), 'test')
         await self.controller.action(self.action('home', 1, None), 'test')
         self.assertIn(('action', ('home', 1, None)), self.driver.calls)
@@ -221,6 +223,29 @@ class LbtekTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.factory.called)
         await broken.configure(LbtekConfig(), 'test')
         self.assertIsNone(broken.config_error)
+
+    async def test_recorded_model_limits_targets_and_parameters_without_writing_motor_setup(self):
+        await self.connect()
+        with self.assertRaisesRegex(ValueError, '行程'):
+            await self.controller.action(self.action(value=7), 'test')
+        with self.assertRaisesRegex(ValueError, '速度上限 20'):
+            await self.controller.parameters(LbtekParameters(channel=1, speed=21, acceleration=2), 'test')
+        self.assertFalse(any(name in ('action','parameters','addMotor') for name, _ in self.driver.calls))
+
+    async def test_home_capability_uses_model_not_inactive_opto_input(self):
+        await self.connect()
+        self.controller.channels[0]['home_sensor'] = False
+        self.assertTrue(self.controller.channels[0]['home_supported'])
+        await self.controller.action(self.action('home', value=None), 'test')
+        self.assertIn(('action', ('home', 1, None)), self.driver.calls)
+
+    async def test_unknown_model_is_rejected_before_stopping_old_target(self):
+        await self.connect()
+        calls = list(self.driver.calls)
+        connections = DeviceConnections(Mock(), Mock(), Mock(), self.controller)
+        with self.assertRaisesRegex(ValueError, '官方型号表'):
+            await connections.apply('lbtek', {'models':['unknown',None,None]}, 'test')
+        self.assertEqual(self.driver.calls, calls)
 
     async def test_configuration_failure_does_not_replace_memory_and_target_failure_keeps_saved(self):
         original = self.controller.config
@@ -269,6 +294,7 @@ class LbtekTests(unittest.IsolatedAsyncioTestCase):
 class NativeTests(unittest.TestCase):
     def fake(self, base):
         driver = NativeLbtek()
+        driver._claim_owner = Mock()
         dll = Mock()
         driver.dll = dll
         dll.listLBMotorControlerDevices.side_effect = lambda ports, _: (ports.__setitem__(0, 42), 1)[1]
@@ -334,6 +360,14 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(pipe.send.call_count, 1)
         worker.terminate.assert_called_once()
         self.assertIsNone(driver.worker)
+
+    def test_second_console_owner_is_rejected_without_opening_usb(self):
+        driver, dll = self.fake(0)
+        driver._claim_owner.side_effect = RuntimeError('already owned')
+        with self.assertRaisesRegex(RuntimeError, 'already owned'):
+            driver.connect()
+        dll.addDev.assert_not_called()
+        dll.openLBDevice.assert_not_called()
 
     def test_native_worker_stops_on_expired_lease_even_without_parent_requests(self):
         pipe, driver = Mock(), Mock()

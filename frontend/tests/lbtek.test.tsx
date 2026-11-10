@@ -26,6 +26,7 @@ beforeEach(()=>{
       if(path.endsWith('/apply-connect')){state={...state,config:{...state.config,...body.config}};return new Response(JSON.stringify({ok:true,config_saved:true,connected:true,state}))}
     }else if(offline)throw new TypeError('Failed to fetch')
     if(path.endsWith('/devices'))return new Response(JSON.stringify({ports:[42]}))
+    if(path.endsWith('/models'))return new Response(JSON.stringify({models:[{name:'EM-LSS65-13C1',unit:'mm'}]}))
     return response()
   }
   container=document.getElementById('root')!;root=createRoot(container)
@@ -182,4 +183,19 @@ test('unsuccessful parameter writes retain the input draft',async()=>{
   await click('应用 CH1 参数');await wait(550)
   assert.equal(field('CH1 速度').value,'123')
   assert.match(container.textContent!,/控制器拒绝速度范围/)
+})
+
+test('recorded CH1 model saves independently and determines display units',async()=>{
+  await render(true)
+  await change(field('CH1 台型记录'),'EM-LSS65-13C1')
+  await click('应用并重新连接 LBTEK')
+  assert.deepEqual(writes[0].body,{config:{models:['EM-LSS65-13C1',null,null]}})
+  assert.equal(writes.filter(w=>w.path.endsWith('/action')).length,0)
+})
+
+test('home remains available for a known supported model when opto input is inactive',async()=>{
+  state.channels[0]={...state.channels[0],model:'EM-LSS65-13C1',home_sensor:false,home_supported:true}
+  await render()
+  assert.equal(button('CH1 回零').disabled,false)
+  assert.ok(container.textContent?.includes('EM-LSS65-13C1'))
 })
