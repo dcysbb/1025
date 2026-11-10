@@ -32,6 +32,7 @@ from .build_info import VERSION, build_info
 from .runtime import RuntimeControl, SystemAction
 from .analog_output import AnalogOutput, AnalogError, install_analog_routes
 from .device_connections import DeviceConnections, install_connection_routes
+from .lbtek_stage import LbtekController, install_lbtek_routes
 
 
 DATA_DIR = data_directory()
@@ -40,7 +41,8 @@ HISTORY = HistoryStore(DATA_DIR / "history.sqlite3")
 ENGINE = InterlockEngine(CONFIG, HISTORY)
 STAGE = StageController(DATA_DIR, ENGINE._event)
 ANALOG = AnalogOutput(DATA_DIR, ENGINE.snapshot, ENGINE._event)
-CONNECTIONS = DeviceConnections(ENGINE, STAGE, ANALOG)
+LBTEK = LbtekController(DATA_DIR, ENGINE._event)
+CONNECTIONS = DeviceConnections(ENGINE, STAGE, ANALOG, LBTEK)
 SYSTEM = RuntimeControl()
 SESSIONS: dict[str, float] = {}
 LOGIN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
@@ -155,6 +157,10 @@ async def lifespan(_: FastAPI):
     yield
     if not SYSTEM.prepared:
         try:
+            await LBTEK.disconnect()
+        except Exception as exc:
+            ENGINE._event("lbtek_fault", "error", str(exc), "system")
+        try:
             await ANALOG.disconnect()
         except AnalogError as exc:
             ENGINE._event("analog_fault", "error", str(exc), "system")
@@ -185,18 +191,20 @@ app.add_middleware(
 install_stage_routes(app, STAGE, require_read_access, require_operator, verify_origin)
 install_analog_routes(app, ANALOG, require_read_access, require_operator, verify_origin)
 install_connection_routes(app, CONNECTIONS, require_operator, verify_origin)
+install_lbtek_routes(app, LBTEK, require_read_access, require_operator, verify_origin)
 
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     if SYSTEM.pending and request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path not in (
-            "/api/stage/stop", "/api/valve/close", "/api/analog-output/stop"):
+            "/api/stage/stop", "/api/lbtek-stage/stop", "/api/valve/close", "/api/analog-output/stop"):
         return JSONResponse({"detail": "控制台正在退出或重启，暂不接受新的操作"}, status_code=409)
     path = request.url.path
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         stops = {"/api/stage/stop": ("stage",), "/api/analog-output/stop": ("analog",),
+                 "/api/lbtek-stage/stop": ("lbtek",),
                  "/api/valve/close": ("tpg", "io"), "/api/interlock/disarm": ("tpg", "io"),
-                 "/api/system/control": ("tpg", "io", "stage", "analog")}
+                 "/api/system/control": ("tpg", "io", "stage", "analog", "lbtek")}
         if path in stops:
             try:
                 require_operator(request)
@@ -236,7 +244,7 @@ async def system_control(body: SystemAction, request: Request, tasks: Background
     if not is_local(request):
         raise HTTPException(403, "退出与重启只能在运行控制台的本机操作")
     try:
-        await SYSTEM.prepare(body.action, STAGE, ENGINE, actor, ANALOG)
+        await SYSTEM.prepare(body.action, STAGE, ENGINE, actor, ANALOG, LBTEK)
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     tasks.add_task(SYSTEM.finish_response)

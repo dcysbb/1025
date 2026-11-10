@@ -17,6 +17,10 @@ config.json
 stage.json
 analog-output.json
 analog-output-recovery.json
+lbtek-stage.json
+lbtek-stage-recovery.json
+backend/vendor/lbtek/
+backend/lbtek/
 lan-cert.pem
 lan-key.pem
 # Thorlabs XA writes its SDK logs under the backend working directory.

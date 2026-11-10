@@ -15,12 +15,17 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'pip 更新失败' }
     & '.venv-build\Scripts\python.exe' -m pip install -r requirements-dev.txt
     if ($LASTEXITCODE -ne 0) { throw '依赖安装失败' }
+    $lbtekSdk = Join-Path (Get-Location) 'vendor\lbtek'
+    if (-not (Test-Path (Join-Path $lbtekSdk 'moverLibrary_x64.dll'))) {
+        & '.venv-build\Scripts\python.exe' (Join-Path $PSScriptRoot 'install-lbtek-sdk.py')
+        if ($LASTEXITCODE -ne 0) { throw 'LBTEK SDK 安装失败' }
+    }
     $buildInfo = Join-Path (Get-Location) 'build\build-info.json'
     & '.venv-build\Scripts\python.exe' (Join-Path $PSScriptRoot 'write-build-info.py') $buildInfo
     if ($LASTEXITCODE -ne 0) { throw '构建信息生成失败' }
-    & '.venv-build\Scripts\python.exe' -m PyInstaller --clean --noconfirm --onedir --name VacuumInterlock --collect-all uvicorn --collect-all fastapi --collect-all cryptography --collect-all thorlabs_xa --hidden-import serial.tools.list_ports --add-data '..\frontend\dist;frontend\dist' --add-data "$buildInfo;." run.py
+    & '.venv-build\Scripts\python.exe' -m PyInstaller --clean --noconfirm --onedir --name VacuumInterlock --collect-all uvicorn --collect-all fastapi --collect-all cryptography --collect-all thorlabs_xa --hidden-import serial.tools.list_ports --add-data '..\frontend\dist;frontend\dist' --add-data "$lbtekSdk;vendor\lbtek" --add-data "$buildInfo;." run.py
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller 失败，退出码 $LASTEXITCODE" }
-    & '.venv-build\Scripts\python.exe' -m PyInstaller --clean --noconfirm --onedir --name VacuumInterlockService --collect-all uvicorn --collect-all fastapi --collect-all cryptography --collect-all thorlabs_xa --hidden-import serial.tools.list_ports --hidden-import win32timezone --add-data '..\frontend\dist;frontend\dist' --add-data "$buildInfo;." windows_service.py
+    & '.venv-build\Scripts\python.exe' -m PyInstaller --clean --noconfirm --onedir --name VacuumInterlockService --collect-all uvicorn --collect-all fastapi --collect-all cryptography --collect-all thorlabs_xa --hidden-import serial.tools.list_ports --hidden-import win32timezone --add-data '..\frontend\dist;frontend\dist' --add-data "$lbtekSdk;vendor\lbtek" --add-data "$buildInfo;." windows_service.py
     if ($LASTEXITCODE -ne 0) { throw "Windows service 打包失败，退出码 $LASTEXITCODE" }
     $launcherDir = Join-Path (Get-Location) 'dist\VacuumInterlock\scripts'
     New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null

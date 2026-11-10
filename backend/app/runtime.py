@@ -21,13 +21,15 @@ class RuntimeControl:
         return {"can_manage": self.signal is not None, "pending": self.pending, "instance_id": self.instance_id,
                 "unavailable_reason": "" if self.signal else "当前由外部进程或 Windows 服务管理，请通过对应管理入口退出或重启。"}
 
-    async def prepare(self, action, stage, engine, actor, analog=None):
+    async def prepare(self, action, stage, engine, actor, analog=None, lbtek=None):
         if self.signal is None:
             raise RuntimeError(self.snapshot()["unavailable_reason"])
         if self.pending:
             raise RuntimeError("退出或重启正在处理，请勿重复提交")
         self.pending = action
         try:
+            if lbtek is not None:
+                await lbtek.disconnect(actor)
             if analog is not None:
                 await analog.disconnect(actor)
             if stage.driver is not None or stage._connecting or stage._recovering:

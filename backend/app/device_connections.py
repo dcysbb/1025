@@ -8,14 +8,16 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from .models import AppConfig
 from .stage import StageConfig
 from .analog_output import AnalogConfig
+from .lbtek_stage import LbtekConfig
 
 
-Device = Literal["tpg", "io", "stage", "analog"]
+Device = Literal["tpg", "io", "stage", "analog", "lbtek"]
 FIELDS = {
     "tpg": {"tpg_connection", "tpg_serial_port", "tpg_baudrate", "tpg_host", "tpg_port"},
     "io": {"io_device", "dam_serial_port", "dam_baudrate", "dam_unit_id", "adam_host", "adam_port", "adam_unit_id"},
     "stage": {"mode", "connection", "serial_number", "host", "port", "axes", "inverted", "home_direction", "max_steps"},
     "analog": {"mode", "host", "port", "unit_id", "register_base"},
+    "lbtek": {"mode", "usb_port", "max_distance", "names", "units"},
 }
 
 
@@ -25,8 +27,9 @@ class ConnectionChange(BaseModel):
 
 
 class DeviceConnections:
-    def __init__(self, engine, stage, analog):
+    def __init__(self, engine, stage, analog, lbtek=None):
         self.engine, self.stage, self.analog = engine, stage, analog
+        self.lbtek = lbtek
         self.pending = {}
 
     def cancel(self, device):
@@ -34,6 +37,8 @@ class DeviceConnections:
             self.pending[device].set()
 
     def busy_for(self, path):
+        if path.startswith("/api/lbtek-stage"):
+            return "lbtek" in self.pending
         if path.startswith("/api/stage"):
             return "stage" in self.pending
         if path.startswith("/api/analog-output") or path == "/api/debug/analog-output":
@@ -43,6 +48,8 @@ class DeviceConnections:
         return False
 
     def snapshot(self, device):
+        if device == "lbtek":
+            return self.lbtek.snapshot()
         return (self.stage if device == "stage" else self.analog if device == "analog" else self.engine).snapshot()
 
     def validate(self, device, changes):
@@ -50,11 +57,13 @@ class DeviceConnections:
             raise ValueError("此设备不支持修改字段：" + ", ".join(sorted(set(changes) - FIELDS[device])))
         if device in ("tpg", "io"):
             return AppConfig.model_validate({**self.engine.config.model_dump(), **changes})
-        controller, model = (self.stage, StageConfig) if device == "stage" else (self.analog, AnalogConfig)
+        controller, model = (self.stage, StageConfig) if device == "stage" else (self.lbtek, LbtekConfig) if device == "lbtek" else (self.analog, AnalogConfig)
         return model.model_validate({**controller.config.model_dump(), **changes})
 
     async def stop(self, device, actor):
         self.cancel(device)
+        if device == "lbtek":
+            return await self.lbtek.stop(actor)
         if device == "stage":
             return await self.stage.stop(actor)
         if device == "analog":
@@ -64,8 +73,8 @@ class DeviceConnections:
 
     async def disconnect(self, device, actor):
         self.cancel(device)
-        if device in ("stage", "analog"):
-            return await (self.stage if device == "stage" else self.analog).disconnect(actor)
+        if device in ("stage", "analog", "lbtek"):
+            return await (self.stage if device == "stage" else self.lbtek if device == "lbtek" else self.analog).disconnect(actor)
         engine = self.engine
         async with engine._lock:
             if engine.interlock == "armed":
@@ -139,7 +148,11 @@ class DeviceConnections:
                     if not result["ok"]:
                         raise RuntimeError(result.get("error", "连接失败"))
             else:
-                controller = self.stage if device == "stage" else self.analog
+                controller = self.stage if device == "stage" else self.lbtek if device == "lbtek" else self.analog
+                if device == "lbtek" and (controller.driver or controller.uncertain):
+                    if not controller.driver:
+                        await controller.connect(actor)
+                    await controller.stop(actor)
                 if device == "stage" and controller._uncertain and controller.driver is None:
                     await controller.recover(False, actor)
                 if device == "stage" and controller.driver is not None:

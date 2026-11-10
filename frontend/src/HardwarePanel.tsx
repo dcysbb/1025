@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check, Plug, RefreshCw } from 'lucide-react'
 import StagePanel from './StagePanel'
+import LbtekPanel from './LbtekPanel'
 import AnalogOutputPanel from './AnalogOutputPanel'
 import { Disclosure } from './Motion'
 import { apiRequest, errorMessage } from './apiClient'
@@ -50,6 +51,7 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
   const [loadVersion, setLoadVersion] = useState(0)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [stageDirty, setStageDirty] = useState(false)
+  const [lbtekDirty, setLbtekDirty] = useState(false)
   const [analogDirty, setAnalogDirty] = useState(false)
   const [analogHost, setAnalogHost] = useState<HTMLDivElement | null>(null)
   const [cancelling, setCancelling] = useState('')
@@ -61,7 +63,7 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
     : busy ? '正在保存或连接设备，请等待本次请求结束。'
     : terminalBusy ? '正在操作 DAM 端子，请等待本次请求结束。' : ''
   const dirty = (keys: (keyof HardwareConfig)[]) => !!draft && !!saved && keys.some(key => JSON.stringify(draft[key]) !== JSON.stringify(saved[key]))
-  const anyDirty = dirty([...TPG, ...IO, ...MAPPING, ...TEXT]) || stageDirty || analogDirty
+  const anyDirty = dirty([...TPG, ...IO, ...MAPPING, ...TEXT]) || stageDirty || analogDirty || lbtekDirty
   useEffect(() => { onDirtyChange?.(anyDirty) }, [anyDirty, onDirtyChange])
   useEffect(() => {
     if (!lastRead) return
@@ -176,6 +178,7 @@ export default function HardwarePanel({ auth, connected, systemState, onDirtyCha
           {state?.io.manual_reset_required && <p className="inline-error">I/O 重连已锁存，请在联锁控制中人工复位。</p>}
         </section>
         <StagePanel auth={auth} connected={connected} configuration onDirtyChange={setStageDirty} />
+        <LbtekPanel auth={auth} connected={connected} configuration onDirtyChange={setLbtekDirty} />
         <div ref={setAnalogHost}/>
       </div>
       <div role="tabpanel" aria-labelledby="hardware-tab-terminals" id="hardware-terminals" hidden={tab !== 'terminals'}>

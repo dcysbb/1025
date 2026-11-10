@@ -364,11 +364,11 @@ test('a pre-command output poll cannot overwrite a confirmed relay result',async
 })
 
 
-test('device connections contain four cards and allow connected analog IP editing',async()=>{
+test('device connections contain five cards and allow connected analog IP editing',async()=>{
   await render()
   const cards=container.querySelectorAll('#hardware-devices .hardware-card')
-  assert.equal(cards.length,4)
-  for(const name of ['TPG366','I/O 控制器','PDXC3','ZS-AO-4-RJ45']) assert.ok([...cards].some(card=>card.querySelector('h2')?.textContent?.includes(name)))
+  assert.equal(cards.length,5)
+  for(const name of ['TPG366','I/O 控制器','PDXC3','ZS-AO-4-RJ45','LBTEK EM-CS5-3']) assert.ok([...cards].some(card=>card.querySelector('h2')?.textContent?.includes(name)))
   const ip=field('模拟量模块 IP 地址')
   assert.equal(ip.matches(':disabled'),false)
   await change(ip,'192.168.0.8')
