@@ -31,9 +31,10 @@ class DebugRelays(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.e._debug_deadlines)
         self.assertTrue(any(x['type']=='debug_relay' for x in self.history.list_events(None,None)))
 
-    async def test_auto_close_and_arm_block(self):
+    async def test_auto_close_remains_independent_of_arm(self):
         await self.e.debug_set_relay(0,True,1)
-        with self.assertRaisesRegex(InterlockError,'Debug'): self.e._validate_arm()
+        await self.e._poll_tpg()
+        self.e._validate_arm()
         self.e._debug_deadlines[0] = time.monotonic()-1
         await self.e._tick(time.monotonic())
         self.assertFalse((await self.e.debug_relays())['outputs'][0])
@@ -56,7 +57,8 @@ class DebugRelays(unittest.IsolatedAsyncioTestCase):
         for _ in range(3):
             await self.e._tick(time.monotonic()+120)
             self.assertTrue((await self.e.debug_relays())['outputs'][0])
-        with self.assertRaisesRegex(InterlockError,'Debug'): self.e._validate_arm()
+        await self.e._poll_tpg()
+        self.e._validate_arm()
         await self.e.debug_set_relay(0,False,0)
         self.assertFalse((await self.e.debug_relays())['outputs'][0])
         self.assertFalse(self.e._debug_deadlines)

@@ -75,18 +75,20 @@ class ValvePolarityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.e.interlock, 'tripped')
         self.assertEqual([call.args for call in device.write_output.await_args_list], [(0, False), (0, True)])
 
-    async def test_arm_reset_fault_clear_and_stop_all_request_mapped_close(self):
+    async def test_arm_preserves_output_while_reset_fault_clear_and_stop_request_mapped_close(self):
         device = await self.real_device()
         self.e.config.recovery_hold_s = 0
         self.e._recovery_since = time.monotonic() - 5
         with patch.object(self.e, '_poll_tpg', new=AsyncMock()):
             await self.e.arm()
+            device.write_output.assert_not_awaited()
             self.e.interlock = 'fault'
+            self.e._recovery_since = time.monotonic() - 5
             await self.e.reset()
         self.e.interlock = 'fault'
         await self.e.clear_fault()
         await self.e.stop()
-        self.assertTrue(device.write_output.await_count >= 4)
+        self.assertTrue(device.write_output.await_count >= 3)
         self.assertTrue(all(call.args == (0, True) for call in device.write_output.await_args_list))
         self.assertEqual(self.e.interlock, 'disarmed')
 

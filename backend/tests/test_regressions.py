@@ -92,9 +92,10 @@ class SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.e.snapshot()['valve'], 'open')
         self.assertTrue(self.e.snapshot()['valve_open_sensor'])
 
-    async def test_io_fault_is_not_permissive(self):
+    async def test_io_fault_does_not_block_pressure_only_arm(self):
         await self.e.inject_io_fault(True)
-        with self.assertRaises(InterlockError):await self.e.arm()
+        await self.e.arm()
+        self.assertEqual(self.e.interlock, 'armed')
         self.assertFalse(self.e.snapshot()['adam_connected'])
 
     async def test_configured_channel_four_and_thresholds(self):

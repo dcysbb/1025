@@ -34,7 +34,7 @@ class ClearFault(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.e._valve_command)
         self.e.adam.write_output.assert_awaited_once_with(self.e.config.open_output,False)
         self.assertEqual(self.e.snapshot()['valve'],'unknown')
-        with self.assertRaises(InterlockError):self.e._validate_arm()
+        self.e._validate_arm()
 
     async def test_old_motion_timeout_does_not_retrip_after_acknowledgement(self):
         await self.e.trip('motion timeout',fault=True)
@@ -43,13 +43,13 @@ class ClearFault(unittest.IsolatedAsyncioTestCase):
         await self.e._tick(time.monotonic())
         self.assertEqual(self.e.interlock,'disarmed')
 
-    async def test_pressure_hysteresis_is_still_required_for_rearming(self):
+    async def test_manual_rearm_uses_trip_threshold_after_clearing_fault(self):
         await self.e.trip('pressure trip')
         self.e._sim_pressure[0]=.008  # below trip .01, above reset .005
         await self.e._poll_tpg()
         await self.e.clear_fault()
-        with self.assertRaisesRegex(InterlockError,'恢复阈值'):await self.e.arm()
-        self.assertEqual(self.e.interlock,'disarmed')
+        await self.e.arm()
+        self.assertEqual(self.e.interlock,'armed')
 
     async def test_failed_output_off_does_not_clear_fault(self):
         self.e.mode='real';self.e.interlock='fault';self.e._adam_connected=True

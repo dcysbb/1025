@@ -306,6 +306,25 @@ test('fault acknowledgement uses clear-fault without automatically arming',async
   assert.ok(byText('启用联锁'))
 })
 
+for(const interlock of ['tripped','fault'] as const)test(`${interlock} allows direct arm with an open valve without a reset request`,async()=>{
+  const requests:string[]=[]
+  const original=globalThis.fetch
+  globalThis.fetch=async(url,options)=>{
+    if(options?.method==='POST')requests.push(String(url))
+    if(String(url).endsWith('/interlock/arm'))return new Response(JSON.stringify({...status,interlock:'armed',valve:'open'}))
+    return original(url,options)
+  }
+  await act(async()=>{Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify({...status,interlock,valve:'open',valve_closed_sensor:false,trip_reason:'previous fault'})})})
+  await click(byText('联锁控制'))
+  assert.equal(byText('启用联锁').disabled,false)
+  assert.ok(container.textContent?.includes('当前压力低于关阀阈值'))
+  assert.equal(container.textContent?.includes('检查压力与关闭到位'),false)
+  await click(byText('启用联锁'))
+  assert.deepEqual(requests,['/api/interlock/arm'])
+  assert.equal(clearFaultCalls,0)
+  assert.ok(byText('停用联锁'))
+})
+
 test('pressure recovery mode is selectable and saved without touching hardware settings',async()=>{
   const original=globalThis.fetch
   let saved:Record<string,unknown>|null=null

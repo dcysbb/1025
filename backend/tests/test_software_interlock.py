@@ -101,12 +101,13 @@ class SoftwareInterlock(unittest.IsolatedAsyncioTestCase):
         await self.e.close_valve()
         self.e.adam.write_output.assert_awaited_with(0, False)
 
-    async def test_arm_rechecks_closed_feedback_after_reading_devices(self):
+    async def test_arm_does_not_read_or_require_closed_feedback(self):
+        self.e._io_inputs = [False] * 8
         self.e.adam.read_inputs.return_value = [False] * 8
-        with self.assertRaisesRegex(InterlockError, '关闭位置反馈'):
-            await self.e.arm()
-        self.assertEqual(self.e.interlock, 'fault')
-        self.assertFalse(self.outputs[0])
+        await self.e.arm()
+        self.assertEqual(self.e.interlock, 'armed')
+        self.e.adam.read_inputs.assert_not_awaited()
+        self.e.adam.write_output.assert_not_awaited()
 
     async def test_sensor_conflict_trips_before_any_open_command(self):
         await self.e.arm()

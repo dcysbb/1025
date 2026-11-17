@@ -320,32 +320,8 @@ class InterlockEngine:
                 raise InterlockError("硬件配置或反馈未通过校验")
 
     def _validate_arm(self) -> None:
-        if self._debug_deadlines:
-            raise InterlockError("请先关闭 Debug 手动输出，再启用联锁")
-        if self._rearm_required:
-            fault = self._reset_conditions()
-            if fault:
-                raise InterlockError(fault)
-            if self.status.valve != "closed":
-                raise InterlockError("启用前必须确认阀门已关闭")
-            if self._recovery_since is None or time.monotonic()-self._recovery_since < self.config.recovery_hold_s:
-                raise InterlockError("等待真空恢复状态稳定后才能启用联锁")
-        if self.interlock == "tripped":
-            raise InterlockError("联锁已触发，须在压力恢复并保持后人工复位")
-        if self.mode == "real":
-            tpg_address = self.config.tpg_serial_port if self.config.tpg_connection == "usb" else self.config.tpg_host
-            if not tpg_address or not (self.config.dam_serial_port if self.config.io_device == "dam0808d" else self.config.adam_host):
-                raise InterlockError("请先设置真空规与 I/O 控制器连接地址")
-            selected = [ch for ch in self.config.channels if ch.enabled]
-            if not selected:
-                raise InterlockError("至少选择一个真空保护通道")
-            if not self._tpg_connected or not self._adam_connected:
-                raise InterlockError("真空规与 I/O 控制器都必须在线")
-            if self._tpg_error or self._io_error:
-                raise InterlockError("设备报告故障，联锁不能启用")
-            if self.status.valve != "closed":
-                raise InterlockError("先关闭阀门并确认关闭位置传感器动作")
-        if self._last_tpg_read is None or time.monotonic() - self._last_tpg_read > self.config.stale_timeout_s:
+        if (not self._tpg_connected or self._last_tpg_read is None
+                or time.monotonic() - self._last_tpg_read > self.config.stale_timeout_s):
             raise InterlockError("真空数据尚未更新或已超时")
         bad = self._pressure_fault()
         if bad:
@@ -552,30 +528,18 @@ class InterlockEngine:
     async def arm(self, actor: str = "operator") -> None:
         self._refresh_status()
         self._validate_arm()
-        self._check_fresh()
-        if self.interlock not in ("disarmed", "ready"):
-            raise InterlockError("联锁当前状态不允许启用")
-        try:
-            await self._write_valve_request(False)
-            if self.mode == "real":
-                await self._poll_io()
-                await self._poll_tpg()
-                self._check_fresh()
-                if self._pressure_fault():
-                    raise InterlockError(self._pressure_fault())
-                self._refresh_status()
-                if self.status.valve != "closed":
-                    raise InterlockError("关闭位置反馈已变化，不能启用联锁")
-        except (ModbusError, OSError, InterlockError) as exc:
-            await self._safe_open_output()
-            self.interlock = "fault"
-            self.trip_reason = str(exc)
-            self._event("arm_failed", "critical", f"联锁启用失败：{exc}", actor)
-            raise InterlockError(str(exc)) from exc
+        if self.interlock == "armed":
+            return
         self.interlock = "armed"
         self._rearm_required = False
+        self._auto_reopen_pending = False
+        self._recovery_since = None
+        self._pending_gauge_trip = None
+        self._valve_command = None
+        self._motion_reported = True
+        self._motion_timed_out = False
         self.trip_reason = None
-        self._event("interlock_armed", "info", "分子泵真空保护联锁已启用", actor)
+        self._event("interlock_armed", "info", "当前压力低于关阀阈值，联锁已启用", actor)
         self._refresh_status()
         self._publish()
 
