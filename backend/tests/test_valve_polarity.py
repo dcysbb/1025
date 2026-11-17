@@ -75,6 +75,22 @@ class ValvePolarityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.e.interlock, 'tripped')
         self.assertEqual([call.args for call in device.write_output.await_args_list], [(0, False), (0, True)])
 
+    async def test_open_reaches_mapped_relay_without_a_closed_position_prerequisite(self):
+        for polarity in (True, False):
+            for already_open in (False, True):
+                with self.subTest(polarity=polarity, already_open=already_open):
+                    device = await self.real_device(polarity=polarity)
+                    self.e.config.valve_open_di = 1
+                    device.read_inputs.return_value = [False, already_open] + [False] * 6
+                    self.e._valve_command = None
+                    await self.e._poll_io()
+                    self.e.interlock = 'armed'
+                    self.assertEqual(self.e.snapshot()['valve'], 'open' if already_open else 'unknown')
+                    await self.e.open_valve()
+                    device.write_output.assert_awaited_once_with(0, polarity)
+                    await self.e.close_valve()
+                    device.write_output.assert_awaited_with(0, not polarity)
+
     async def test_arm_preserves_output_while_reset_fault_clear_and_stop_request_mapped_close(self):
         device = await self.real_device()
         self.e.config.recovery_hold_s = 0

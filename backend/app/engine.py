@@ -646,8 +646,6 @@ class InterlockEngine:
         if fault:
             await self.trip(fault)
             raise InterlockError(fault)
-        if self.status.valve != "closed":
-            raise InterlockError("只有确认阀门关闭后才能发送开阀命令")
         try:
             await self._write_valve_request(True)
         except (ModbusError, OSError) as exc:

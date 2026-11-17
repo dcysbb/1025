@@ -325,6 +325,26 @@ for(const interlock of ['tripped','fault'] as const)test(`${interlock} allows di
   assert.ok(byText('停用联锁'))
 })
 
+for(const valve of ['unknown','open'] as const)test(`valve controls send requests when feedback is ${valve}`,async()=>{
+  const requests:string[]=[]
+  const original=globalThis.fetch
+  const current={...status,interlock:'armed',valve,valve_closed_sensor:false}
+  globalThis.fetch=async(url,options)=>{
+    if(options?.method==='POST'){
+      requests.push(String(url))
+      return new Response(JSON.stringify(current))
+    }
+    return original(url,options)
+  }
+  await act(async()=>{Socket.instances.at(-1)!.onmessage?.({data:JSON.stringify(current)})})
+  await click(byText('联锁控制'))
+  assert.equal(byText('打开插板阀').disabled,false)
+  assert.equal(byText('关闭插板阀').disabled,false)
+  await click(byText('打开插板阀'))
+  await click(byText('关闭插板阀'))
+  assert.deepEqual(requests,['/api/valve/open','/api/valve/close'])
+})
+
 test('pressure recovery mode is selectable and saved without touching hardware settings',async()=>{
   const original=globalThis.fetch
   let saved:Record<string,unknown>|null=null
